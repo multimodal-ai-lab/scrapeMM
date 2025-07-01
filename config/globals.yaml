@@ -1,0 +1,7 @@
+x_bearer: ""
+
+telegram_api_id:
+telegram_api_hash: ""
+telegram_bot_token: ""
+
+firecrawl_url: "http://localhost:3002"
