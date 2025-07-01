@@ -65,4 +65,3 @@ async def _retrieve_single(url: str, remove_urls: bool,
     except Exception as e:
         logger.error(f"Error while retrieving URL '{url}'.\n"
                      f"{type(e).__name__}: {e}")
-        raise  # TODO: Remove

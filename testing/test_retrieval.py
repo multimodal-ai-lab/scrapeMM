@@ -12,7 +12,6 @@ urls = [
     "https://www.washingtonpost.com/politics/2024/05/15/bidens-false-claim-that-inflation-was-9-percent-when-he-took-office/",
     "https://assamese.factcrescendo.com/viral-claim-that-the-video-shows-the-incident-from-uttar-pradesh-and-the-youth-on-the-bike-and-the-youth-being-beaten-and-taken-away-by-the-police-are-the-same-youth-named-abdul-is-false/",
     "https://factuel.afp.com/doc.afp.com.43ZN7NP",
-    "https://i.ytimg.com/vi/4OhACDLcOoY/hqdefault.jpg?sqp=-oaymwEmCKgBEF5IWvKriqkDGQgBFQAAiEIYAdgBAeIBCggYEAIYBjgBQAE=&rs=AOn4CLCXFo0dMvTXmBS0CjzhG4SbckkomQ",
     "https://x.com/PopBase/status/1938496291908030484",
     "https://t.me/durov/404"
 ]
