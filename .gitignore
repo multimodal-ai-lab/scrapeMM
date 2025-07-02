@@ -1,5 +1,5 @@
 /temp/
-/config/globals.yaml
 /.idea/
 /scrapeMM.egg-info/
 /dist/
+/config.yaml

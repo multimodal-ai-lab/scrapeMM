@@ -19,6 +19,8 @@ async def retrieve(urls: str | list[str], remove_urls: bool = True) -> Optional[
     :param urls: The URL(s) to retrieve.
     :param remove_urls: Whether to remove URLs from hyperlinks contained in the
         retrieved text (and only keep the hypertext).
+    TODO: Add ability to suppress progress bar.
+    TODO: Add ability to navigate the webpage
     """
 
     async with aiohttp.ClientSession() as session:

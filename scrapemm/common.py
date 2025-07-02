@@ -2,6 +2,8 @@ import logging
 import sys
 from pathlib import Path
 
+import yaml
+
 from scrapemm.util import get_domain
 
 logger = logging.getLogger("Retriever")
@@ -26,5 +28,15 @@ def read_urls_from_file(file_path):
         return f.read().splitlines()
 
 
+def save_to_config(dictionary: dict):
+    config.update(dictionary)
+    yaml.dump(config, open(CONFIG_PATH, "w"))
+
+
 no_bot_domains_file = Path(__file__).parent / "no_bot_domains.txt"
 no_bot_domains = read_urls_from_file(no_bot_domains_file)
+
+PROJECT_ROOT = Path(__file__).parent.parent
+CONFIG_PATH = PROJECT_ROOT / "config.yaml"
+config = yaml.safe_load(open(CONFIG_PATH))
+firecrawl_url = config.get("firecrawl_url")
