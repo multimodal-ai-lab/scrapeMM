@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 
-from util import get_domain
+from scrapemm.util import get_domain
 import logging
 
 logger = logging.getLogger("Retriever")

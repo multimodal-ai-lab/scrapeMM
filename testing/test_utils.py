@@ -1,6 +1,6 @@
 import pytest
 
-from scraping.util import get_markdown_hyperlinks
+from scrapemm.scraping.util import get_markdown_hyperlinks
 
 
 @pytest.mark.parametrize("input,target",

@@ -9,8 +9,8 @@ from tweepy import Tweet
 from tweepy.asynchronous import AsyncClient
 
 from config import x_bearer_token
-from integrations.base import RetrievalIntegration
-from util import get_domain
+from scrapemm.integrations.base import RetrievalIntegration
+from scrapemm.util import get_domain
 
 
 class X(RetrievalIntegration):

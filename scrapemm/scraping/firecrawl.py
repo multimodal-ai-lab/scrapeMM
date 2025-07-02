@@ -6,7 +6,7 @@ import requests
 from ezmm import MultimodalSequence
 
 from config import firecrawl_url
-from scraping.util import find_firecrawl, to_multimodal_sequence
+from scrapemm.scraping.util import find_firecrawl, to_multimodal_sequence
 
 logger = logging.getLogger("Retriever")
 

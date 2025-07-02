@@ -5,10 +5,10 @@ from typing import Optional
 import aiohttp
 from ezmm import MultimodalSequence
 
-from common import is_unsupported_site
-from util import run_with_semaphore
-from integrations import retrieve_via_integration
-from scraping.firecrawl import firecrawl
+from scrapemm.common import is_unsupported_site
+from scrapemm.util import run_with_semaphore
+from scrapemm.integrations import retrieve_via_integration
+from scrapemm.scraping.firecrawl import firecrawl
 
 
 logger = logging.getLogger("Retriever")

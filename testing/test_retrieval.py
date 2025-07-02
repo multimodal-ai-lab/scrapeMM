@@ -1,6 +1,6 @@
 import pytest
 
-from retrieval import retrieve
+from scrapemm import retrieve
 
 urls = [
     "https://www.zeit.de/politik/deutschland/2025-07/spionage-iran-festnahme-anschlag-juden-berlin-daenemark",

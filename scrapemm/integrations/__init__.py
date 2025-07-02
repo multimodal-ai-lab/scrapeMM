@@ -3,7 +3,7 @@ from typing import Optional
 import aiohttp
 from ezmm import MultimodalSequence
 
-from util import get_domain
+from scrapemm.util import get_domain
 from .telegram import Telegram
 from .x import X
 

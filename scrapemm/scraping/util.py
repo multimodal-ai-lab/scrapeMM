@@ -1,16 +1,13 @@
-import re
 from typing import Optional
 
 import aiohttp
 import requests
-from bs4 import BeautifulSoup
 from ezmm import MultimodalSequence, download_item, Item, Image, Video
-from markdownify import markdownify as md, BACKSLASH
+from markdownify import markdownify as md
 import re
 import base64
-from io import BytesIO
 
-from util import run_with_semaphore
+from scrapemm.util import run_with_semaphore
 
 MAX_MEDIA_PER_PAGE = 32
 

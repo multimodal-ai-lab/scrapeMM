@@ -9,8 +9,8 @@ from telethon import TelegramClient
 from telethon.tl.types import Channel, User
 
 from config import telegram_api_id, telegram_api_hash, telegram_bot_token
-from integrations.base import RetrievalIntegration
-from util import get_domain
+from scrapemm.integrations.base import RetrievalIntegration
+from scrapemm.util import get_domain
 
 logger = logging.getLogger("Retriever")
 
