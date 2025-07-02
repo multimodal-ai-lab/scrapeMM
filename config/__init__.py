@@ -1,12 +1,8 @@
 import yaml
 
-globals = yaml.safe_load(open("config/globals.yaml"))
+GLOBALS_PATH = "config/globals.yaml"
 
-x_bearer_token = globals.get("x_bearer")
+global_vars = yaml.safe_load(open(GLOBALS_PATH))
 
-telegram_api_id = globals.get("telegram_api_id")
-telegram_api_hash = globals.get("telegram_api_hash")
-telegram_bot_token = globals.get("telegram_bot_token")
-
-firecrawl_url = globals.get("firecrawl_url")
-
+def save_globals():
+    yaml.dump(global_vars, open(GLOBALS_PATH, "w"))

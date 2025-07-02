@@ -4,7 +4,6 @@ from typing import Optional
 import aiohttp
 from ezmm import MultimodalSequence
 
-from scrapemm.common import is_unsupported_site
 from scrapemm.integrations import retrieve_via_integration
 from scrapemm.scraping.firecrawl import firecrawl
 from scrapemm.util import run_with_semaphore
@@ -51,10 +50,6 @@ async def _retrieve_single(url: str, remove_urls: bool,
     try:
         # Ensure URL is a string
         url = str(url)
-
-        # Skip URLs from domains that are not supported
-        if is_unsupported_site(url):
-            return None
 
         # First, try to use a matching API, otherwise scrape directly
         return ((await retrieve_via_integration(url, session)) or

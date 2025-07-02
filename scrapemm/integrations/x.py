@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import re
 from typing import Optional
 from urllib.parse import urlparse
@@ -8,9 +9,11 @@ from ezmm import MultimodalSequence, download_video, download_image
 from tweepy import Tweet
 from tweepy.asynchronous import AsyncClient
 
-from config import x_bearer_token
+from scrapemm.api_keys import get_api_key
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.util import get_domain
+
+logger = logging.getLogger("Retriever")
 
 
 class X(RetrievalIntegration):
@@ -35,8 +38,13 @@ class X(RetrievalIntegration):
     The "location" of a user profile is a user-provided string and is not guaranteed to be accurate."""
 
     def __init__(self):
-        if not x_bearer_token: raise ValueError("No X bearer token provided. Add it to config/secrets.yaml")
-        self.client = AsyncClient(bearer_token=x_bearer_token)
+        bearer_token = get_api_key("x_bearer_token")
+        if bearer_token:
+            self.client = AsyncClient(bearer_token=bearer_token)
+            self.connected = True
+            logger.info("✅ Successfully connected to X.")
+        else:
+            logger.warning("❌ X (Twitter) integration not configured: Missing bearer token.")
 
     async def get(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
         assert get_domain(url) in self.domains

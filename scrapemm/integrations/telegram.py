@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from typing import Optional
 from urllib.parse import urlparse
@@ -8,7 +7,7 @@ from ezmm import MultimodalSequence, Image, Item, Video
 from telethon import TelegramClient
 from telethon.tl.types import Channel, User
 
-from config import telegram_api_id, telegram_api_hash, telegram_bot_token
+from scrapemm.api_keys import get_api_key
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.util import get_domain
 
@@ -22,12 +21,17 @@ class Telegram(RetrievalIntegration):
     session_path = "temp/telegram"
 
     def __init__(self):
-        self.api_id = telegram_api_id
-        self.api_hash = telegram_api_hash
+        api_id = int(get_api_key("telegram_api_id"))
+        api_hash = get_api_key("telegram_api_hash")
+        bot_token = get_api_key("telegram_bot_token")
 
-        self.client = TelegramClient(self.session_path, self.api_id, self.api_hash)
-        self.client.start(bot_token=telegram_bot_token)
-        logger.info("✅ Successfully connected to Telegram...")
+        if api_id and api_hash and bot_token:
+            self.client = TelegramClient(self.session_path, api_id, api_hash)
+            self.client.start(bot_token=bot_token)
+            self.connected = True
+            logger.info("✅ Successfully connected to Telegram.")
+        else:
+            logger.warning("❌ Telegram integration not configured: Missing API keys.")
 
     async def get(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
         """Retrieves content from a Telegram post URL."""

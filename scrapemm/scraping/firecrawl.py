@@ -5,13 +5,14 @@ import aiohttp
 import requests
 from ezmm import MultimodalSequence
 
-from config import firecrawl_url
+from config import global_vars
+from scrapemm.common import is_no_bot_site
 from scrapemm.scraping.util import find_firecrawl, to_multimodal_sequence
 
 logger = logging.getLogger("Retriever")
 
 FIRECRAWL_URLS = [
-    firecrawl_url,
+    global_vars["firecrawl_url"],
     "http://localhost:3002",
     "http://firecrawl:3002",
     "http://0.0.0.0:3002",
@@ -36,7 +37,7 @@ class Firecrawl:
         if self.firecrawl_url:
             logger.info(f"✅ Detected Firecrawl running at {self.firecrawl_url}.")
         else:
-            logger.warning(f"❌ Unable to locate Firecrawl! It is not running at: {firecrawl_url}")
+            logger.warning(f"❌ Unable to locate Firecrawl! It is not running at: {global_vars['firecrawl_url']}")
 
     async def scrape(self, url: str,
                      remove_urls: bool,
@@ -44,6 +45,11 @@ class Firecrawl:
         """Downloads the contents of the specified webpages dynamically or statically.
         Resolves up to MAX_MEDIA_PER_PAGE image URLs and replaces them with their
         respective reference."""
+
+        # Skip URLs from domains that are not supported
+        if is_no_bot_site(url):
+            return None
+
         html = await self._call_firecrawl(url, session)
         if html:
             return await to_multimodal_sequence(html, remove_urls=remove_urls, session=session)

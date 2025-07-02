@@ -7,6 +7,7 @@ class RetrievalIntegration:
     direct URL scraping is not possible."""
 
     domains: list[str]  # The domains supported by this integration
+    connected: bool = False
 
     async def get(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence:
         """Retrieves the contents present at the given URL."""

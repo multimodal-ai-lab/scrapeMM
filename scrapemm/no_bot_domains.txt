@@ -8,3 +8,8 @@ microsoft.com
 researchhub.com
 pinterest.com
 irs.gov
+t.me
+telegram.me
+twitter.com
+x.com
+t.co

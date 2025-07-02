@@ -10,7 +10,8 @@ from .x import X
 RETRIEVAL_INTEGRATIONS = [X(), Telegram()]
 DOMAIN_TO_INTEGRATION = {domain: integration
                          for integration in RETRIEVAL_INTEGRATIONS
-                         for domain in integration.domains}
+                         for domain in integration.domains
+                         if integration.connected}
 
 
 async def retrieve_via_integration(url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:

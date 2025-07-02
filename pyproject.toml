@@ -1,6 +1,6 @@
 [project]
 name = "scrapeMM"
-version = "0.1.0"
+version = "0.1.1"
 description = "LLM-friendly scraper for media and text from social media and the open web."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -10,7 +10,8 @@ dependencies = [
     "ezmm",
     "telethon",
     "tweepy",
-    "markdownify"
+    "markdownify",
+    "keyring"
 ]
 
 [project.urls]

@@ -1,8 +1,8 @@
+import logging
 import sys
 from pathlib import Path
 
 from scrapemm.util import get_domain
-import logging
 
 logger = logging.getLogger("Retriever")
 logger.setLevel(logging.DEBUG)
@@ -15,10 +15,10 @@ if not logger.hasHandlers():
     logger.addHandler(handler)
 
 
-def is_unsupported_site(url: str) -> bool:
+def is_no_bot_site(url: str) -> bool:
     """Checks if the URL belongs to a known unsupported website."""
     domain = get_domain(url)
-    return domain is None or domain.endswith(".gov") or domain in unsupported_domains
+    return domain is None or domain.endswith(".gov") or domain in no_bot_domains
 
 
 def read_urls_from_file(file_path):
@@ -26,5 +26,5 @@ def read_urls_from_file(file_path):
         return f.read().splitlines()
 
 
-unsupported_domains_file = Path(__file__).parent / "unsupported_domains.txt"
-unsupported_domains = read_urls_from_file(unsupported_domains_file)
+no_bot_domains_file = Path(__file__).parent / "no_bot_domains.txt"
+no_bot_domains = read_urls_from_file(no_bot_domains_file)
