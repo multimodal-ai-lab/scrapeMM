@@ -24,16 +24,14 @@ class Telegram(RetrievalIntegration):
     def __init__(self):
         self.api_id = telegram_api_id
         self.api_hash = telegram_api_hash
+
         self.client = TelegramClient(self.session_path, self.api_id, self.api_hash)
+        self.client.start(bot_token=telegram_bot_token)
+        logger.info("✅ Successfully connected to Telegram...")
 
     async def get(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
         """Retrieves content from a Telegram post URL."""
         assert get_domain(url) in self.domains
-
-        if not self.client.is_connected():
-            logger.info("Connecting to Telegram...")
-            await self.client.start(bot_token=telegram_bot_token)
-            logger.info("✅ Successfully connected to Telegram...")
 
         # Parse the URL to get channel/group name and post ID
         parsed = urlparse(url)
@@ -113,29 +111,14 @@ Forwards: {message.forwards}{reactions_text}
         for post in posts:
             if post is not None and post.grouped_id == original_post.grouped_id:
                 if medium := post.media:
+                    post_url = f"https://t.me/{chat.username}/{post.id}"
                     medium_bytes = await self.client.download_media(post, file=bytes)
                     if hasattr(medium, "photo"):
-                        item = Image(binary_data=medium_bytes)
+                        item = Image(binary_data=medium_bytes, source_url=post_url)
                     elif hasattr(medium, "video"):
-                        item = Video(binary_data=medium_bytes)
+                        item = Video(binary_data=medium_bytes, source_url=post_url)
                     else:
                         raise ValueError(f"Unsupported medium: {medium.__dict__}")
                     media.append(item)
 
         return media
-
-
-if __name__ == "__main__":
-    urls = [
-        "https://t.me/durov/404",  # one image
-        "https://t.me/tglobaleye/16172",  # multiple images
-        "https://t.me/tglobaleye/16178",  # video and quote
-        "https://t.me/tglobaleye/6289",  # gif (treated as video)
-        "https://t.me/tglobaleye/16192",  # images and video
-    ]
-
-    telegram = Telegram()
-    for url in urls:
-        task = telegram.get(url)
-        out = asyncio.run(task)
-        print(out, end="\n\n")

@@ -1,7 +1,16 @@
-# Multimodal Web Retrieval
-Utilities to asynchronously scrape webpages and access social media, supporting text, images, and videos.
+# scrapeMM: Multimodal Web Retrieval
+Simple web scraper to asynchronously retrieve webpages and access social media contents, fetching text along with media, i.e., images and videos.
 
-This library aims to help developers and researchers to easily access multimodal data from the web.
+This library aims to help developers and researchers to easily access multimodal data from the web and use it for LLM processing.
+
+## Usage
+```python
+from scrapemm import retrieve
+
+url = "https://example.com"
+result = retrieve(url)
+result.render()
+```
 
 ## How it works
 ```
@@ -18,3 +27,4 @@ Web scraping is done with [Firecrawl](https://github.com/mendableai/firecrawl).
 - ⏳ Facebook
 - ⏳ Instagram
 - ⏳ Threads
+- ⏳ TikTok

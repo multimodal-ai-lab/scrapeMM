@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from typing import Optional
 
@@ -6,10 +5,9 @@ import aiohttp
 from ezmm import MultimodalSequence
 
 from scrapemm.common import is_unsupported_site
-from scrapemm.util import run_with_semaphore
 from scrapemm.integrations import retrieve_via_integration
 from scrapemm.scraping.firecrawl import firecrawl
-
+from scrapemm.util import run_with_semaphore
 
 logger = logging.getLogger("Retriever")
 
