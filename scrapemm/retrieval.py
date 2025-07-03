@@ -8,7 +8,7 @@ from scrapemm.integrations import retrieve_via_integration
 from scrapemm.scraping.firecrawl import firecrawl
 from scrapemm.util import run_with_semaphore
 
-logger = logging.getLogger("Retriever")
+logger = logging.getLogger("scrapeMM")
 
 
 async def retrieve(urls: str | list[str], remove_urls: bool = True) -> Optional[MultimodalSequence] | list[Optional[MultimodalSequence]]:

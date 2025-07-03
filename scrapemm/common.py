@@ -1,12 +1,17 @@
 import logging
+import os
 import sys
 from pathlib import Path
+from platformdirs import user_config_dir
 
 import yaml
 
 from scrapemm.util import get_domain
 
-logger = logging.getLogger("Retriever")
+APP_NAME = "scrapeMM"
+
+# Set up logger
+logger = logging.getLogger(APP_NAME)
 logger.setLevel(logging.DEBUG)
 
 # Only add handler if none exists (avoid duplicate logs on rerun)
@@ -15,6 +20,19 @@ if not logger.hasHandlers():
     formatter = logging.Formatter('[%(levelname)s]: %(message)s')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+
+# Set up config directory
+CONFIG_DIR = Path(user_config_dir(APP_NAME))
+os.makedirs(CONFIG_DIR, exist_ok=True)
+CONFIG_PATH = CONFIG_DIR / "config.yaml"
+
+
+def load_config() -> dict:
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, "r") as f:
+            return yaml.safe_load(f) or {}
+    else:
+        return {}
 
 
 def is_no_bot_site(url: str) -> bool:
@@ -28,15 +46,17 @@ def read_urls_from_file(file_path):
         return f.read().splitlines()
 
 
-def save_to_config(dictionary: dict):
-    config.update(dictionary)
-    yaml.dump(config, open(CONFIG_PATH, "w"))
+def update_config(**kwargs):
+    _config.update(kwargs)
+    yaml.dump(_config, open(CONFIG_PATH, "w"))
 
+
+def get_config_var(name: str, default=None) -> str:
+    return _config.get(name, default)
+
+
+# Load config
+_config = load_config()
 
 no_bot_domains_file = Path(__file__).parent / "no_bot_domains.txt"
 no_bot_domains = read_urls_from_file(no_bot_domains_file)
-
-PROJECT_ROOT = Path(__file__).parent.parent
-CONFIG_PATH = PROJECT_ROOT / "config.yaml"
-config = yaml.safe_load(open(CONFIG_PATH))
-firecrawl_url = config.get("firecrawl_url")

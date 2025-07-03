@@ -5,9 +5,8 @@ import sys
 from typing import Optional, Awaitable, Iterable
 
 import tqdm
-from pydantic import HttpUrl
 
-logger = logging.getLogger("Retriever")
+logger = logging.getLogger("scrapeMM")
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -18,7 +17,7 @@ HEADERS = {
 DOMAIN_REGEX = r"(?:https?:\/\/)?(?:www\.)?([-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6})/?"
 
 
-def get_domain(url: str | HttpUrl, keep_subdomain: bool = False) -> Optional[str]:
+def get_domain(url: str, keep_subdomain: bool = False) -> Optional[str]:
     """Uses regex to get out the domain from the given URL. The output will be
     of the form 'example.com'. No 'www', no 'http'."""
     url = str(url)

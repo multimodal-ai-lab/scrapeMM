@@ -3,7 +3,7 @@ from typing import Optional
 
 import keyring
 
-from scrapemm.common import config, save_to_config
+from scrapemm.common import get_config_var, update_config, APP_NAME, CONFIG_PATH
 
 API_KEYS = {
     "x_bearer_token": "Bearer token of X (Twitter)",
@@ -11,7 +11,7 @@ API_KEYS = {
     "telegram_api_hash": "Telegram API hash",
     "telegram_bot_token": "Telegram bot token",
 }
-KEYRING_SERVICE_NAME = "scrapemm"
+KEYRING_SERVICE_NAME = APP_NAME
 
 
 def configure_api_keys(all_keys: bool = False):
@@ -27,11 +27,12 @@ def configure_api_keys(all_keys: bool = False):
             if user_input:
                 keyring.set_password(KEYRING_SERVICE_NAME, key_name, user_input)
 
-    save_to_config(dict(api_keys_configured=True))
+    update_config(api_keys_configured=True)
 
     if prompted:
         print("API keys configured successfully! If you want to change them, go to "
-              "config/api_keys.yaml and set 'api_keys_configured' to 'false'.")
+              f"{CONFIG_PATH.as_posix()} and set 'api_keys_configured' to 'false' or "
+              f"run scrapemm.api_keys.configure_api_keys().")
 
 
 def get_api_key(key_name: str) -> Optional[str]:
@@ -39,5 +40,5 @@ def get_api_key(key_name: str) -> Optional[str]:
     return keyring.get_password(KEYRING_SERVICE_NAME, key_name)
 
 
-if not config.get("api_keys_configured"):
+if not get_config_var("api_keys_configured"):
     configure_api_keys()

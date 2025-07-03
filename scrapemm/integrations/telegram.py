@@ -11,7 +11,7 @@ from scrapemm.api_keys import get_api_key
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.util import get_domain
 
-logger = logging.getLogger("Retriever")
+logger = logging.getLogger("scrapeMM")
 
 
 class Telegram(RetrievalIntegration):

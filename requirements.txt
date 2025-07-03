@@ -1,14 +1,8 @@
 pytest~=8.4.1
 aiohttp~=3.12.13
-opencv-python~=4.9.0.80
 numpy~=1.26.4
-pillow~=11.2.1
-pillow-avif-plugin
-pydantic~=2.11.7
 requests~=2.32.4
-beautifulsoup4~=4.12.3
 ezMM~=0.3.1
-veritas~=0.1.12
 Telethon~=1.40.0
 PyYAML~=6.0.1
 tweepy~=4.16.0
@@ -18,3 +12,4 @@ pytest-asyncio
 keyring~=25.6.0
 async_lru
 oauthlib
+platformdirs~=4.3.8

@@ -23,8 +23,10 @@ def find_firecrawl(urls):
     return None
 
 
-def firecrawl_is_running(url):
+def firecrawl_is_running(url: str) -> bool:
     """Returns True iff Firecrawl is running at the specified URL."""
+    if not url:
+        return False
     try:
         response = requests.get(url, timeout=0.1)
     except (requests.exceptions.ConnectionError, requests.exceptions.RetryError):
@@ -102,13 +104,6 @@ def is_url(href: str) -> bool:
 def is_data_uri(href: str) -> bool:
     """Returns True iff the given string is a valid data URI."""
     return re.match(DATA_URI_REGEX, href) is not None
-
-
-# def md(soup, **kwargs):
-#     """Converts a BeautifulSoup object into Markdown."""
-#     if soup is None:
-#         return None
-#     return MarkdownConverter(**kwargs).convert_soup(soup)
 
 
 def get_markdown_hyperlinks(text: str) -> list[tuple[str, str, str]]:

@@ -5,13 +5,13 @@ import aiohttp
 import requests
 from ezmm import MultimodalSequence
 
-from scrapemm.common import is_no_bot_site, firecrawl_url
-from scrapemm.scraping.util import find_firecrawl, to_multimodal_sequence
+from scrapemm.common import is_no_bot_site, get_config_var, update_config
+from scrapemm.scraping.util import find_firecrawl, to_multimodal_sequence, firecrawl_is_running
 
-logger = logging.getLogger("Retriever")
+logger = logging.getLogger("scrapeMM")
 
 FIRECRAWL_URLS = [
-    firecrawl_url,
+    get_config_var("firecrawl_url"),
     "http://localhost:3002",
     "http://firecrawl:3002",
     "http://0.0.0.0:3002",
@@ -23,7 +23,7 @@ class Firecrawl:
     requiring an API and the API integration is implemented (e.g. X, Reddit etc.), the
     respective API will be used instead of direct HTTP requests."""
 
-    firecrawl_url: Optional[str]
+    firecrawl_url: str
 
     def __init__(self):
         self.locate_firecrawl()
@@ -32,11 +32,20 @@ class Firecrawl:
     def locate_firecrawl(self):
         """Scans a list of URLs (included the user-specified one) to find a
         running Firecrawl instance."""
-        self.firecrawl_url = find_firecrawl(FIRECRAWL_URLS)
-        if self.firecrawl_url:
-            logger.info(f"✅ Detected Firecrawl running at {self.firecrawl_url}.")
-        else:
-            logger.warning(f"❌ Unable to locate Firecrawl! It is not running at: {firecrawl_url}")
+        firecrawl_url = find_firecrawl(FIRECRAWL_URLS)
+        while not firecrawl_url:
+            firecrawl_url = input(f"❌ Unable to locate Firecrawl! It is not running "
+                                  f"at: {get_config_var('firecrawl_url')}\n"
+                                  f"Please enter the URL of your Firecrawl instance: ")
+            if firecrawl_url:
+                firecrawl_url = firecrawl_url.strip()
+                update_config(firecrawl_url=firecrawl_url)
+
+            if not firecrawl_is_running(firecrawl_url):
+                firecrawl_url = None
+
+        self.firecrawl_url = firecrawl_url
+        logger.info(f"✅ Detected Firecrawl running at {self.firecrawl_url}.")
 
     async def scrape(self, url: str,
                      remove_urls: bool,
