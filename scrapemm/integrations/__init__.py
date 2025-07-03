@@ -4,10 +4,11 @@ import aiohttp
 from ezmm import MultimodalSequence
 
 from scrapemm.util import get_domain
+from .bluesky import Bluesky
 from .telegram import Telegram
 from .x import X
 
-RETRIEVAL_INTEGRATIONS = [X(), Telegram()]
+RETRIEVAL_INTEGRATIONS = [X(), Telegram(), Bluesky()]
 DOMAIN_TO_INTEGRATION = {domain: integration
                          for integration in RETRIEVAL_INTEGRATIONS
                          for domain in integration.domains
