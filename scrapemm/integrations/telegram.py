@@ -21,7 +21,7 @@ class Telegram(RetrievalIntegration):
     session_path = "temp/telegram"
 
     def __init__(self):
-        api_id = int(get_api_key("telegram_api_id"))
+        api_id = int(get_api_key("telegram_api_id")) if get_api_key("telegram_api_id") else None
         api_hash = get_api_key("telegram_api_hash")
         bot_token = get_api_key("telegram_bot_token")
 
