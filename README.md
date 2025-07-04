@@ -25,7 +25,7 @@ Web scraping is done with [Firecrawl](https://github.com/mendableai/firecrawl).
 - ✅ X/Twitter
 - ✅ Telegram
 - ✅ Bluesky
+- ✅ TikTok
 - ⏳ Facebook
 - ⏳ Instagram
 - ⏳ Threads
-- ⏳ TikTok
