@@ -66,3 +66,8 @@ async def run_with_semaphore(tasks: Iterable[Awaitable],
         progress.close()
 
     return await asyncio.gather(*tasks)
+
+
+def read_urls_from_file(file_path):
+    with open(file_path, 'r') as f:
+        return f.read().splitlines()

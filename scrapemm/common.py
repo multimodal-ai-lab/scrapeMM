@@ -6,8 +6,6 @@ from platformdirs import user_config_dir
 
 import yaml
 
-from scrapemm.util import get_domain
-
 APP_NAME = "scrapeMM"
 
 # Set up logger
@@ -35,17 +33,6 @@ def load_config() -> dict:
         return {}
 
 
-def is_no_bot_site(url: str) -> bool:
-    """Checks if the URL belongs to a known unsupported website."""
-    domain = get_domain(url)
-    return domain is None or domain.endswith(".gov") or domain in no_bot_domains
-
-
-def read_urls_from_file(file_path):
-    with open(file_path, 'r') as f:
-        return f.read().splitlines()
-
-
 def update_config(**kwargs):
     _config.update(kwargs)
     yaml.dump(_config, open(CONFIG_PATH, "w"))
@@ -57,6 +44,3 @@ def get_config_var(name: str, default=None) -> str:
 
 # Load config
 _config = load_config()
-
-no_bot_domains_file = Path(__file__).parent / "no_bot_domains.txt"
-no_bot_domains = read_urls_from_file(no_bot_domains_file)

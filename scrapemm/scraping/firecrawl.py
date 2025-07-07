@@ -1,11 +1,13 @@
 import logging
+from pathlib import Path
 from typing import Optional
 
 import aiohttp
 import requests
 from ezmm import MultimodalSequence
 
-from scrapemm.common import is_no_bot_site, get_config_var, update_config
+from scrapemm.common import get_config_var, update_config
+from scrapemm.util import read_urls_from_file, get_domain
 from scrapemm.scraping.util import find_firecrawl, to_multimodal_sequence, firecrawl_is_running
 
 logger = logging.getLogger("scrapeMM")
@@ -16,6 +18,9 @@ FIRECRAWL_URLS = [
     "http://firecrawl:3002",
     "http://0.0.0.0:3002",
 ]
+
+NO_BOT_DOMAINS_FILE_PATH = Path(__file__).parent / "no_bot_domains.txt"
+NO_BOT_DOMAINS = read_urls_from_file(NO_BOT_DOMAINS_FILE_PATH)
 
 
 class Firecrawl:
@@ -138,3 +143,9 @@ class Firecrawl:
 
 
 firecrawl = Firecrawl()
+
+
+def is_no_bot_site(url: str) -> bool:
+    """Checks if the URL belongs to a known unsupported website."""
+    domain = get_domain(url)
+    return domain is None or domain.endswith(".gov") or domain in NO_BOT_DOMAINS

@@ -17,17 +17,17 @@ dependencies = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/multimodal-ai-lab/scrapeMM"
-"Bug Tracker" = "https://github.com/multimodal-ai-lab/scrapeMM"
+Homepage = "https://github.com/multimodal-ai-lab/scrapeMM"
+Issues = "https://github.com/multimodal-ai-lab/scrapeMM"
 
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=60", "setuptools-scm>=8.0"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-include-package-data = true
-
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["scrapemm*"]
-exclude = ["*.egg-info", "tests*", "in*", "scripts*", "temp*", "config.yaml", "dist*"]
+namespaces = false  # Disable implicit namespaces
+# include = ["scrapemm/*"]
+# exclude = ["*.egg-info", "tests*", "in*", "scripts*", "temp*", "secrets.yaml", "dist*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.txt"]  # Include all .txt files contained in any (sub)package in the build
