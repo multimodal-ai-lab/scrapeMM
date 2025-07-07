@@ -10,6 +10,10 @@ API_KEYS = {
     "telegram_api_id": "Telegram API ID",
     "telegram_api_hash": "Telegram API hash",
     "telegram_bot_token": "Telegram bot token",
+    "bluesky_username": "Bluesky username",
+    "bluesky_password": "Bluesky password",
+    "tiktok_client_key": "TikTok client key",
+    "tiktok_client_secret": "TikTok client secret",
 }
 KEYRING_SERVICE_NAME = APP_NAME
 
