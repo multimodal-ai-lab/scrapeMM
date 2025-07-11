@@ -6,11 +6,15 @@ This library aims to help developers and researchers to easily access multimodal
 ## Usage
 ```python
 from scrapemm import retrieve
+import asyncio
 
 url = "https://example.com"
-result = retrieve(url)
+loop = asyncio.get_event_loop()
+result = loop.run_until_complete(retrieve(url))
 result.render()
 ```
+`scrapeMM` will ask you for the **API keys** needed for the social media integrations. You may skip them if you don't need them. 
+You will also be prompted to choose a **password** that is used to secure the secrets in an encrypted file.
 
 ## How it works
 ```
@@ -26,6 +30,7 @@ Web scraping is done with [Firecrawl](https://github.com/mendableai/firecrawl).
 - ✅ Telegram
 - ✅ Bluesky
 - ✅ TikTok
+- ⏳ Threads
+- ⏳ Reddit
 - ⏳ Facebook
 - ⏳ Instagram
-- ⏳ Threads

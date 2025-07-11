@@ -1,3 +1,8 @@
+import logging
+
+logger = logging.getLogger("scrapeMM")
+logger.debug("Starting integrations...")
+
 from typing import Optional
 
 import aiohttp

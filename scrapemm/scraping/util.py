@@ -2,6 +2,7 @@ from typing import Optional
 
 import aiohttp
 import requests
+from requests.exceptions import ReadTimeout, ConnectionError, RetryError
 from ezmm import MultimodalSequence, download_item, Item, Image, Video
 from markdownify import markdownify as md
 import re
@@ -28,8 +29,10 @@ def firecrawl_is_running(url: str) -> bool:
     if not url:
         return False
     try:
-        response = requests.get(url, timeout=0.1)
-    except (requests.exceptions.ConnectionError, requests.exceptions.RetryError):
+        if not url.startswith("http"):
+            url = "https://" + url
+        response = requests.get(url, timeout=0.2)
+    except (ConnectionError, RetryError, ReadTimeout):
         return False
     return response.status_code == 200
 

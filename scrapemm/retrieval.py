@@ -11,7 +11,8 @@ from scrapemm.util import run_with_semaphore
 logger = logging.getLogger("scrapeMM")
 
 
-async def retrieve(urls: str | list[str], remove_urls: bool = True) -> Optional[MultimodalSequence] | list[Optional[MultimodalSequence]]:
+async def retrieve(urls: str | list[str], remove_urls: bool = True,
+                   show_progress: bool = True) -> Optional[MultimodalSequence] | list[Optional[MultimodalSequence]]:
     """Main function of this repository. Downloads the contents present at the given URL(s).
     For each URL, returns a MultimodalSequence containing text, images, and videos.
     Returns None if the corresponding URL is not supported or if retrieval failed.
@@ -28,15 +29,17 @@ async def retrieve(urls: str | list[str], remove_urls: bool = True) -> Optional[
             return await _retrieve_single(urls, remove_urls, session)
 
         elif isinstance(urls, list):
-            if len(urls) == 1:
-                return await _retrieve_single(urls[0], remove_urls, session)
+            if len(urls) == 0:
+                return []
+            elif len(urls) == 1:
+                return [await _retrieve_single(urls[0], remove_urls, session)]
 
             # Remove duplicates
             urls_unique = set(urls)
 
             # Retrieve URLs concurrently
             tasks = [_retrieve_single(url, remove_urls, session) for url in urls_unique]
-            results = await run_with_semaphore(tasks, limit=20, show_progress=True,
+            results = await run_with_semaphore(tasks, limit=20, show_progress=show_progress,
                                                progress_description="Retrieving URLs...")
 
             # Reconstruct output list

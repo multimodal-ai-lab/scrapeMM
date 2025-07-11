@@ -13,11 +13,12 @@ from scrapemm.scraping.util import find_firecrawl, to_multimodal_sequence, firec
 logger = logging.getLogger("scrapeMM")
 
 FIRECRAWL_URLS = [
-    get_config_var("firecrawl_url"),
     "http://localhost:3002",
     "http://firecrawl:3002",
     "http://0.0.0.0:3002",
 ]
+if config_url := get_config_var("firecrawl_url"):
+    FIRECRAWL_URLS = [config_url] + FIRECRAWL_URLS
 
 NO_BOT_DOMAINS_FILE_PATH = Path(__file__).parent / "no_bot_domains.txt"
 NO_BOT_DOMAINS = read_urls_from_file(NO_BOT_DOMAINS_FILE_PATH)
@@ -39,11 +40,16 @@ class Firecrawl:
         running Firecrawl instance."""
         firecrawl_url = find_firecrawl(FIRECRAWL_URLS)
         while not firecrawl_url:
+            current_url = get_config_var("firecrawl_url") or "any of " + ", ".join(FIRECRAWL_URLS)
             firecrawl_url = input(f"❌ Unable to locate Firecrawl! It is not running "
-                                  f"at: {get_config_var('firecrawl_url')}\n"
+                                  f"at {current_url}\n"
                                   f"Please enter the URL of your Firecrawl instance: ")
             if firecrawl_url:
+                # Post-process input
                 firecrawl_url = firecrawl_url.strip()
+                if not firecrawl_url.startswith("http"):
+                    firecrawl_url = "https://" + firecrawl_url
+
                 update_config(firecrawl_url=firecrawl_url)
 
             if not firecrawl_is_running(firecrawl_url):

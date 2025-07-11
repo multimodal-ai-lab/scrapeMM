@@ -33,5 +33,18 @@ async def test_telegram_retrieval():
         "https://t.me/tglobaleye/16192",  # Images and video
     ]
     results = await retrieve(urls)
+    print(results)
+    assert len(results) == len(urls)
+    assert all(results)
+
+
+@pytest.mark.asyncio
+async def test_tiktok_retrieval():
+    urls = [
+        "https://www.tiktok.com/@realdonaldtrump/video/7433870905635409198",
+        "https://www.tiktok.com/@xxxx.xxxx5743/video/7521704371109793046"
+    ]
+    results = await retrieve(urls)
+    print(results)
     assert len(results) == len(urls)
     assert all(results)

@@ -15,7 +15,7 @@ from ezmm.common.items import Video, Image
 
 from tiktok_research_api import TikTokResearchAPI, QueryVideoRequest, QueryUserInfoRequest, Criteria, Query
 
-from scrapemm.api_keys import get_api_key
+from scrapemm.secrets import get_secret
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.util import get_domain
 
@@ -27,15 +27,16 @@ class TikTok(RetrievalIntegration):
     
     Works in two modes:
     1. API mode: Uses TikTok Research API for comprehensive metadata (requires credentials)
-    2. Fallback mode: Uses yt-dlp for basic metadata and video download (no credentials needed)
+    2. Fallback mode: Uses yt-dlp (https://github.com/yt-dlp/yt-dlp?tab=readme-ov-file) for basic metadata and
+        ideo download (no credentials needed, but may violate TikTok's Terms of Service)
     """
 
     domains = ["tiktok.com", "vm.tiktok.com"]
 
     def __init__(self):
         # Try to initialize TikTok Research API
-        client_key = get_api_key("tiktok_client_key")
-        client_secret = get_api_key("tiktok_client_secret")
+        client_key = get_secret("tiktok_client_key")
+        client_secret = get_secret("tiktok_client_secret")
         
         self.api_available = False
         self.api = None
@@ -349,7 +350,7 @@ Views: {view_count:,} - Likes: {like_count:,} - Comments: {comment_count:,} - Sh
 
     async def _create_video_sequence_from_ytdlp(self, metadata: dict, url: str, video: Video | None, thumbnail: Image | None) -> MultimodalSequence:
         """Creates MultimodalSequence from yt-dlp metadata."""
-        title = metadata.get('title', '')
+        # title = metadata.get('title', '')
         uploader = metadata.get('uploader', 'Unknown')
         upload_date = metadata.get('upload_date', '')
         duration = metadata.get('duration', 0)
@@ -372,8 +373,6 @@ Author: @{uploader}
 Posted: {formatted_date}
 Duration: {duration}s
 Views: {view_count:,} - Likes: {like_count:,} - Comments: {comment_count:,}
-
-{title}
 
 {description}"""
 
@@ -468,4 +467,3 @@ Metrics:
         except Exception as e:
             logger.error(f"❌ Error extracting username from {url}: {e}")
             return None
-        

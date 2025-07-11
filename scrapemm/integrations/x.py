@@ -9,7 +9,7 @@ from ezmm import MultimodalSequence, download_video, download_image
 from tweepy import Tweet
 from tweepy.asynchronous import AsyncClient
 
-from scrapemm.api_keys import get_api_key
+from scrapemm.secrets import get_secret
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.util import get_domain
 
@@ -38,7 +38,7 @@ class X(RetrievalIntegration):
     The "location" of a user profile is a user-provided string and is not guaranteed to be accurate."""
 
     def __init__(self):
-        bearer_token = get_api_key("x_bearer_token")
+        bearer_token = get_secret("x_bearer_token")
         if bearer_token:
             self.client = AsyncClient(bearer_token=bearer_token)
             self.connected = True

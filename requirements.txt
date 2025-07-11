@@ -9,12 +9,10 @@ tweepy~=4.16.0
 markdownify~=1.1.0
 tqdm~=4.66.3
 pytest-asyncio
-keyring~=25.6.0
 async_lru
 oauthlib
 platformdirs~=4.3.8
 atproto
-subprocess
-m3u8
 TikTokResearchApi
 yt-dlp
+cryptography

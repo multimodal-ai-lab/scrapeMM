@@ -18,6 +18,7 @@ if not logger.hasHandlers():
     formatter = logging.Formatter('[%(levelname)s]: %(message)s')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+    logger.propagate = False
 
 # Set up config directory
 CONFIG_DIR = Path(user_config_dir(APP_NAME))

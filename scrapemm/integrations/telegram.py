@@ -7,7 +7,7 @@ from ezmm import MultimodalSequence, Image, Item, Video
 from telethon import TelegramClient
 from telethon.tl.types import Channel, User
 
-from scrapemm.api_keys import get_api_key
+from scrapemm.secrets import get_secret
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.util import get_domain
 
@@ -21,9 +21,9 @@ class Telegram(RetrievalIntegration):
     session_path = "temp/telegram"
 
     def __init__(self):
-        api_id = int(get_api_key("telegram_api_id")) if get_api_key("telegram_api_id") else None
-        api_hash = get_api_key("telegram_api_hash")
-        bot_token = get_api_key("telegram_bot_token")
+        api_id = int(get_secret("telegram_api_id")) if get_secret("telegram_api_id") else None
+        api_hash = get_secret("telegram_api_hash")
+        bot_token = get_secret("telegram_bot_token")
 
         if api_id and api_hash and bot_token:
             self.client = TelegramClient(self.session_path, api_id, api_hash)
