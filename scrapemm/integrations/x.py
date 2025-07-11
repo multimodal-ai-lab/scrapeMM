@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 from ezmm import MultimodalSequence, download_video, download_image
-from tweepy import Tweet
+from tweepy import Tweet, User
 from tweepy.asynchronous import AsyncClient
 
 from scrapemm.secrets import get_secret
@@ -112,14 +112,18 @@ Likes: {metrics['like_count']} - Retweets: {metrics['retweet_count']} - Replies:
             "created_at", "description", "location", "parody", "profile_banner_url", "profile_image_url",
             "protected", "public_metrics", "url", "verified", "verified_followers_count", "verified_type", "withheld"
         ])
-        user = response.data
+        user: User = response.data
 
         if user:
             # Turn all the data into a multimodal sequence
-
-            profile_image_url = user.profile_image_url.replace("_normal", "")  # Use the original picture variant
-            profile_image = await download_image(profile_image_url, session)
-            profile_banner = await download_image(user.profile_banner_url, session)
+            profile_image = profile_banner = None
+            if profile_image_url := user.profile_image_url:
+                profile_image_url = profile_image_url.replace("_normal", "")  # Use the original picture variant
+                profile_image = await download_image(profile_image_url, session)
+            if hasattr(user, "profile_banner_url"):
+                profile_banner_url = user.profile_banner_url
+                if profile_banner_url:
+                    profile_banner = await download_image(profile_banner_url, session)
 
             verification_status_text = f"{'Verified' if user.verified else 'Not verified'}"
             if user.verified:
@@ -141,9 +145,9 @@ Likes: {metrics['like_count']} - Retweets: {metrics['retweet_count']} - Replies:
 
             text = f"""**Profile on X**
 User: {user.name}, @{user.username}
-Created on: {user.created_at.strftime("%B %d, %Y")}
-Profile image: {profile_image.reference}
-Profile banner: {profile_banner.reference}
+Joined: {user.created_at.strftime("%B %d, %Y") if user.created_at else "Unknown"}
+Profile image: {profile_image.reference if profile_image else 'None'}
+Profile banner: {profile_banner.reference if profile_banner else 'None'}
 
 URL: {user.url}
 Location: {user.location}

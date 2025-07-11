@@ -50,13 +50,19 @@ def _decrypt_dict(token: bytes, fernet: Fernet):
     return yaml.safe_load(decrypted)
 
 
-def _load_fernet(prompt="🔐 Enter password to unlock secrets: "):
+def _get_password(prompt="🔐 Enter password to unlock secrets: ", pwd: str = None) -> Fernet:
     """Prompts the user to enter a password and returns a Fernet object.
     Re-uses the password if it was already entered before."""
     global _password_cache
-    if _password_cache is None:
-        _password_cache = getpass(prompt, stream=sys.stdout)
-    key = _derive_key(_password_cache)
+    password = pwd or _password_cache
+    if password is None:
+        password = getpass(prompt, stream=sys.stdout)
+    _password_cache = password
+    return _load_fernet(password)
+
+
+def _load_fernet(pwd: str) -> Fernet:
+    key = _derive_key(pwd)
     return Fernet(key)
 
 
@@ -69,7 +75,7 @@ def _load_secrets() -> dict:
 
     # Get the password and decrypt the secrets
     while True:
-        fernet = _load_fernet()
+        fernet = _get_password()
         try:
             return _decrypt_dict(encrypted, fernet)
         except (InvalidToken, ValueError):
@@ -81,7 +87,7 @@ def _load_secrets() -> dict:
 def _save_secrets(data: dict):
     data = data.copy()
 
-    fernet = _load_fernet("🔐 Enter password to encrypt secrets: ")
+    fernet = _get_password("🔐 Enter password to encrypt secrets: ")
     encrypted = _encrypt_dict(data, fernet)
 
     SECRETS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -105,12 +111,17 @@ def list_secrets():
     return [k for k in data]
 
 
+def set_password(pwd: str):
+    """Saves the given password into the cache."""
+    _get_password(pwd=pwd)
+
+
 def configure_secrets(all_keys: bool = False):
     """Gets the secrets from the user by running a CLI dialogue.
     Saves them in an encrypted file."""
     logging.debug("Configuring new secrets...")
     # Ensure a password is set
-    _load_fernet("🔐 Enter a password to encrypt your secrets (you'll need it later to decrypt them): ")
+    _get_password("🔐 Enter a password to encrypt your secrets (you'll need it later to decrypt them): ")
 
     prompted = False
     for key_name, description in SECRETS.items():

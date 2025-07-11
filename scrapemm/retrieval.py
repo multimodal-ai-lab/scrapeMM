@@ -1,5 +1,6 @@
 import logging
 from typing import Optional
+from traceback import format_exc
 
 import aiohttp
 from ezmm import MultimodalSequence
@@ -61,5 +62,4 @@ async def _retrieve_single(url: str, remove_urls: bool,
                 (await firecrawl.scrape(url, remove_urls, session)))
 
     except Exception as e:
-        logger.error(f"Error while retrieving URL '{url}'.\n"
-                     f"{type(e).__name__}: {e}")
+        logger.error(f"Error while retrieving URL '{url}'.\n" + format_exc())
