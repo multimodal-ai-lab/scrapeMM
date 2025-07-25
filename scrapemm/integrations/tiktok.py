@@ -15,6 +15,7 @@ from ezmm.common.items import Video, Image
 
 from tiktok_research_api import TikTokResearchAPI, QueryVideoRequest, QueryUserInfoRequest, Criteria, Query
 
+from scrapemm.scraping.ytdlp import check_ytdlp_available
 from scrapemm.secrets import get_secret
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.util import get_domain
@@ -56,7 +57,7 @@ class TikTok(RetrievalIntegration):
                 logger.warning(f"❌ TikTok Research API connection failed: {e}. Using fallback mode.")
         
         # Check if yt-dlp is available
-        self.ytdlp_available = self._check_ytdlp_available()
+        self.ytdlp_available = check_ytdlp_available()
         
         if self.api_available or self.ytdlp_available:
             self.connected = True
@@ -65,15 +66,6 @@ class TikTok(RetrievalIntegration):
         else:
             self.connected = False
             logger.warning("❌ TikTok integration not available: Neither API credentials nor yt-dlp found.")
-
-    def _check_ytdlp_available(self) -> bool:
-        """Check if yt-dlp is available."""
-        try:
-            subprocess.run(['yt-dlp', '--version'], 
-                         capture_output=True, check=True, timeout=5)
-            return True
-        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-            return False
 
     async def get(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
         """Retrieves content from a TikTok post URL."""
