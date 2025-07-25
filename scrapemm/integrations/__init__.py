@@ -13,8 +13,9 @@ from .bluesky import Bluesky
 from .telegram import Telegram
 from .tiktok import TikTok
 from .x import X
+from .fb import Facebook
 
-RETRIEVAL_INTEGRATIONS = [X(), Telegram(), Bluesky(), TikTok()]
+RETRIEVAL_INTEGRATIONS = [X(), Telegram(), Bluesky(), TikTok(), Facebook()]
 DOMAIN_TO_INTEGRATION = {domain: integration
                          for integration in RETRIEVAL_INTEGRATIONS
                          for domain in integration.domains
