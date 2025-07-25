@@ -99,20 +99,3 @@ Configure API credentials for full profile information."""
         if len(path_parts) > 0:
             return path_parts[0]
         return ""
-
-
-
-if __name__ == "__main__":
-    import asyncio
-    url = "https://www.facebook.com/fabrizioromanoherewego?locale=de_DE"
-    fb = Facebook()
-    if fb.connected:
-        async def main():
-            async with aiohttp.ClientSession() as session:
-                result = await fb.get(url, session)
-                if result:
-                    print("Retrieved content:", result)
-                else:
-                    print("No content retrieved.")
-        
-        asyncio.run(main())
