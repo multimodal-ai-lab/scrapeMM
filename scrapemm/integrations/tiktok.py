@@ -2,9 +2,9 @@ import asyncio
 import json
 import logging
 import re
+import sys
 import tempfile
 import os
-import subprocess
 from urllib.parse import urlparse
 from datetime import datetime
 from typing import Any
@@ -209,7 +209,9 @@ Configure API credentials for full profile information."""
         """Extracts metadata using yt-dlp without downloading the video."""
         try:
             cmd = [
-                'yt-dlp',
+                sys.executable,  # Ensure to use the same Python interpreter as the calling process
+                '-m',
+                'yt_dlp',
                 '--no-download',
                 '--print-json',
                 '--no-warnings',
@@ -244,7 +246,9 @@ Configure API credentials for full profile information."""
                 temp_path = temp_file.name
 
             cmd = [
-                'yt-dlp',
+                sys.executable,  # Ensure to use the same Python interpreter as the calling process
+                '-m',
+                'yt_dlp',
                 '--no-playlist',
                 '--no-warnings',
                 '--quiet',

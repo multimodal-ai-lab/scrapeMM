@@ -1,3 +1,4 @@
+import sys
 from typing import Any, cast
 
 import aiohttp
@@ -16,19 +17,23 @@ logger = logging.getLogger("scrapeMM")
 
 
 def check_ytdlp_available() -> bool:
-        """Check if yt-dlp is available."""
-        try:
-            subprocess.run(['yt-dlp', '--version'], capture_output=True, check=True, timeout=5)
-            return True
-        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-            return False
+    """Returns True if yt-dlp is available, else False."""
+    try:
+        # Run yt-dlp --version to check if it's installed and working'
+        subprocess.run([sys.executable, '-m', 'yt_dlp', '--version'],
+                     capture_output=True, check=True, timeout=5)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return False
 
 
 async def extract_metadata_with_ytdlp(url: str) -> dict[str, Any] | None:
     """Extracts metadata using yt-dlp without downloading the video."""
     try:
         cmd = [
-            'yt-dlp',
+            sys.executable,  # Ensure to use the same Python interpreter as the calling process
+            '-m',
+            'yt_dlp',
             '--no-download',
             '--print-json',
             '--no-warnings',
@@ -66,7 +71,9 @@ async def download_video_with_ytdlp(url: str) -> Video | None:
             temp_path = temp_file.name
 
         cmd = [
-            'yt-dlp',
+            sys.executable,  # Ensure to use the same Python interpreter as the calling process
+            '-m',
+            'yt_dlp',
             '--no-playlist',
             '--no-warnings',
             '--quiet',

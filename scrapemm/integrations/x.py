@@ -40,7 +40,7 @@ class X(RetrievalIntegration):
     def __init__(self):
         bearer_token = get_secret("x_bearer_token")
         if bearer_token:
-            self.client = AsyncClient(bearer_token=bearer_token)
+            self.client = AsyncClient(bearer_token=bearer_token, wait_on_rate_limit=True)
             self.connected = True
             logger.info("✅ Successfully connected to X.")
         else:
@@ -80,18 +80,19 @@ class X(RetrievalIntegration):
 
             # Download the media
             media = []
-            for medium_raw in media_raw:
-                if medium_raw.type == "photo":
-                    url = medium_raw.url
-                    medium = await download_image(url, session=session)
-                elif medium_raw.type in ["video", "animated_gif"]:
-                    # Get the variant with the highest bitrate
-                    url = _get_best_quality_video_url(medium_raw.variants)
-                    medium = await download_video(url, session=session)
-                else:
-                    raise ValueError(f"Unsupported media type: {medium_raw.type}")
-                if medium:
-                    media.append(medium)
+            if media_raw:
+                for medium_raw in media_raw:
+                    if medium_raw.type == "photo":
+                        url = medium_raw.url
+                        medium = await download_image(url, session=session)
+                    elif medium_raw.type in ["video", "animated_gif"]:
+                        # Get the variant with the highest bitrate
+                        url = _get_best_quality_video_url(medium_raw.variants)
+                        medium = await download_video(url, session=session)
+                    else:
+                        raise ValueError(f"Unsupported media type: {medium_raw.type}")
+                    if medium:
+                        media.append(medium)
 
             tweet_str = f"""**Post on X**
 Author: {author.name}, @{author.username}

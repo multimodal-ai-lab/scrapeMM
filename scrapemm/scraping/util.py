@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 
 import aiohttp
@@ -16,6 +17,7 @@ URL_REGEX = r"https?:\/\/(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{
 DATA_URI_REGEX = r"data:([\w/+.-]+/[\w.+-]+);base64,([A-Za-z0-9+/=]+)"
 MD_HYPERLINK_REGEX = rf'(!?\[([^]^[]*)\]\((.*?)(?: "[^"]*")?\))'
 
+logger = logging.getLogger("scrapeMM")
 
 def find_firecrawl(urls):
     for url in urls:
@@ -153,5 +155,6 @@ def from_base64(b64_data: str, mime_type: str = "image/jpeg") -> Optional[Item]:
                 return Video(binary_data=binary_data)
             else:
                 raise ValueError(f"Unsupported media type: {mime_type}")
-    except ValueError as e:
-        print(f"Error decoding base64 data: {e}")
+    except Exception as e:
+        logger.warning(f"Error decoding base64 data!\n"
+                       f"{type(e).__name__}: {e}")
