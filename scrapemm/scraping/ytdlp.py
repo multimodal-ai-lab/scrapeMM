@@ -66,14 +66,25 @@ async def download_video_with_ytdlp(url: str) -> Video | None:
             temp_path = temp_file.name
 
         cmd = [
-            'yt-dlp',
-            '--no-playlist',
-            '--no-warnings',
-            '--quiet',
-            '--format', 'best[ext=mp4]/best',
-            '--output', temp_path,
-            url
+            "yt-dlp",
+            "--no-playlist",
+            "--no-warnings",
+            "--quiet",
+            "--retries", "10", 
         ]
+
+        if "youtube" in url or "youtu.be" in url:
+            cmd.extend([
+                "-f", "bv*[vcodec~='^avc1']+ba/bv*+ba/b",
+                "--merge-output-format", "mp4",
+            ])
+        else:
+            cmd.extend(['--format', 'best[ext=mp4]/best'])
+
+        cmd.extend([
+            "--output", temp_path,
+            url
+        ])
 
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -128,6 +139,8 @@ async def download_thumbnail_with_ytdlp(url: str, session: aiohttp.ClientSession
     
     return None
 
+def fmt_count(v):
+    return f"{v:,}" if isinstance(v, int) else "Unknown"
 
 async def create_video_sequence_from_ytdlp(metadata: dict, url: str, video: Video | None, thumbnail: Image | None, platform: str) -> MultimodalSequence:
     """Creates MultimodalSequence from yt-dlp metadata."""
@@ -153,7 +166,7 @@ async def create_video_sequence_from_ytdlp(metadata: dict, url: str, video: Vide
 Author: @{uploader}
 Posted: {formatted_date}
 Duration: {duration}s
-Views: {view_count:,} - Likes: {like_count:,} - Comments: {comment_count:,}
+Views: {fmt_count(view_count)} - Likes: {fmt_count(like_count)} - Comments: {fmt_count(comment_count)}
 
 {description}"""
 
@@ -179,5 +192,7 @@ async def get_video_with_ytdlp(url: str, session: aiohttp.ClientSession, platfor
         return await create_video_sequence_from_ytdlp(metadata, url, video, thumbnail, platform)
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         logger.error(f"❌ Error retrieving video with yt-dlp: {e}")
         return None
