@@ -33,7 +33,7 @@ def get_domain(url: str, keep_subdomain: bool = False) -> Optional[str]:
 async def run_with_semaphore(tasks: Iterable[Awaitable],
                              limit: int,
                              show_progress: bool = True,
-                             progress_description: str = None) -> list:
+                             progress_description: str | None = None) -> list:
     """
     Runs asynchronous tasks with a concurrency limit.
 
