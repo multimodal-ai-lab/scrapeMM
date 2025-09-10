@@ -118,9 +118,14 @@ def set_password(pwd: str):
 
 def configure_secrets(all_keys: bool = False):
     """Gets the secrets from the user by running a CLI dialogue.
-    Saves them in an encrypted file."""
+    Saves them in an encrypted file. Deletes the existing secrets file if existing."""
     logging.debug("Configuring new secrets...")
-    # Ensure a password is set
+
+    # Delete existing secrets
+    if SECRETS_PATH.exists():
+        SECRETS_PATH.unlink()
+
+    # Set up a new password
     _get_password("🔐 Enter a password to encrypt your secrets (you'll need it later to decrypt them): ")
 
     prompted = False
