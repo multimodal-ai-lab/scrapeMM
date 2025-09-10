@@ -50,7 +50,7 @@ def _decrypt_dict(token: bytes, fernet: Fernet):
     return yaml.safe_load(decrypted)
 
 
-def _get_password(prompt="🔐 Enter password to unlock secrets: ", pwd: str = None) -> Fernet:
+def _get_password(prompt="🔐 Enter password to unlock secrets: ", pwd: str | None = None) -> Fernet:
     """Prompts the user to enter a password and returns a Fernet object.
     Re-uses the password if it was already entered before."""
     global _password_cache
