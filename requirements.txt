@@ -8,6 +8,7 @@ PyYAML~=6.0.1
 tweepy~=4.16.0
 markdownify~=1.1.0
 tqdm~=4.66.3
+certifi
 pytest-asyncio
 async_lru
 oauthlib

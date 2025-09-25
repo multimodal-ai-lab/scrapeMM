@@ -2,6 +2,7 @@ import base64
 import logging
 import sys
 from getpass import getpass
+from typing import Optional
 
 import yaml
 from cryptography.fernet import Fernet, InvalidToken
@@ -20,6 +21,12 @@ SECRETS = {
     "bluesky_password": "Bluesky password",
     "tiktok_client_key": "TikTok client key",
     "tiktok_client_secret": "TikTok client secret",
+    "threads_access_token": "Threads Access Token",
+    "reddit_client_id": "Reddit Client ID",
+    "reddit_client_secret": "Reddit Client Secret",
+    "reddit_username": "Reddit Username",
+    "reddit_password": "Reddit Password",
+    "reddit_user_agent": "Reddit User Agent",
 }
 
 SALT = b'\xa4\x93\xf1\x88\x13\x88'
@@ -95,7 +102,7 @@ def _save_secrets(data: dict):
         f.write(encrypted)
 
 
-def get_secret(name: str) -> str | None:
+def get_secret(name: str) -> Optional[str]:
     data = _load_secrets()
     return data.get(name)
 

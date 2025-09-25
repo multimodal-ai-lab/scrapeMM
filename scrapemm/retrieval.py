@@ -1,4 +1,6 @@
 import logging
+import ssl
+import certifi
 from typing import Optional
 from traceback import format_exc
 
@@ -6,7 +8,7 @@ import aiohttp
 from ezmm import MultimodalSequence
 
 from scrapemm.integrations import retrieve_via_integration
-from scrapemm.scraping.firecrawl import firecrawl
+from scrapemm.scraping.firecrawl import Firecrawl
 from scrapemm.util import run_with_semaphore
 
 logger = logging.getLogger("scrapeMM")
@@ -25,7 +27,10 @@ async def retrieve(urls: str | list[str], remove_urls: bool = True,
     TODO: Add ability to navigate the webpage
     """
 
-    async with aiohttp.ClientSession() as session:
+    ssl_context = ssl.create_default_context(cafile=certifi.where())
+    connector = aiohttp.TCPConnector(ssl=ssl_context)
+
+    async with aiohttp.ClientSession(connector=connector) as session:
         if isinstance(urls, str):
             return await _retrieve_single(urls, remove_urls, session)
 
@@ -53,6 +58,7 @@ async def retrieve(urls: str | list[str], remove_urls: bool = True,
 
 async def _retrieve_single(url: str, remove_urls: bool,
                            session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
+    firecrawl = Firecrawl()
     try:
         # Ensure URL is a string
         url = str(url)
