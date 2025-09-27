@@ -418,11 +418,11 @@ Account properties:
                 
                 params = {
                     'query': formatted_query,
-                    'max_results': min(max_results, 100),
+                    'max_results': min(max_results * 3, 100),  # Get more tweets to filter from
                     'tweet.fields': 'id,author_id,created_at,public_metrics,context_annotations,lang,possibly_sensitive',
                     'user.fields': 'id,username,verified,public_metrics',
                     'expansions': 'author_id',
-                    'sort_order': 'recency'
+                    'sort_order': 'relevancy'  # Changed from 'recency' to get more engaging content
                 }
                 
                 try:
@@ -484,7 +484,7 @@ Account properties:
             return mock_urls[:max_results]
 
     async def _process_search_response(self, response, max_results: int) -> list[str]:
-        """Process the search response and extract URLs."""
+        """Process the search response and extract URLs with engagement filtering."""
         urls = []
         
         logger.debug(f"X API response status: {response.status}")
@@ -501,7 +501,57 @@ Account properties:
             # Create user ID to username mapping
             users_map = {user['id']: user['username'] for user in users}
             
+            # Filter and sort tweets by engagement and recency
+            filtered_tweets = []
+            current_time = datetime.now(timezone.utc)
+            max_age_days = 6  # Only get tweets from last 6 days for comment retrieval
+            
             for tweet in tweets:
+                # Check tweet age
+                created_at_str = tweet.get('created_at')
+                if created_at_str:
+                    try:
+                        created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+                        age_days = (current_time - created_at).days
+                        if age_days > max_age_days:
+                            logger.debug(f"Skipping tweet {tweet['id']}: too old ({age_days} days)")
+                            continue
+                    except Exception as e:
+                        logger.debug(f"Failed to parse date for tweet {tweet['id']}: {e}")
+                        continue
+                
+                # Get engagement metrics
+                public_metrics = tweet.get('public_metrics', {})
+                like_count = public_metrics.get('like_count', 0)
+                retweet_count = public_metrics.get('retweet_count', 0)
+                reply_count = public_metrics.get('reply_count', 0)
+                
+                # Calculate engagement score (prioritize replies since we want comments)
+                engagement_score = (reply_count * 3) + (like_count * 2) + retweet_count
+                
+                # Filter by minimum engagement (at least some interaction)
+                min_engagement = 5  # At least 5 points of engagement
+                if engagement_score >= min_engagement:
+                    filtered_tweets.append({
+                        'tweet': tweet,
+                        'engagement_score': engagement_score,
+                        'age_days': age_days if 'age_days' in locals() else 0
+                    })
+                    logger.debug(f"Tweet {tweet['id']}: engagement={engagement_score}, age={age_days if 'age_days' in locals() else 'unknown'} days")
+                else:
+                    logger.debug(f"Skipping tweet {tweet['id']}: low engagement (score={engagement_score})")
+            
+            # Sort by engagement score (descending) then by recency
+            filtered_tweets.sort(key=lambda x: (x['engagement_score'], -x['age_days']), reverse=True)
+            
+            logger.info(f"X filtering: {len(tweets)} total tweets -> {len(filtered_tweets)} after engagement/age filtering")
+            if filtered_tweets:
+                top_scores = [t['engagement_score'] for t in filtered_tweets[:3]]
+                logger.info(f"Top 3 engagement scores: {top_scores}")
+            
+            # Build URLs from filtered and sorted tweets
+            for tweet_data in filtered_tweets[:max_results]:
+                tweet = tweet_data['tweet']
                 tweet_id = tweet['id']
                 author_id = tweet.get('author_id')
                 
@@ -513,7 +563,7 @@ Account properties:
                     tweet_url = f"https://x.com/i/web/status/{tweet_id}"
                 
                 urls.append(tweet_url)
-                logger.debug(f"Added X URL: {tweet_url}")
+                logger.debug(f"Added high-engagement X URL: {tweet_url} (score={tweet_data['engagement_score']})")
                 
                 if len(urls) >= max_results:
                     break
