@@ -110,10 +110,6 @@ class X(RetrievalIntegration):
         """Returns a MultimodalSequence containing the tweet's text and media
         along with information like metrics, etc."""
 
-        # Handle mock tweet IDs for testing
-        if str(tweet_id) in ["1234567890123456789", "1234567890123456790", "1234567890123456791"]:
-            return await self._get_mock_tweet(tweet_id)
-
         params = {
             "expansions": "author_id,attachments.media_keys,geo.place_id,edit_history_tweet_ids",
             "media.fields": "url,variants",
@@ -124,11 +120,11 @@ class X(RetrievalIntegration):
         try:
             response_json = await self._make_request(f"tweets/{tweet_id}", session, params)
             if not response_json or not response_json.get("data"):
-                logger.warning(f"No data returned for tweet {tweet_id}, creating mock data")
-                return await self._get_mock_tweet(tweet_id)
+                logger.warning(f"No data returned for tweet {tweet_id}")
+                return MultimodalSequence([f"Tweet {tweet_id} not found or inaccessible"])
         except Exception as e:
-            logger.warning(f"Failed to fetch tweet {tweet_id}: {e}, creating mock data")
-            return await self._get_mock_tweet(tweet_id)
+            logger.warning(f"Failed to fetch tweet {tweet_id}: {e}")
+            return MultimodalSequence([f"Failed to fetch tweet {tweet_id}: {str(e)}"])
 
         tweet = Tweet(response_json["data"])
         includes = response_json.get("includes", {})
@@ -231,71 +227,6 @@ Likes: {tweet.public_metrics['like_count']} - Retweets: {tweet.public_metrics['r
         
         return comments
 
-    async def _get_mock_tweet(self, tweet_id: int) -> MultimodalSequence:
-        """Generate mock tweet data for testing purposes."""
-        mock_data = {
-            1234567890123456789: {
-                "author": "NewsUser1",
-                "text": "Ukrainian refugee Iryna Zarutska, 23, was tragically killed in Charlotte. This highlights the need for better public transit safety. #JusticeForIryna #PublicSafety",
-                "likes": 245,
-                "retweets": 89,
-                "replies": 34
-            },
-            1234567890123456790: {
-                "author": "CommunityWatch", 
-                "text": "The death of Iryna Zarutska in Charlotte shows we must protect vulnerable communities. No one should flee war only to face violence here. #RefugeeSafety #Charlotte",
-                "likes": 156,
-                "retweets": 67,
-                "replies": 23
-            },
-            1234567890123456791: {
-                "author": "SafetyAdvocate",
-                "text": "Thoughts and prayers for Iryna Zarutska's family. This senseless act of violence must never happen again. We need action, not just words. #EndViolence",
-                "likes": 89,
-                "retweets": 34,
-                "replies": 12
-            }
-        }
-        
-        data = mock_data.get(tweet_id, mock_data[1234567890123456789])
-        created_at = datetime.now(timezone.utc) - timedelta(days=1)
-        
-        tweet_str = f"""**Post on X**
-Author: {data['author']}, @{data['author'].lower()}
-Posted on: {created_at.strftime("%B %d, %Y at %H:%M")}
-Likes: {data['likes']} - Retweets: {data['retweets']} - Replies: {data['replies']} - Views: {data['likes'] * 10}
-{data['text']}"""
-
-        result = MultimodalSequence([tweet_str])
-        result.metadata = {
-            "author_id": str(hash(data['author']) % 1000000),
-            "author_name": data['author'],
-            "author_username": data['author'].lower(),
-            "tweet_text": data['text'],
-            "comments": [
-                f"Comment by @user1 ({15} likes):\nSo tragic, my heart goes out to her family",
-                f"Comment by @user2 ({8} likes):\nWe need better security on public transport",
-                f"Comment by @user3 ({5} likes):\nThis is devastating news"
-            ],
-            "author_verified": False,
-            "author_verified_type": None,
-            "author_protected": False,
-            "author_withheld": None,
-            "author_public_metrics": {
-                "followers_count": 1250,
-                "following_count": 340,
-                "tweet_count": 890,
-                "listed_count": 12
-            },
-            "post_public_metrics": {
-                "like_count": data['likes'],
-                "retweet_count": data['retweets'],
-                "reply_count": data['replies'],
-                "impression_count": data['likes'] * 10
-            },
-        }
-        return result
-
     async def _get_user(self, username: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
         """Returns a MultimodalSequence containing the user's profile information
         incl. profile image and profile banner."""
@@ -368,6 +299,7 @@ Account properties:
 
     async def search(self, query: str, session: aiohttp.ClientSession, max_results: int = 10) -> list[str]:
         """Search X/Twitter for posts related to the query using direct API calls.
+        Note: Date filtering not supported due to X API limitations (requires Pro tier).
         
         Args:
             query: The search query text
@@ -385,6 +317,7 @@ Account properties:
             logger.info(f"Searching X for: '{query}' (max {max_results} results)")
             
             # Try multiple search strategies to improve results
+            # Note: Date filtering removed due to X API Basic tier limitations
             search_strategies = [
                 # Original query with exact match
                 f'"{query}" -is:retweet lang:en',

@@ -30,6 +30,7 @@ class Reddit(RetrievalIntegration):
         self.user_agent = get_secret("reddit_user_agent") or "scrapeMM/1.0"
         
         self.access_token = None
+        self.subreddit_cache = {}  # Cache subreddit descriptions to avoid redundant API calls
         
         # Check if we have the required credentials
         if self.client_id and self.client_secret:
@@ -313,6 +314,43 @@ class Reddit(RetrievalIntegration):
             logger.error(f"❌ Error retrieving Reddit user: {e}")
             return None
 
+    async def _get_subreddit_description(self, subreddit_name: str, session: aiohttp.ClientSession) -> Optional[str]:
+        """Fetch subreddit description. Uses cache to avoid redundant API calls."""
+        # Remove r/ prefix if present
+        if subreddit_name.startswith('r/'):
+            subreddit_name = subreddit_name[2:]
+        
+        # Check cache first
+        if subreddit_name in self.subreddit_cache:
+            return self.subreddit_cache[subreddit_name]
+        
+        try:
+            api_url = f"https://oauth.reddit.com/r/{subreddit_name}/about"
+            headers = {
+                'Authorization': f'Bearer {self.access_token}',
+                'User-Agent': self.user_agent
+            }
+            
+            async with session.get(api_url, headers=headers, ssl=self._create_ssl_context()) as response:
+                if response.status != 200:
+                    logger.warning(f"❌ Could not fetch subreddit description for {subreddit_name}: {response.status}")
+                    self.subreddit_cache[subreddit_name] = None
+                    return None
+                    
+                data = await response.json()
+                subreddit_data = data.get('data', {})
+                description = subreddit_data.get('public_description', '')
+                
+                # Cache the result
+                self.subreddit_cache[subreddit_name] = description
+                logger.info(f"✅ Fetched subreddit description for r/{subreddit_name}: {description[:50]}...")
+                return description
+                
+        except Exception as e:
+            logger.warning(f"❌ Error fetching subreddit description for {subreddit_name}: {e}")
+            self.subreddit_cache[subreddit_name] = None
+            return None
+
     async def _create_post_sequence(self, post_data: dict, comments_data: list, url: str, session: aiohttp.ClientSession) -> MultimodalSequence:
         """Creates MultimodalSequence from Reddit post data."""
         title = post_data.get('title', '')
@@ -357,9 +395,42 @@ class Reddit(RetrievalIntegration):
             image = await download_image(image_url, session)
             if image:
                 media.append(image)
+        # Handle external v.redd.it video links
+        elif url_linked and 'v.redd.it' in url_linked:
+            logger.debug(f"Attempting to download video from v.redd.it link: {url_linked}")
+            # Try to download the video from the external v.redd.it link
+            # v.redd.it URLs typically have a DASH format, try common video formats
+            video_formats = [
+                f"{url_linked}/DASH_720.mp4?source=fallback",
+                f"{url_linked}/DASH_480.mp4?source=fallback",
+                f"{url_linked}/DASH_360.mp4?source=fallback",
+                f"{url_linked}/HLS_AUDIO_64_AAC.aac",  # Sometimes audio only
+                f"{url_linked}/DASH_AUDIO_128.mp4"     # Audio in MP4
+            ]
+            
+            for i, video_url in enumerate(video_formats):
+                try:
+                    logger.debug(f"Trying video format {i+1}: {video_url}")
+                    video = await download_video(video_url, session)
+                    if video:
+                        logger.info(f"✅ Successfully downloaded video from {video_url}")
+                        media.append(video)
+                        break  # Stop trying other formats once we get one
+                except Exception as e:
+                    logger.debug(f"Failed format {i+1} ({video_url}): {e}")
+                    continue  # Try next format
+            
+            if not media:
+                logger.warning(f"Failed to download video from any format for {url_linked}")
         
         # TODO: Handle galleries, external links, etc. Ask Mark about this
         # Note: Comments are stored in metadata for stance analysis but not displayed in text
+
+        # Fetch subreddit description for context
+        subreddit_description = await self._get_subreddit_description(subreddit, session)
+        subreddit_context = ""
+        if subreddit_description:
+            subreddit_context = f"\n**Subreddit Context**: {subreddit_description}"
 
         # External link analysis (still useful raw data)
         external_link_text = ""
@@ -368,7 +439,7 @@ class Reddit(RetrievalIntegration):
             if domain:
                 external_link_text += f" (Domain: {domain})"
 
-        full_text = f"""**Reddit Post in {subreddit}**
+        full_text = f"""**Reddit Post in {subreddit}**{subreddit_context}
 Author: u/{author}
 Posted: {timestamp}
 Engagement: {upvotes:,} upvotes, {score:,} score ({upvote_ratio:.1%} upvote ratio)
@@ -590,13 +661,15 @@ Account created: {timestamp}
             return match.group('username')
         return None
 
-    async def search(self, query: str, session: aiohttp.ClientSession, max_results: int = 10) -> list[str]:
+    async def search(self, query: str, session: aiohttp.ClientSession, max_results: int = 10, start_date: str = None, end_date: str = None) -> list[str]:
         """Search Reddit for posts related to the query.
         
         Args:
             query: The search query text
             session: aiohttp session to use for requests
             max_results: Maximum number of results to return
+            start_date: Optional start date for filtering results (YYYY-MM-DD format)
+            end_date: Optional end date for filtering results (YYYY-MM-DD format)
             
         Returns:
             List of Reddit post URLs found for the query
@@ -624,10 +697,24 @@ Account created: {timestamp}
                 'q': query,
                 'type': 'link',  # Search for posts/links
                 'limit': min(max_results, 100),  # Reddit API limit
-                'sort': 'relevance'
+                'sort': 'relevance',
+                't': 'week'  # Time filter: hour, day, week, month, year, all
             }
             
-            logger.info(f"Searching Reddit for: '{query}' (max {max_results} results)")
+            date_info = ""
+            if start_date or end_date:
+                date_info = f" (dates: {start_date} to {end_date})"
+            logger.info(f"Searching Reddit for: '{query}'{date_info} (max {max_results} results)")
+            
+            # Convert date strings to timestamps for filtering
+            start_timestamp = None
+            end_timestamp = None
+            if start_date:
+                from datetime import datetime
+                start_timestamp = datetime.strptime(start_date, "%Y-%m-%d").timestamp()
+            if end_date:
+                from datetime import datetime
+                end_timestamp = datetime.strptime(end_date + " 23:59:59", "%Y-%m-%d %H:%M:%S").timestamp()
             
             async with session.get(search_url, headers=headers, params=params, ssl=self._create_ssl_context()) as response:
                 if response.status == 200:
@@ -639,6 +726,13 @@ Account created: {timestamp}
                     for post in posts:
                         post_data = post.get('data', {})
                         permalink = post_data.get('permalink')
+                        created_utc = post_data.get('created_utc')
+                        
+                        # Apply date filtering if specified
+                        if start_timestamp and created_utc and created_utc < start_timestamp:
+                            continue
+                        if end_timestamp and created_utc and created_utc > end_timestamp:
+                            continue
                         
                         if permalink:
                             # Convert Reddit permalink to full URL
