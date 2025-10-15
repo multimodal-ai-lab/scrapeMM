@@ -179,6 +179,8 @@ Views: {tweet.public_metrics['impression_count']:,}
                 "author_id": author.id,
                 "author_name": author.name,
                 "author_username": author.username,
+                "created_at": tweet.created_at.strftime("%B %d, %Y at %H:%M"),
+                "url": f"https://x.com/{author.username}/status/{tweet.id}",
                 "tweet_text": text,
                 "comments": comments,
                 "author_verified": author.verified,
@@ -190,7 +192,7 @@ Views: {tweet.public_metrics['impression_count']:,}
             }
             return result
 
-    async def _get_comments(self, conversation_id: int, session: aiohttp.ClientSession, max_results: int = 20) -> list[str]:
+    async def _get_comments(self, conversation_id: int, session: aiohttp.ClientSession, max_results: int = 10) -> list[str]:
         """Retrieves the most-liked comments for a given tweet ID from the last 7 days.
         NOTE: This uses the 'tweets/search/recent' endpoint. It fetches up to 100 recent
         comments and returns the top N most-liked ones."""

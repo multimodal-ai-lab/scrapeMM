@@ -88,8 +88,6 @@ class Reddit(RetrievalIntegration):
                 result = await self._get_post(url, session)
             elif self._is_subreddit_url(url):
                 result = await self._get_subreddit(url, session)
-            elif self._is_user_url(url):
-                result = await self._get_user(url, session)
             else:
                 logger.error(f"❌ Unsupported Reddit URL format: {url}")
                 result = None
@@ -109,8 +107,6 @@ class Reddit(RetrievalIntegration):
                         result = await self._get_post(url, fresh_session)
                     elif self._is_subreddit_url(url):
                         result = await self._get_subreddit(url, fresh_session)
-                    elif self._is_user_url(url):
-                        result = await self._get_user(url, fresh_session)
                     else:
                         result = None
                     
@@ -185,7 +181,8 @@ class Reddit(RetrievalIntegration):
         try:
             
             # Use Reddit API to get post data
-            api_url = f"https://oauth.reddit.com/r/{subreddit}/comments/{post_id}.json"
+            # Add sort parameter to get comments sorted by 'top' (most upvoted)
+            api_url = f"https://oauth.reddit.com/r/{subreddit}/comments/{post_id}.json?sort=top&limit=100"
             headers = {
                 'Authorization': f'Bearer {self.access_token}',
                 'User-Agent': self.user_agent
@@ -209,6 +206,8 @@ class Reddit(RetrievalIntegration):
                 post_data = data[0]['data']['children'][0]['data']
                 comments_data = data[1]['data']['children'] if len(data) > 1 else []
                 
+                logger.debug(f"Reddit API returned {len(comments_data)} top-level comments for post {post_id}")
+                
                 return await self._create_post_sequence(post_data, comments_data, url, session)
                 
         except Exception as e:
@@ -223,8 +222,8 @@ class Reddit(RetrievalIntegration):
                     if not self.access_token:
                         await self._authenticate(fresh_session)
                     
-                    # Retry the API request
-                    api_url = f"https://oauth.reddit.com/r/{subreddit}/comments/{post_id}.json"
+                    # Retry the API request (with same sort parameter)
+                    api_url = f"https://oauth.reddit.com/r/{subreddit}/comments/{post_id}.json?sort=top&limit=100"
                     headers = {
                         'Authorization': f'Bearer {self.access_token}',
                         'User-Agent': self.user_agent
@@ -287,33 +286,6 @@ class Reddit(RetrievalIntegration):
             logger.error(f"❌ Error retrieving Reddit subreddit: {e}")
             return None
 
-    async def _get_user(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
-        """Retrieves Reddit user information."""
-        try:
-            username = self._extract_username(url)
-            if not username:
-                return None
-            
-            api_url = f"https://oauth.reddit.com/user/{username}/about"
-            headers = {
-                'Authorization': f'Bearer {self.access_token}',
-                'User-Agent': self.user_agent
-            }
-            
-            async with session.get(api_url, headers=headers, ssl=self._create_ssl_context()) as response:
-                if response.status != 200:
-                    logger.error(f"❌ Reddit API error for user: {response.status}")
-                    return None
-                    
-                data = await response.json()
-                user_data = data.get('data', {})
-                
-                return await self._create_user_sequence(user_data, url, session)
-                
-        except Exception as e:
-            logger.error(f"❌ Error retrieving Reddit user: {e}")
-            return None
-
     async def _get_subreddit_description(self, subreddit_name: str, session: aiohttp.ClientSession) -> Optional[str]:
         """Fetch subreddit description. Uses cache to avoid redundant API calls."""
         # Remove r/ prefix if present
@@ -351,11 +323,52 @@ class Reddit(RetrievalIntegration):
             self.subreddit_cache[subreddit_name] = None
             return None
 
+    async def _get_author_info(self, username: str, session: aiohttp.ClientSession) -> Optional[dict]:
+        """Fetch author information for credibility scoring."""
+        if not username or username in ['[deleted]', 'AutoModerator']:
+            return None
+        
+        try:
+            api_url = f"https://oauth.reddit.com/user/{username}/about"
+            headers = {
+                'Authorization': f'Bearer {self.access_token}',
+                'User-Agent': self.user_agent
+            }
+            
+            async with session.get(api_url, headers=headers, ssl=self._create_ssl_context()) as response:
+                if response.status != 200:
+                    logger.warning(f"Could not fetch author info for u/{username}: {response.status}")
+                    return None
+                    
+                data = await response.json()
+                author_data = data.get('data', {})
+                
+                # Extract relevant credibility metrics
+                return {
+                    'total_karma': author_data.get('total_karma', 0),
+                    'link_karma': author_data.get('link_karma', 0),
+                    'comment_karma': author_data.get('comment_karma', 0),
+                    'account_created': author_data.get('created_utc', 0),
+                    'is_gold': author_data.get('is_gold', False),
+                    'is_mod': author_data.get('is_mod', False),
+                    'is_employee': author_data.get('is_employee', False),
+                    'verified': author_data.get('verified', False),
+                    'has_verified_email': author_data.get('has_verified_email', False),
+                }
+                
+        except Exception as e:
+            logger.warning(f"Error fetching author info for u/{username}: {e}")
+            return None
+
     async def _create_post_sequence(self, post_data: dict, comments_data: list, url: str, session: aiohttp.ClientSession) -> MultimodalSequence:
         """Creates MultimodalSequence from Reddit post data."""
         title = post_data.get('title', '')
         text = post_data.get('selftext', '')
         author = post_data.get('author', 'Unknown')
+        
+        # Fetch author information for credibility scoring
+        author_info = await self._get_author_info(author, session)
+        
         subreddit = post_data.get('subreddit_name_prefixed', '')
         upvotes = post_data.get('ups', 0)
         downvotes = post_data.get('downs', 0)
@@ -458,8 +471,20 @@ Comments: {num_comments:,}{external_link_text}
             "post_title": title,
             "post_text": text,
             "author": author,
+            "author_total_karma": author_info.get('total_karma', 0) if author_info else 0,
+            "author_link_karma": author_info.get('link_karma', 0) if author_info else 0,
+            "author_comment_karma": author_info.get('comment_karma', 0) if author_info else 0,
+            "author_account_created": author_info.get('account_created', 0) if author_info else 0,
+            "author_is_gold": author_info.get('is_gold', False) if author_info else False,
+            "author_is_mod": author_info.get('is_mod', False) if author_info else False,
+            "author_is_employee": author_info.get('is_employee', False) if author_info else False,
+            "author_verified": author_info.get('verified', False) if author_info else False,
+            "author_has_verified_email": author_info.get('has_verified_email', False) if author_info else False,
             "subreddit": subreddit,
-            "timestamp": post_data.get('created_utc'),
+            "subreddit_description": subreddit_description,  # Add subreddit description
+            "created_at": timestamp,  # Human-readable formatted timestamp
+            "timestamp": post_data.get('created_utc'),  # Keep raw timestamp for compatibility
+            "url": url,
             "upvotes": upvotes,
             "downvotes": downvotes,
             "score": score,
@@ -484,9 +509,20 @@ Comments: {num_comments:,}{external_link_text}
                     "score": comment['data'].get('score', 0),
                     "awards": comment['data'].get('total_awards_received', 0),
                     "author_info": f"Comment author: u/{comment['data'].get('author', 'unknown')} ({comment['data'].get('score', 0)} points, {comment['data'].get('total_awards_received', 0)} awards)"
-                } for i, comment in enumerate(comments_data[:5]) if 'body' in comment.get('data', {})
+                } for i, comment in enumerate(
+                    sorted(
+                        [c for c in comments_data if 'body' in c.get('data', {})],
+                        key=lambda c: c.get('data', {}).get('score', 0),
+                        reverse=True
+                    )[:50]  # Increased from 10 to 50 for better stance detection
+                )
             ]
         }
+        
+        # Log comment filtering for debugging
+        valid_comments = [c for c in comments_data if 'body' in c.get('data', {})]
+        logger.debug(f"Comment filtering: {len(comments_data)} raw -> {len(valid_comments)} valid -> {min(len(valid_comments), 50)} included in metadata")
+        
         return result
 
     async def _create_subreddit_sequence(self, subreddit_data: dict, url: str, session: aiohttp.ClientSession) -> MultimodalSequence:
@@ -566,85 +602,11 @@ Subscribers: {subscribers:,}
         }
         return result
 
-    async def _create_user_sequence(self, user_data: dict, url: str, session: aiohttp.ClientSession) -> MultimodalSequence:
-        name = user_data.get('name')
-        karma = user_data.get('total_karma', 0)
-        link_karma = user_data.get('link_karma', 0)
-        comment_karma = user_data.get('comment_karma', 0)
-        
-        # Account credibility indicators
-        is_employee = user_data.get('is_employee', False)
-        is_mod = user_data.get('is_mod', False)
-        is_gold = user_data.get('is_gold', False)
-        verified = user_data.get('verified', False)
-        has_verified_email = user_data.get('has_verified_email', False)
-        
-        timestamp = user_data.get('created_utc')
-        account_age_text = ""
-        if timestamp:
-            creation_date = datetime.fromtimestamp(timestamp, tz=timezone.utc)
-            account_age_days = (datetime.now(timezone.utc) - creation_date).days
-            account_age_years = account_age_days // 365
-            account_age_text = f"Account age: {account_age_years} years ({account_age_days:,} days)"
-            timestamp = creation_date.strftime("%B %d, %Y")
-
-        # Account status information
-        account_status = []
-        if is_employee:
-            account_status.append("Reddit Employee")
-        if is_mod:
-            account_status.append("Moderator")
-        if is_gold:
-            account_status.append("Reddit Premium")
-        if verified:
-            account_status.append("Verified")
-        if has_verified_email:
-            account_status.append("Email verified")
-        
-        status_text = ""
-        if account_status:
-            status_text = f"\n**Account Status**: {', '.join(account_status)}"
-
-        icon_url = user_data.get('icon_img')
-        
-        media = []
-        if icon_url:
-            icon = await download_image(icon_url.split('?')[0], session)
-            if icon:
-                media.append(icon)
-        
-        text = f"""**Reddit User: u/{name}**
-Total Karma: {karma:,} (Link: {link_karma:,}, Comment: {comment_karma:,})
-Account created: {timestamp}
-{account_age_text}{status_text}
-"""
-        
-        result = MultimodalSequence([text] + media)
-        result.metadata = {
-            "username": name,
-            "total_karma": karma,
-            "link_karma": link_karma,
-            "comment_karma": comment_karma,
-            "created_utc": user_data.get('created_utc'),
-            "account_age_days": account_age_days if timestamp else None,
-            "account_age_years": account_age_years if timestamp else None,
-            "is_employee": is_employee,
-            "is_mod": is_mod,
-            "is_gold": is_gold,
-            "verified": verified,
-            "has_verified_email": has_verified_email,
-            "account_status": account_status
-        }
-        return result
-
     def _is_post_url(self, url: str) -> bool:
         return bool(re.search(r"/r/.*/comments/", url))
 
     def _is_subreddit_url(self, url: str) -> bool:
         return bool(re.search(r"/r/", url)) and not self._is_post_url(url)
-
-    def _is_user_url(self, url: str) -> bool:
-        return bool(re.search(r"/user/", url))
 
     def _extract_post_info(self, url: str) -> tuple[str, str] | None:
         match = re.search(r"/r/(?P<subreddit>[^/]+)/comments/(?P<post_id>[^/]+)", url)
@@ -658,21 +620,13 @@ Account created: {timestamp}
             return match.group('subreddit')
         return None
 
-    def _extract_username(self, url: str) -> str | None:
-        match = re.search(r"/user/(?P<username>[^/]+)", url)
-        if match:
-            return match.group('username')
-        return None
-
-    async def search(self, query: str, session: aiohttp.ClientSession, max_results: int = 10, start_date: str = None, end_date: str = None) -> list[str]:
+    async def search(self, query: str, session: aiohttp.ClientSession, max_results: int = 10) -> list[str]:
         """Search Reddit for posts related to the query.
         
         Args:
             query: The search query text
             session: aiohttp session to use for requests
             max_results: Maximum number of results to return
-            start_date: Optional start date for filtering results (YYYY-MM-DD format)
-            end_date: Optional end date for filtering results (YYYY-MM-DD format)
             
         Returns:
             List of Reddit post URLs found for the query
@@ -704,20 +658,7 @@ Account created: {timestamp}
                 't': 'week'  # Time filter: hour, day, week, month, year, all
             }
             
-            date_info = ""
-            if start_date or end_date:
-                date_info = f" (dates: {start_date} to {end_date})"
-            logger.info(f"Searching Reddit for: '{query}'{date_info} (max {max_results} results)")
-            
-            # Convert date strings to timestamps for filtering
-            start_timestamp = None
-            end_timestamp = None
-            if start_date:
-                from datetime import datetime
-                start_timestamp = datetime.strptime(start_date, "%Y-%m-%d").timestamp()
-            if end_date:
-                from datetime import datetime
-                end_timestamp = datetime.strptime(end_date + " 23:59:59", "%Y-%m-%d %H:%M:%S").timestamp()
+            logger.info(f"Searching Reddit for: '{query}' (max {max_results} results)")
             
             async with session.get(search_url, headers=headers, params=params, ssl=self._create_ssl_context()) as response:
                 if response.status == 200:
@@ -729,13 +670,6 @@ Account created: {timestamp}
                     for post in posts:
                         post_data = post.get('data', {})
                         permalink = post_data.get('permalink')
-                        created_utc = post_data.get('created_utc')
-                        
-                        # Apply date filtering if specified
-                        if start_timestamp and created_utc and created_utc < start_timestamp:
-                            continue
-                        if end_timestamp and created_utc and created_utc > end_timestamp:
-                            continue
                         
                         if permalink:
                             # Convert Reddit permalink to full URL
