@@ -428,9 +428,9 @@ class Reddit(RetrievalIntegration):
 
         # Fetch subreddit description for context
         subreddit_description = await self._get_subreddit_description(subreddit, session)
-        subreddit_context = ""
+        subreddit_context_line = ""
         if subreddit_description:
-            subreddit_context = f"\n**Subreddit Context**: {subreddit_description}"
+            subreddit_context_line = f"\n**Subreddit description**: {subreddit_description}"
 
         # External link analysis (still useful raw data)
         external_link_text = ""
@@ -439,9 +439,12 @@ class Reddit(RetrievalIntegration):
             if domain:
                 external_link_text += f" (Domain: {domain})"
 
-        full_text = f"""**Reddit Post in {subreddit}**{subreddit_context}
-Author: u/{author}
+        full_text = f"""**Reddit Post by user u/{author}**
+Subreddit: {subreddit}{subreddit_context_line}
+
+Post author: u/{author}
 Posted: {timestamp}
+URL: {url}
 Engagement: {upvotes:,} upvotes, {score:,} score ({upvote_ratio:.1%} upvote ratio)
 Comments: {num_comments:,}{external_link_text}
 

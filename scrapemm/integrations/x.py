@@ -165,10 +165,13 @@ class X(RetrievalIntegration):
             # Note: Comments are stored in metadata for stance analysis but not displayed in text
 
 
-            tweet_str = f"""**Post on X**
+            tweet_str = f"""**X Post by @{author.username}**
 Author: {author.name}, @{author.username}
-Posted on: {tweet.created_at.strftime("%B %d, %Y at %H:%M")}
-Likes: {tweet.public_metrics['like_count']} - Retweets: {tweet.public_metrics['retweet_count']} - Replies: {tweet.public_metrics['reply_count']} - Views: {tweet.public_metrics['impression_count']}
+Posted: {tweet.created_at.strftime("%B %d, %Y at %H:%M")}
+URL: https://x.com/{author.username}/status/{tweet.id}
+Engagement: {tweet.public_metrics['like_count']} likes, {tweet.public_metrics['retweet_count']} retweets, {tweet.public_metrics['reply_count']} replies
+Views: {tweet.public_metrics['impression_count']:,}
+
 {text}"""
             
             result = MultimodalSequence([tweet_str, *downloaded_media])
@@ -316,18 +319,10 @@ Account properties:
         try:
             logger.info(f"Searching X for: '{query}' (max {max_results} results)")
             
-            # Try multiple search strategies to improve results
-            # Note: Date filtering removed due to X API Basic tier limitations
-            search_strategies = [
-                # Original query with exact match
-                f'"{query}" -is:retweet lang:en',
-                # Looser query without quotes
-                f'{query} -is:retweet lang:en',
-                # Query with keywords only
-                f'{" ".join(query.split()[:3])} -is:retweet lang:en',
-                # Very broad query with just main keywords
-                f'{" OR ".join(query.split()[:2])} -is:retweet'
-            ]
+            # Optimized search strategy: balanced approach with all query words
+            # Excludes retweets to get original content, English language only
+            formatted_query = f'{query} -is:retweet lang:en'
+            logger.debug(f"X search query: '{formatted_query}'")
             
             # Use direct HTTP API call to avoid SSL issues with tweepy
             url = "https://api.twitter.com/2/tweets/search/recent"
@@ -345,45 +340,38 @@ Account properties:
             
             all_urls = []
             
-            # Try each search strategy until we get results
-            for i, formatted_query in enumerate(search_strategies):
-                logger.debug(f"X search strategy {i+1}: '{formatted_query}'")
+            params = {
+                'query': formatted_query,
+                'max_results': min(max_results * 3, 100),  # Get more tweets to filter from
+                'tweet.fields': 'id,author_id,created_at,public_metrics,context_annotations,lang,possibly_sensitive',
+                'user.fields': 'id,username,verified,public_metrics',
+                'expansions': 'author_id',
+                'sort_order': 'relevancy'  # Prioritize engaging content over recency
+            }
+            
+            try:
+                # Use our own session with SSL bypass or the provided session
+                if session.closed:
+                    async with aiohttp.ClientSession(connector=connector) as search_session:
+                        async with search_session.get(url, headers=headers, params=params) as response:
+                            all_urls = await self._process_search_response(response, max_results)
+                else:
+                    # Use provided session but replace connector temporarily
+                    original_connector = session._connector
+                    session._connector = connector
+                    try:
+                        async with session.get(url, headers=headers, params=params) as response:
+                            all_urls = await self._process_search_response(response, max_results)
+                    finally:
+                        session._connector = original_connector
                 
-                params = {
-                    'query': formatted_query,
-                    'max_results': min(max_results * 3, 100),  # Get more tweets to filter from
-                    'tweet.fields': 'id,author_id,created_at,public_metrics,context_annotations,lang,possibly_sensitive',
-                    'user.fields': 'id,username,verified,public_metrics',
-                    'expansions': 'author_id',
-                    'sort_order': 'relevancy'  # Changed from 'recency' to get more engaging content
-                }
-                
-                try:
-                    # Use our own session with SSL bypass or the provided session
-                    if session.closed:
-                        async with aiohttp.ClientSession(connector=connector) as search_session:
-                            async with search_session.get(url, headers=headers, params=params) as response:
-                                urls = await self._process_search_response(response, max_results)
-                    else:
-                        # Use provided session but replace connector temporarily
-                        original_connector = session._connector
-                        session._connector = connector
-                        try:
-                            async with session.get(url, headers=headers, params=params) as response:
-                                urls = await self._process_search_response(response, max_results)
-                        finally:
-                            session._connector = original_connector
+                if all_urls:
+                    logger.info(f"X search found {len(all_urls)} results")
+                else:
+                    logger.debug("X search found 0 results")
                     
-                    if urls:
-                        all_urls.extend(urls)
-                        logger.info(f"X search strategy {i+1} found {len(urls)} results")
-                        break  # Found results, stop trying other strategies
-                    else:
-                        logger.debug(f"X search strategy {i+1} found 0 results")
-                        
-                except Exception as e:
-                    logger.warning(f"X search strategy {i+1} failed: {e}")
-                    continue
+            except Exception as e:
+                logger.warning(f"X search failed: {e}")
             
             # If no real results found, generate some mock URLs for testing
             if not all_urls:
@@ -434,7 +422,7 @@ Account properties:
             # Create user ID to username mapping
             users_map = {user['id']: user['username'] for user in users}
             
-            # Filter and sort tweets by engagement and recency
+            # Filter tweets by age (for comment retrieval compatibility)
             filtered_tweets = []
             current_time = datetime.now(timezone.utc)
             max_age_days = 6  # Only get tweets from last 6 days for comment retrieval
@@ -453,38 +441,13 @@ Account properties:
                         logger.debug(f"Failed to parse date for tweet {tweet['id']}: {e}")
                         continue
                 
-                # Get engagement metrics
-                public_metrics = tweet.get('public_metrics', {})
-                like_count = public_metrics.get('like_count', 0)
-                retweet_count = public_metrics.get('retweet_count', 0)
-                reply_count = public_metrics.get('reply_count', 0)
-                
-                # Calculate engagement score (prioritize replies since we want comments)
-                engagement_score = (reply_count * 3) + (like_count * 2) + retweet_count
-                
-                # Filter by minimum engagement (at least some interaction)
-                min_engagement = 5  # At least 5 points of engagement
-                if engagement_score >= min_engagement:
-                    filtered_tweets.append({
-                        'tweet': tweet,
-                        'engagement_score': engagement_score,
-                        'age_days': age_days if 'age_days' in locals() else 0
-                    })
-                    logger.debug(f"Tweet {tweet['id']}: engagement={engagement_score}, age={age_days if 'age_days' in locals() else 'unknown'} days")
-                else:
-                    logger.debug(f"Skipping tweet {tweet['id']}: low engagement (score={engagement_score})")
+                filtered_tweets.append(tweet)
+                logger.debug(f"Tweet {tweet['id']}: age={age_days} days")
             
-            # Sort by engagement score (descending) then by recency
-            filtered_tweets.sort(key=lambda x: (x['engagement_score'], -x['age_days']), reverse=True)
+            logger.info(f"X filtering: {len(tweets)} total tweets -> {len(filtered_tweets)} after age filtering")
             
-            logger.info(f"X filtering: {len(tweets)} total tweets -> {len(filtered_tweets)} after engagement/age filtering")
-            if filtered_tweets:
-                top_scores = [t['engagement_score'] for t in filtered_tweets[:3]]
-                logger.info(f"Top 3 engagement scores: {top_scores}")
-            
-            # Build URLs from filtered and sorted tweets
-            for tweet_data in filtered_tweets[:max_results]:
-                tweet = tweet_data['tweet']
+            # Build URLs from filtered tweets (sorted by API relevancy)
+            for tweet in filtered_tweets[:max_results]:
                 tweet_id = tweet['id']
                 author_id = tweet.get('author_id')
                 
@@ -496,7 +459,7 @@ Account properties:
                     tweet_url = f"https://x.com/i/web/status/{tweet_id}"
                 
                 urls.append(tweet_url)
-                logger.debug(f"Added high-engagement X URL: {tweet_url} (score={tweet_data['engagement_score']})")
+                logger.debug(f"Added X URL: {tweet_url}")
                 
                 if len(urls) >= max_results:
                     break
