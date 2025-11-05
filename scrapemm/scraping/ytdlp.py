@@ -55,8 +55,6 @@ async def extract_metadata_with_ytdlp(url: str) -> dict[str, Any] | None:
 
         # Parse JSON output
         metadata = json.loads(stdout.decode())
-        with open('metadata.json', 'w') as f:
-            json.dump(metadata, f, indent=2)
         return metadata
 
     except Exception as e:
@@ -72,12 +70,12 @@ async def download_video_with_ytdlp(url: str) -> Video | None:
 
         cmd = [
             sys.executable,  # Ensure to use the same Python interpreter as the calling process
-            "-m"
-            "yt-dlp",
+            "-m",
+            "yt_dlp",
             "--no-playlist",
             "--no-warnings",
             "--quiet",
-            "--retries", "10", 
+            "--retries", "10",
         ]
 
         if "youtube" in url or "youtu.be" in url:
