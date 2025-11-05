@@ -4,3 +4,4 @@
 /dist/
 /config.yaml
 __pycache__/
+.DS_Store
