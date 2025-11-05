@@ -72,7 +72,7 @@ Configure API credentials for full profile information."""
 
     def _is_video_url(self, url: str) -> bool:
         """Checks if the URL is an Instagram video URL."""
-        return "instagram.com/reels" in url
+        return "instagram.com/reels" in url or "instagram.com/reel/" in url
 
     def _is_photo_url(self, url: str) -> bool:
         """Checks if the URL is an Instagram photo URL."""
