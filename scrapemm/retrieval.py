@@ -6,6 +6,7 @@ import aiohttp
 from ezmm import MultimodalSequence
 
 from scrapemm.integrations import retrieve_via_integration
+from scrapemm.scraping.decodo import decodo
 from scrapemm.scraping.firecrawl import firecrawl
 from scrapemm.util import run_with_semaphore
 
@@ -57,8 +58,9 @@ async def _retrieve_single(url: str, remove_urls: bool,
         # Ensure URL is a string
         url = str(url)
 
-        # First, try to use a matching API, otherwise scrape directly
+        # First, try to use a matching API integration, then Decodo, then Firecrawl as fallback
         return ((await retrieve_via_integration(url, session)) or
+                (await decodo.scrape(url, remove_urls, session)) or
                 (await firecrawl.scrape(url, remove_urls, session)))
 
     except Exception as e:
