@@ -133,7 +133,11 @@ async def to_multimodal_sequence(
 ) -> Optional[MultimodalSequence]:
     """Turns a scraped output into the corresponding MultimodalSequences
     by converting the HTML into Markdown and resolving media hyperlinks."""
-    text = md(html, heading_style="ATX")
+    try:
+        text = md(html, heading_style="ATX")
+    except RecursionError as e:
+        return None
+
     text = postprocess_scraped(text)
     return await resolve_media_hyperlinks(text, **kwargs)
 

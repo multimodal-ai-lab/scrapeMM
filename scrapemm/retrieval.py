@@ -3,13 +3,14 @@ from typing import Optional
 from traceback import format_exc
 
 import aiohttp
-from ezmm import MultimodalSequence
+from ezmm import MultimodalSequence, download_item
 
 from scrapemm.integrations import retrieve_via_integration
-from scrapemm.scraping import firecrawl, decodo
+from scrapemm.scraping import fire, decodo
 from scrapemm.util import run_with_semaphore
 
 logger = logging.getLogger("scrapeMM")
+METHODS = ["integrations", "firecrawl", "decodo"]
 
 
 async def retrieve(
@@ -38,7 +39,11 @@ async def retrieve(
         You can specify any subset in any order, e.g., ["decodo", "firecrawl"] or ["integrations"].
     """
     if methods is None:
-        methods = ["integrations", "firecrawl", "decodo"]
+        methods = METHODS
+
+    assert len(methods) >= 1
+    for method in methods:
+        assert method in METHODS
 
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
 
@@ -80,10 +85,14 @@ async def _retrieve_single(
         # Ensure URL is a string
         url = str(url)
 
+        # Try to download as medium
+        if medium := await download_item(url, session=session):
+            return MultimodalSequence(medium)
+
         # Define available retrieval methods
         method_map = {
             "integrations": lambda: retrieve_via_integration(url, session),
-            "firecrawl": lambda: firecrawl.scrape(url, remove_urls=remove_urls,
+            "firecrawl": lambda: fire.scrape(url, remove_urls=remove_urls,
                                                   session=session, actions=actions),
             "decodo": lambda: decodo.scrape(url, remove_urls, session),
         }

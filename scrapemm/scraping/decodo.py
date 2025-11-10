@@ -20,7 +20,6 @@ class Decodo:
     def __init__(self):
         self.username = None
         self.password = None
-        self._load_credentials()
         self.n_scrapes = 0
 
     def _load_credentials(self):
@@ -54,6 +53,9 @@ class Decodo:
         Returns:
             MultimodalSequence containing the scraped content, or None if scraping failed
         """
+        if not self._has_credentials():
+            self._load_credentials()
+
         if not self._has_credentials():
             logger.warning("Cannot scrape with Decodo: credentials not configured.")
             return None
@@ -105,7 +107,7 @@ class Decodo:
         # Create basic auth
         auth = aiohttp.BasicAuth(self.username, self.password)
 
-        logger.debug(f"Decodo request payload: {payload}")
+        # logger.debug(f"Decodo request payload: {payload}")
 
         try:
             async with session.post(
@@ -124,7 +126,7 @@ class Decodo:
                     except:
                         error_msg = await response.text()
 
-                    logger.warning(
+                    logger.info(
                         f"Failed to scrape {url} with Decodo\n"
                         f"Status code: {response.status} - Reason: {response.reason}\n"
                         f"Error details: {error_msg}"
@@ -146,7 +148,6 @@ class Decodo:
                         case _:
                             logger.debug(f"Error {response.status}: {response.reason}.")
 
-                    logger.debug("Skipping that URL.")
                     return None
 
                 # Parse response

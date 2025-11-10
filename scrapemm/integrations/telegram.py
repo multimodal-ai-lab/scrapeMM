@@ -19,10 +19,11 @@ logger = logging.getLogger("scrapeMM")
 class Telegram(RetrievalIntegration):
     """The Telegram integration for retrieving post contents from Telegram channels and groups."""
 
+    name = "Telegram"
     domains = ["t.me", "telegram.me"]
     session_path = "temp/telegram"
 
-    def __init__(self):
+    async def _connect(self):
         api_id = int(get_secret("telegram_api_id")) if get_secret("telegram_api_id") else None
         api_hash = get_secret("telegram_api_hash")
         bot_token = get_secret("telegram_bot_token")
@@ -38,9 +39,10 @@ class Telegram(RetrievalIntegration):
             self.connected = True
             logger.info("✅ Successfully connected to Telegram.")
         else:
+            self.connected = False
             logger.warning("❌ Telegram integration not configured: Missing API keys.")
 
-    async def get(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
+    async def _get(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
         """Retrieves content from a Telegram post URL."""
         assert get_domain(url) in self.domains
 
@@ -99,8 +101,7 @@ Forwards: {message.forwards}{reactions_text}
             return MultimodalSequence(text)
 
         except Exception as e:
-            print(f"Error retrieving Telegram content: {e}")
-            # raise
+            logger.warning(f"Error retrieving Telegram content: {e}")
             return None
 
     async def _get_media_from_message(self, chat, original_post, max_amp=10) -> list[Item]:

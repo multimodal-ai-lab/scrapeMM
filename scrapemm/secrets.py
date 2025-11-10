@@ -131,11 +131,11 @@ def configure_secrets(all_keys: bool = False):
     logging.debug("Configuring new secrets...")
 
     # Delete existing secrets
-    if SECRETS_PATH.exists():
+    if SECRETS_PATH.exists() and all_keys:
         SECRETS_PATH.unlink()
 
-    # Set up a new password
-    _get_password("🔐 Enter a password to encrypt your secrets (you'll need it later to decrypt them): ")
+        # Set up a new password
+        _get_password("🔐 Enter a password to encrypt your secrets (you'll need it later to decrypt them): ")
 
     prompted = False
     for key_name, description in SECRETS.items():

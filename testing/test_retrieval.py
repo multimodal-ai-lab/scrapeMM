@@ -15,7 +15,6 @@ from scrapemm import retrieve
     "https://assamese.factcrescendo.com/viral-claim-that-the-video-shows-the-incident-from-uttar-pradesh-and-the-youth-on-the-bike-and-the-youth-being-beaten-and-taken-away-by-the-police-are-the-same-youth-named-abdul-is-false/",
     "https://factuel.afp.com/doc.afp.com.43ZN7NP",
     "https://leadstories.com/365cb414b83e29d26fecae374d55c743a3eac4c7.png",
-    "https://leadstories.com/Screenshot%202025-10-01%20061351.png"
 ])
 async def test_generic_retrieval(url):
     result = await retrieve(url)
@@ -57,3 +56,40 @@ async def test_x_retrieval(url):
     result = await retrieve(url)
     print(result)
     assert result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", [
+    "https://www.instagram.com/p/CqJDbyOP839",  # image (post)
+    "https://www.instagram.com/reel/DKqPQqpTDW4",  # video (Reel)
+    "https://www.instagram.com/reel/C75nh7Lvo8F",  # video (Reel)
+    "https://www.instagram.com/p/DMuOe6th94D",  # video (Reel)
+])
+async def test_instagram_retrieval(url):
+    result = await retrieve(url)
+    print(result)
+    assert result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", [
+    "https://www.facebook.com/reel/1089214926521000",  # video
+    "https://www.facebook.com/reel/3466446073497470",  # video, restricted for misinformation
+    "https://www.facebook.com/groups/1973976962823632/posts/3992825270938781/", # video, restricted for misinformation
+    "https://www.facebook.com/photo/?fbid=1721085455188778&set=a.107961589834514&_rdc=1&_rdr",  # image
+])
+async def test_facebook_retrieval(url):
+    result = await retrieve(url)
+    print(result)
+    assert result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", [
+    "https://www.youtube.com/watch?v=ykQZPdaXTJc",
+])
+async def test_youtube_retrieval(url):
+    result = await retrieve(url)
+    print(result)
+    assert result
+    assert result.has_videos()

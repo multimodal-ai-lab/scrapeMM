@@ -1,8 +1,3 @@
-import logging
-
-logger = logging.getLogger("scrapeMM")
-logger.debug("Starting integrations...")
-
 from typing import Optional
 
 import aiohttp
@@ -20,12 +15,12 @@ from .youtube import YouTube
 RETRIEVAL_INTEGRATIONS = [X(), Telegram(), Bluesky(), TikTok(), Instagram(), Facebook(), YouTube()]
 DOMAIN_TO_INTEGRATION = {domain: integration
                          for integration in RETRIEVAL_INTEGRATIONS
-                         for domain in integration.domains
-                         if integration.connected}
+                         for domain in integration.domains}
 
 
 async def retrieve_via_integration(url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
     domain = get_domain(url)
     if domain in DOMAIN_TO_INTEGRATION:
         integration = DOMAIN_TO_INTEGRATION[domain]
-        return await integration.get(url, session)
+        if integration.connected or integration.connected is None:
+            return await integration.get(url, session)

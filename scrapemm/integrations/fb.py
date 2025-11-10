@@ -11,10 +11,10 @@ logger = logging.getLogger("scrapeMM")
 
 
 class Facebook(RetrievalIntegration):
-
+    name = "Facebook"
     domains = ["facebook.com", "www.facebook.com"]
 
-    def __init__(self):
+    async def _connect(self):
         # Check if yt-dlp is available
         self.ytdlp_available = check_ytdlp_available()
 
@@ -26,12 +26,8 @@ class Facebook(RetrievalIntegration):
             self.connected = False
             logger.warning("❌ Facebook integration not available: Neither API credentials nor yt-dlp found.")
 
-    async def get(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
+    async def _get(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
         """Retrieves content from a Facebook post URL."""
-        if not self.connected:
-            logger.error("❌ Facebook integration not connected. Cannot retrieve content.")
-            return None
-            
         if get_domain(url) not in self.domains:
             logger.error(f"❌ Invalid domain for Facebook: {get_domain(url)}")
             return None

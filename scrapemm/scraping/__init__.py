@@ -1,2 +1,2 @@
-from .firecrawl import firecrawl
+from .firecrawl import fire
 from .decodo import decodo

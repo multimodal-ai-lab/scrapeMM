@@ -12,26 +12,23 @@ logger = logging.getLogger("scrapeMM")
 
 class YouTube(RetrievalIntegration):
     """YouTube integration for downloading videos and shorts using yt-dlp."""
-    
+
+    name = "YouTube"
     domains = [
         "youtube.com", 
         "www.youtube.com", 
         "youtu.be", 
         "m.youtube.com"
     ]
-    
-    def __init__(self):
+
+    async def _connect(self):
         self.connected = check_ytdlp_available()
         if not self.connected:
             logger.warning("❌ YouTube integration disabled: yt-dlp not available")
         else:
             logger.info("✅ YouTube integration enabled")
 
-    async def get(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
+    async def _get(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
         """Downloads YouTube video or short using yt-dlp."""
-        if not self.connected:
-            logger.error("❌ YouTube integration not connected")
-            return None
-            
-        logger.info(f"📺 Downloading YouTube content: {url}")
+        logger.debug(f"📺 Downloading YouTube content: {url}")
         return await get_video_with_ytdlp(url, session, "YouTube")

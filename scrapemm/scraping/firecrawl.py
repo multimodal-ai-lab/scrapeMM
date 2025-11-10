@@ -9,8 +9,6 @@ from scrapemm.common import get_config_var, update_config
 from scrapemm.util import read_urls_from_file, get_domain
 from scrapemm.scraping.util import find_firecrawl, to_multimodal_sequence, firecrawl_is_running
 
-from firecrawl import AsyncFirecrawl
-
 logger = logging.getLogger("scrapeMM")
 
 FIRECRAWL_URLS = [
@@ -55,8 +53,12 @@ class Firecrawl:
     firecrawl_url: str
 
     def __init__(self):
-        self.firecrawl_url = locate_firecrawl()
         self.n_scrapes = 0
+        self._firecrawl = None
+
+    def connect(self):
+        from firecrawl import AsyncFirecrawl
+        self.firecrawl_url = locate_firecrawl()
         self._firecrawl = AsyncFirecrawl(api_url=self.firecrawl_url)
 
     async def scrape(self,
@@ -66,6 +68,9 @@ class Firecrawl:
                      **kwargs) -> Optional[MultimodalSequence]:
         if is_no_bot_site(url):
             return None
+
+        if not self._firecrawl:
+            self.connect()
 
         self.n_scrapes += 1
         document = await self._firecrawl.scrape(url,
@@ -82,7 +87,7 @@ class Firecrawl:
             return await to_multimodal_sequence(html, remove_urls=remove_urls, session=session)
 
 
-firecrawl = Firecrawl()
+fire = Firecrawl()
 
 
 def is_no_bot_site(url: str) -> bool:
