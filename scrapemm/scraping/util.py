@@ -1,13 +1,14 @@
+import base64
+import binascii
 import logging
+import re
 from typing import Optional
 
 import aiohttp
 import requests
-from requests.exceptions import ReadTimeout, ConnectionError, RetryError
 from ezmm import MultimodalSequence, download_item, Item, Image, Video
 from markdownify import markdownify as md
-import re
-import base64
+from requests.exceptions import ReadTimeout, ConnectionError, RetryError
 
 from scrapemm.util import run_with_semaphore
 
@@ -18,6 +19,7 @@ DATA_URI_REGEX = r"data:([\w/+.-]+/[\w.+-]+);base64,([A-Za-z0-9+/=]+)"
 MD_HYPERLINK_REGEX = rf'(!?\[([^]^[]*)\]\((.*?)(?: "[^"]*")?\))'
 
 logger = logging.getLogger("scrapeMM")
+
 
 def find_firecrawl(urls):
     for url in urls:
@@ -53,8 +55,8 @@ async def resolve_media_hyperlinks(
         text: str, session: aiohttp.ClientSession,
         remove_urls: bool = False,
 ) -> Optional[MultimodalSequence]:
-    """Identifies up to MAX_MEDIA_PER_PAGE image URLs, downloads images that
-    have substantial size (larger than 256 x 256) and replaces the
+    """Downloads all media that are hyperlinked in the provided Markdown text.
+    Only considers images with substantial size (larger than 256 x 256) and replaces the
     respective Markdown hyperlinks with their proper image reference."""
 
     if text is None:
@@ -94,9 +96,6 @@ async def resolve_media_hyperlinks(
             media_count += 1 if not to_ignore else 0
         elif remove_urls:
             text = text.replace(full_match, hypertext)
-
-        if media_count >= MAX_MEDIA_PER_PAGE:
-            break
 
     return MultimodalSequence(text)
 
@@ -147,7 +146,7 @@ def sanitize(text: str) -> str:
 def from_base64(b64_data: str, mime_type: str = "image/jpeg") -> Optional[Item]:
     """Converts a base64-encoded image to an Item object."""
     try:
-        binary_data = base64.b64decode(b64_data)
+        binary_data = base64.b64decode(b64_data, validate=True)
         if binary_data:
             if mime_type.startswith("image/"):
                 return Image(binary_data=binary_data)
@@ -155,6 +154,8 @@ def from_base64(b64_data: str, mime_type: str = "image/jpeg") -> Optional[Item]:
                 return Video(binary_data=binary_data)
             else:
                 raise ValueError(f"Unsupported media type: {mime_type}")
+    except binascii.Error:  # base64 validation failed
+        return
     except Exception as e:
         logger.warning(f"Error decoding base64 data!\n"
                        f"{type(e).__name__}: {e}")

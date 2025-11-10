@@ -122,7 +122,9 @@ class TikTok(RetrievalIntegration):
             video_request = QueryVideoRequest(
                 fields=video_fields,
                 query=query,
-                max_count=1
+                max_count=1,
+                start_date="20200101",
+                end_date=datetime.now().strftime("%Y%m%d"),
             )
 
             # Execute the query

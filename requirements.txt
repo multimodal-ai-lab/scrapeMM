@@ -2,7 +2,7 @@ pytest~=8.4.1
 aiohttp~=3.12.13
 numpy~=1.26.4
 requests~=2.32.4
-ezMM~=0.3.1
+ezMM~=0.3.4
 Telethon~=1.40.0
 PyYAML~=6.0.1
 tweepy~=4.16.0
@@ -16,3 +16,4 @@ atproto
 TikTokResearchApi
 yt-dlp
 cryptography
+firecrawl-py~=4.6.0

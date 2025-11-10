@@ -1,20 +1,24 @@
 import logging
+from typing import Optional
 from traceback import format_exc
 
 import aiohttp
 from ezmm import MultimodalSequence
 
 from scrapemm.integrations import retrieve_via_integration
-from scrapemm.scraping.decodo import decodo
-from scrapemm.scraping.firecrawl import firecrawl
+from scrapemm.scraping import firecrawl, decodo
 from scrapemm.util import run_with_semaphore
 
 logger = logging.getLogger("scrapeMM")
 
 
-async def retrieve(urls: str | list[str], remove_urls: bool = True,
-                   show_progress: bool = True,
-                   methods: list[str] = ["integrations", "decodo", "firecrawl"]) -> MultimodalSequence | list[MultimodalSequence | None] | None:
+async def retrieve(
+        urls: str | list[str],
+        remove_urls: bool = False,
+        show_progress: bool = True,
+        actions: list[dict] = None,
+        methods: list[str] = None
+) -> Optional[MultimodalSequence] | list[Optional[MultimodalSequence]]:
     """Main function of this repository. Downloads the contents present at the given URL(s).
     For each URL, returns a MultimodalSequence containing text, images, and videos.
     Returns None if the corresponding URL is not supported or if retrieval failed.
@@ -22,46 +26,56 @@ async def retrieve(urls: str | list[str], remove_urls: bool = True,
     :param urls: The URL(s) to retrieve.
     :param remove_urls: Whether to remove URLs from hyperlinks contained in the
         retrieved text (and only keep the hypertext).
+    :param show_progress: Whether to show a progress bar while retrieving URLs.
+    :param actions: A list of actions to perform with Firecrawl on the webpage before scraping.
+        The actions will be ignored if an API integration (e.g., TikTok) is used to retrieve the content.
+        As of Nov 2025, self-hosted Firecrawl instances do not support actions.
     :param show_progress: Whether to show a progress bar for batch retrieval.
     :param methods: List of retrieval methods to use in order. Available methods:
-        "integrations" (API integrations for Twitter, Instagram, etc.),
-        "decodo" (Decodo Web Scraping API),
-        "firecrawl" (Firecrawl scraping service).
-        Default is ["integrations", "decodo", "firecrawl"].
+        - "integrations" (API integrations for Twitter, Instagram, etc.)
+        - "firecrawl" (Firecrawl scraping service)
+        - "decodo" (Decodo Web Scraping API)
         You can specify any subset in any order, e.g., ["decodo", "firecrawl"] or ["integrations"].
-    TODO: Add ability to suppress progress bar.
-    TODO: Add ability to navigate the webpage
     """
+    if methods is None:
+        methods = ["integrations", "firecrawl", "decodo"]
+
+    assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
+
+    # Ensure URLs are string or list
+    single_url = isinstance(urls, str)
+    urls_to_retrieve = [urls] if single_url else urls
+
+    if len(urls_to_retrieve) == 0:
+        return []
+
+    if actions:
+        raise NotImplementedError("Actions are not supported yet.")
 
     async with aiohttp.ClientSession() as session:
-        if isinstance(urls, str):
-            return await _retrieve_single(urls, remove_urls, session, methods)
+        # Remove duplicates
+        urls_unique = set(urls_to_retrieve)
 
-        elif isinstance(urls, list):
-            if len(urls) == 0:
-                return []
-            elif len(urls) == 1:
-                return [await _retrieve_single(urls[0], remove_urls, session, methods)]
+        # Retrieve URLs concurrently
+        tasks = [_retrieve_single(url, remove_urls, session, methods, actions) for url in urls_unique]
+        results = await run_with_semaphore(tasks, limit=20, show_progress=show_progress and len(urls_to_retrieve) > 1,
+                                           progress_description="Retrieving URLs...")
 
-            # Remove duplicates
-            urls_unique = set(urls)
-
-            # Retrieve URLs concurrently
-            tasks = [_retrieve_single(url, remove_urls, session, methods) for url in urls_unique]
-            results = await run_with_semaphore(tasks, limit=20, show_progress=show_progress,
-                                               progress_description="Retrieving URLs...")
-
-            # Reconstruct output list
-            results = dict(zip(urls_unique, results))
-            return [results[url] for url in urls]
-
+        # Reconstruct output list
+        results = dict(zip(urls_unique, results))
+        if single_url:
+            return results[urls]
         else:
-            raise ValueError("'urls' must be a string or a list of strings.")
+            return [results[url] for url in urls_to_retrieve]
 
 
-async def _retrieve_single(url: str, remove_urls: bool,
-                           session: aiohttp.ClientSession,
-                           methods: list[str]) -> MultimodalSequence | None:
+async def _retrieve_single(
+        url: str,
+        remove_urls: bool,
+        session: aiohttp.ClientSession,
+        methods: list[str],
+        actions: list[dict] = None,
+) -> Optional[MultimodalSequence]:
     try:
         # Ensure URL is a string
         url = str(url)
@@ -69,8 +83,9 @@ async def _retrieve_single(url: str, remove_urls: bool,
         # Define available retrieval methods
         method_map = {
             "integrations": lambda: retrieve_via_integration(url, session),
+            "firecrawl": lambda: firecrawl.scrape(url, remove_urls=remove_urls,
+                                                  session=session, actions=actions),
             "decodo": lambda: decodo.scrape(url, remove_urls, session),
-            "firecrawl": lambda: firecrawl.scrape(url, remove_urls, session),
         }
 
         # Try each method in the specified order until one succeeds
@@ -87,9 +102,8 @@ async def _retrieve_single(url: str, remove_urls: bool,
                 return result
 
         # All methods failed
-        logger.debug(f"All retrieval methods failed for URL: {url}")
+        logger.warning(f"All retrieval methods failed for URL: {url}")
         return None
 
     except Exception as e:
         logger.error(f"Error while retrieving URL '{url}'.\n" + format_exc())
-        return None

@@ -1,6 +1,8 @@
 import logging
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
+import sqlite3
 
 import aiohttp
 from ezmm import MultimodalSequence, Image, Item, Video
@@ -27,7 +29,12 @@ class Telegram(RetrievalIntegration):
 
         if api_id and api_hash and bot_token:
             self.client = TelegramClient(self.session_path, api_id, api_hash)
-            self.client.start(bot_token=bot_token)
+            try:
+                self.client.start(bot_token=bot_token)
+            except sqlite3.OperationalError:  # Database is locked from an interrupted previous session
+                # Remove the database file and try again
+                journal_path = Path(self.session_path + ".session-journal")
+                journal_path.unlink(missing_ok=True)
             self.connected = True
             logger.info("✅ Successfully connected to Telegram.")
         else:

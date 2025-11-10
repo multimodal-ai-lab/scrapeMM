@@ -14,6 +14,8 @@ from scrapemm import retrieve
     "https://www.washingtonpost.com/politics/2024/05/15/bidens-false-claim-that-inflation-was-9-percent-when-he-took-office/",
     "https://assamese.factcrescendo.com/viral-claim-that-the-video-shows-the-incident-from-uttar-pradesh-and-the-youth-on-the-bike-and-the-youth-being-beaten-and-taken-away-by-the-police-are-the-same-youth-named-abdul-is-false/",
     "https://factuel.afp.com/doc.afp.com.43ZN7NP",
+    "https://leadstories.com/365cb414b83e29d26fecae374d55c743a3eac4c7.png",
+    "https://leadstories.com/Screenshot%202025-10-01%20061351.png"
 ])
 async def test_generic_retrieval(url):
     result = await retrieve(url)
@@ -39,7 +41,6 @@ async def test_telegram_retrieval(url):
 @pytest.mark.parametrize("url", [
     "https://www.tiktok.com/@realdonaldtrump/video/7433870905635409198",
     "https://www.tiktok.com/@xxxx.xxxx5743/video/7521704371109793046"
-
 ])
 async def test_tiktok_retrieval(url):
     result = await retrieve(url)
