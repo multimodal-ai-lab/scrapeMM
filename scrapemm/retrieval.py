@@ -18,8 +18,9 @@ async def retrieve(
         remove_urls: bool = False,
         show_progress: bool = True,
         actions: list[dict] = None,
-        methods: list[str] = None
-) -> Optional[MultimodalSequence] | list[Optional[MultimodalSequence]]:
+        methods: list[str] = None,
+        format: str = "multimodal_sequence",
+) -> Optional[MultimodalSequence | str] | list[Optional[MultimodalSequence | str]]:
     """Main function of this repository. Downloads the contents present at the given URL(s).
     For each URL, returns a MultimodalSequence containing text, images, and videos.
     Returns None if the corresponding URL is not supported or if retrieval failed.
@@ -37,6 +38,9 @@ async def retrieve(
         - "firecrawl" (Firecrawl scraping service)
         - "decodo" (Decodo Web Scraping API)
         You can specify any subset in any order, e.g., ["decodo", "firecrawl"] or ["integrations"].
+    :param format: The format of the output. Available formats:
+        - "multimodal_sequence" (MultimodalSequence containing parsed and downloaded media from the page)
+        - "html" (string containing the raw HTML code of the page, not compatible with 'integrations' method)
     """
     if methods is None:
         methods = METHODS
@@ -62,7 +66,7 @@ async def retrieve(
         urls_unique = set(urls_to_retrieve)
 
         # Retrieve URLs concurrently
-        tasks = [_retrieve_single(url, remove_urls, session, methods, actions) for url in urls_unique]
+        tasks = [_retrieve_single(url, remove_urls, session, methods, actions, format) for url in urls_unique]
         results = await run_with_semaphore(tasks, limit=20, show_progress=show_progress and len(urls_to_retrieve) > 1,
                                            progress_description="Retrieving URLs...")
 
@@ -80,21 +84,27 @@ async def _retrieve_single(
         session: aiohttp.ClientSession,
         methods: list[str],
         actions: list[dict] = None,
-) -> Optional[MultimodalSequence]:
+        format: str = "multimodal_sequence",
+) -> Optional[MultimodalSequence | str]:
     try:
         # Ensure URL is a string
         url = str(url)
 
+        # Ensure compatibility with methods
+        if format == "html" and "integrations" in methods:
+            methods.remove("integrations")
+
         # Try to download as medium
-        if medium := await download_item(url, session=session):
-            return MultimodalSequence(medium)
+        if format != "html":
+            if medium := await download_item(url, session=session):
+                return MultimodalSequence(medium)
 
         # Define available retrieval methods
         method_map = {
             "integrations": lambda: retrieve_via_integration(url, session),
             "firecrawl": lambda: fire.scrape(url, remove_urls=remove_urls,
-                                                  session=session, actions=actions),
-            "decodo": lambda: decodo.scrape(url, remove_urls, session),
+                                                  session=session, format=format, actions=actions),
+            "decodo": lambda: decodo.scrape(url, remove_urls, session, format=format),
         }
 
         # Try each method in the specified order until one succeeds

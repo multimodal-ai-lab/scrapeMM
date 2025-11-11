@@ -1,6 +1,6 @@
 [project]
 name = "scrapeMM"
-version = "0.3.0"
+version = "0.3.1"
 description = "LLM-friendly scraper for media and text from social media and the open web."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -17,6 +17,7 @@ dependencies = [
     "TikTokResearchApi",
     "yt-dlp",
     "cryptography",
+    "firecrawl-py"
 ]
 
 [project.urls]

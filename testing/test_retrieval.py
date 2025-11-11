@@ -1,6 +1,25 @@
 import pytest
+from ezmm import MultimodalSequence
 
 from scrapemm import retrieve
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", [
+    "https://www.vishvasnews.com/viral/fact-check-upsc-has-not-reduced-the-maximum-age-limit-for-ias-and-ips-exams/",
+    "https://health.medicaldialogues.in/fact-check/brain-health-fact-check/fact-check-is-sprite-the-best-remedy-for-headaches-in-the-world-140368",
+    "https://www.washingtonpost.com/politics/2024/05/15/bidens-false-claim-that-inflation-was-9-percent-when-he-took-office/",
+    "https://assamese.factcrescendo.com/viral-claim-that-the-video-shows-the-incident-from-uttar-pradesh-and-the-youth-on-the-bike-and-the-youth-being-beaten-and-taken-away-by-the-police-are-the-same-youth-named-abdul-is-false/",
+    "https://factuel.afp.com/doc.afp.com.43ZN7NP",
+    "https://leadstories.com/365cb414b83e29d26fecae374d55c743a3eac4c7.png",
+])
+@pytest.mark.parametrize("method", ["firecrawl", "decodo"])
+async def test_generic_retrieval(url, method):
+    result = await retrieve(url, methods=[method])
+    print(result)
+    assert result
+    assert isinstance(result, MultimodalSequence)
+    assert result.has_images()
 
 
 @pytest.mark.asyncio
@@ -8,18 +27,13 @@ from scrapemm import retrieve
     "https://www.zeit.de/politik/deutschland/2025-07/spionage-iran-festnahme-anschlag-juden-berlin-daenemark",
     "https://factnameh.com/fa/fact-checks/2025-04-16-araghchi-witkoff-fake-photo",
     "https://www.thip.media/health-news-fact-check/fact-check-can-a-kalava-on-the-wrist-prevent-paralysis/74724/",
-    "https://www.vishvasnews.com/viral/fact-check-upsc-has-not-reduced-the-maximum-age-limit-for-ias-and-ips-exams/",
-    "https://www.thip.media/health-news-fact-check/fact-check-does-wrapping-body-with-banana-leaves-help-with-obesity-and-indigestion/71333/",
-    "https://health.medicaldialogues.in/fact-check/brain-health-fact-check/fact-check-is-sprite-the-best-remedy-for-headaches-in-the-world-140368",
-    "https://www.washingtonpost.com/politics/2024/05/15/bidens-false-claim-that-inflation-was-9-percent-when-he-took-office/",
-    "https://assamese.factcrescendo.com/viral-claim-that-the-video-shows-the-incident-from-uttar-pradesh-and-the-youth-on-the-bike-and-the-youth-being-beaten-and-taken-away-by-the-police-are-the-same-youth-named-abdul-is-false/",
-    "https://factuel.afp.com/doc.afp.com.43ZN7NP",
-    "https://leadstories.com/365cb414b83e29d26fecae374d55c743a3eac4c7.png",
 ])
-async def test_generic_retrieval(url):
-    result = await retrieve(url)
+@pytest.mark.parametrize("method", ["firecrawl", "decodo"])
+async def test_html_retrieval(url, method):
+    result = await retrieve(url, format="html", methods=[method])
     print(result)
     assert result
+    assert isinstance(result, str)
 
 
 @pytest.mark.asyncio
@@ -75,7 +89,7 @@ async def test_instagram_retrieval(url):
 @pytest.mark.parametrize("url", [
     "https://www.facebook.com/reel/1089214926521000",  # video
     "https://www.facebook.com/reel/3466446073497470",  # video, restricted for misinformation
-    "https://www.facebook.com/groups/1973976962823632/posts/3992825270938781/", # video, restricted for misinformation
+    "https://www.facebook.com/groups/1973976962823632/posts/3992825270938781/",  # video, restricted for misinformation
     "https://www.facebook.com/photo/?fbid=1721085455188778&set=a.107961589834514&_rdc=1&_rdr",  # image
 ])
 async def test_facebook_retrieval(url):

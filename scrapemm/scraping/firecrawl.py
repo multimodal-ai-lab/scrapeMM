@@ -65,7 +65,8 @@ class Firecrawl:
                      url: str,
                      remove_urls: bool,
                      session: aiohttp.ClientSession,
-                     **kwargs) -> Optional[MultimodalSequence]:
+                     format: str,
+                     **kwargs) -> Optional[MultimodalSequence | str]:
         if is_no_bot_site(url):
             return None
 
@@ -84,7 +85,10 @@ class Firecrawl:
         html = document.html
 
         if html:
-            return await to_multimodal_sequence(html, remove_urls=remove_urls, session=session)
+            if format == "html":
+                return html
+            else:
+                return await to_multimodal_sequence(html, remove_urls=remove_urls, session=session)
 
 
 fire = Firecrawl()

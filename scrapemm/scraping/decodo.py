@@ -39,8 +39,9 @@ class Decodo:
     async def scrape(self, url: str,
                      remove_urls: bool,
                      session: aiohttp.ClientSession,
+                     format: str,
                      enable_js: bool = True,
-                     timeout: int = 30) -> Optional[MultimodalSequence]:
+                     timeout: int = 30) -> Optional[MultimodalSequence | str]:
         """Downloads the contents of the specified webpage using Decodo's API.
 
         Args:
@@ -70,7 +71,10 @@ class Decodo:
             html = await self._call_decodo(url, session, enable_js=False, timeout=timeout)
 
         if html:
-            return await to_multimodal_sequence(html, remove_urls=remove_urls, session=session)
+            if format == "html":
+                return html
+            else:
+                return await to_multimodal_sequence(html, remove_urls=remove_urls, session=session)
         return None
 
     async def _call_decodo(self, url: str,
