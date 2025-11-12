@@ -114,7 +114,11 @@ async def _retrieve_single(
                 continue
 
             logger.debug(f"Trying method: {method_name}")
-            result = await method_map[method_name]()
+            try:
+                result = await method_map[method_name]()
+            except Exception as e:
+                logger.warning(f"Error while retrieving with method '{method_name}': {e}")
+                result = None
 
             if result is not None:
                 logger.debug(f"Successfully retrieved with method: {method_name}")

@@ -6,6 +6,7 @@ from typing import Optional
 
 import aiohttp
 import requests
+from PIL import UnidentifiedImageError
 from ezmm import MultimodalSequence, download_item, Item, Image, Video
 from markdownify import markdownify as md
 from requests.exceptions import ReadTimeout, ConnectionError, RetryError
@@ -159,7 +160,8 @@ def from_base64(b64_data: str, mime_type: str = "image/jpeg") -> Optional[Item]:
             else:
                 raise ValueError(f"Unsupported media type: {mime_type}")
     except binascii.Error:  # base64 validation failed
-        return
+        return None
+    except UnidentifiedImageError:  # Pillow could not identify image format
+        return None
     except Exception as e:
-        logger.warning(f"Error decoding base64 data!\n"
-                       f"{type(e).__name__}: {e}")
+        logger.debug(f"Error decoding {mime_type} base64 data. \n {type(e).__name__}: {e}")

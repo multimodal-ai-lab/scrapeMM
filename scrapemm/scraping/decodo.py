@@ -111,8 +111,6 @@ class Decodo:
         # Create basic auth
         auth = aiohttp.BasicAuth(self.username, self.password)
 
-        # logger.debug(f"Decodo request payload: {payload}")
-
         try:
             async with session.post(
                 self.DECODO_API_URL,
@@ -121,26 +119,17 @@ class Decodo:
                 auth=auth,
                 timeout=aiohttp.ClientTimeout(total=timeout)
             ) as response:
-
+                # Validate response health
                 if response.status != 200:
-                    # Try to get the error message from response
-                    try:
-                        error_body = await response.json()
-                        error_msg = error_body.get('message', error_body)
-                    except:
-                        error_msg = await response.text()
-
-                    logger.info(
-                        f"Failed to scrape {url} with Decodo\n"
-                        f"Status code: {response.status} - Reason: {response.reason}\n"
-                        f"Error details: {error_msg}"
-                    )
-
+                    logger.debug("Communication with Decodo API failed.")
                     match response.status:
+                        case 400:
+                            logger.debug("Error 400: Bad request. If you use JavaScript, make sure you have the "
+                                         "Advanced plan subscription.")
                         case 401:
                             logger.error("Error 401: Unauthorized. Check your Decodo credentials.")
                         case 402:
-                            logger.debug("Error 402: Payment required. Check your Decodo subscription.")
+                            logger.error("Error 402: Payment required. Check your Decodo subscription.")
                         case 403:
                             logger.debug("Error 403: Forbidden.")
                         case 408:
@@ -156,6 +145,13 @@ class Decodo:
 
                 # Parse response
                 json_response = await response.json()
+
+                # Validate if scrape was successful
+                if json_response.get("status") == "failed":
+                    status_code = json_response.get("status_code")
+                    message = json_response.get("message")
+                    logger.info(f"Decodo failed to scrape. Error {status_code}: {message}")
+                    return None
 
                 # Extract HTML content from results
                 if "results" in json_response and len(json_response["results"]) > 0:
