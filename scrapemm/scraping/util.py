@@ -54,6 +54,7 @@ def postprocess_scraped(text: str) -> str:
 
 async def resolve_media_hyperlinks(
         text: str, session: aiohttp.ClientSession,
+        domain_root: str = None,
         remove_urls: bool = False,
 ) -> Optional[MultimodalSequence]:
     """Downloads all media that are hyperlinked in the provided Markdown text.
@@ -65,19 +66,21 @@ async def resolve_media_hyperlinks(
 
     # Extract URLs and base64-encoded data from the text
     hyperlinks = get_markdown_hyperlinks(text)
-    urls = set()
+    hrefs_urls = dict()
     data_uris = set()
     for _, _, href in hyperlinks:
         if is_url(href):
-            urls.add(href)
+            hrefs_urls[href] = href
+        elif domain_root and is_root_relative_url(href):
+            hrefs_urls[href] = f"{domain_root}{href}"
         elif is_data_uri(href):
             data_uris.add(href)
 
     # Try to download media for each URL
-    tasks = [download_item(url, session=session) for url in urls]
+    tasks = [download_item(url, session=session) for url in hrefs_urls.values()]
     media: list[Item | None] = await run_with_semaphore(tasks, limit=100, show_progress=False)
 
-    href_media = dict(zip(urls, media))
+    href_media = dict(zip(hrefs_urls.keys(), media))
 
     # Convert each base64-encoded data to the respective medium
     for data_uri in data_uris:
@@ -102,13 +105,27 @@ async def resolve_media_hyperlinks(
 
 
 def is_url(href: str) -> bool:
-    """Returns True iff the given string is a valid URL."""
+    """Returns True iff the given string is an absolute HTTP URL."""
     return re.match(URL_REGEX, href) is not None
+
+
+def is_root_relative_url(href: str) -> bool:
+    """Returns True iff the given string is a root-relative URL."""
+    return href.startswith("/")
 
 
 def is_data_uri(href: str) -> bool:
     """Returns True iff the given string is a valid data URI."""
     return re.match(DATA_URI_REGEX, href) is not None
+
+
+def get_domain_root(url: str) -> Optional[str]:
+    """Extracts the domain root from the given URL. Allows for missing http(s) prefix."""
+    match = re.match(r"(:?https?://)?([^/]+)", url)
+    if match:
+        return match.group(0)
+    else:
+        return None
 
 
 def get_markdown_hyperlinks(text: str) -> list[tuple[str, str, str]]:

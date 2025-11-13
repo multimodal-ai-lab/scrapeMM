@@ -6,7 +6,7 @@ import aiohttp
 from ezmm import MultimodalSequence
 
 from scrapemm.secrets import get_secret
-from scrapemm.scraping.util import to_multimodal_sequence
+from scrapemm.scraping.util import to_multimodal_sequence, get_domain_root
 
 logger = logging.getLogger("scrapeMM")
 
@@ -74,7 +74,8 @@ class Decodo:
             if format == "html":
                 return html
             else:
-                return await to_multimodal_sequence(html, remove_urls=remove_urls, session=session)
+                domain_root = get_domain_root(url)
+                return await to_multimodal_sequence(html, remove_urls=remove_urls, session=session, domain_root=domain_root)
         return None
 
     async def _call_decodo(self, url: str,

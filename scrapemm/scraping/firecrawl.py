@@ -7,7 +7,7 @@ from ezmm import MultimodalSequence
 
 from scrapemm.common import get_config_var, update_config
 from scrapemm.util import read_urls_from_file, get_domain
-from scrapemm.scraping.util import find_firecrawl, to_multimodal_sequence, firecrawl_is_running
+from scrapemm.scraping.util import find_firecrawl, to_multimodal_sequence, firecrawl_is_running, get_domain_root
 
 logger = logging.getLogger("scrapeMM")
 
@@ -58,6 +58,7 @@ class Firecrawl:
 
     def connect(self):
         from firecrawl import AsyncFirecrawl
+        logging.getLogger("firecrawl").setLevel(logging.WARNING)
         self.firecrawl_url = locate_firecrawl()
         self._firecrawl = AsyncFirecrawl(api_url=self.firecrawl_url)
 
@@ -88,7 +89,9 @@ class Firecrawl:
             if format == "html":
                 return html
             else:
-                return await to_multimodal_sequence(html, remove_urls=remove_urls, session=session)
+                domain_root = get_domain_root(url)
+                return await to_multimodal_sequence(html, remove_urls=remove_urls, session=session, domain_root=domain_root)
+        return None
 
 
 fire = Firecrawl()

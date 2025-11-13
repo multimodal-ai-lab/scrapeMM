@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Optional, Collection
 from traceback import format_exc
 
 import aiohttp
@@ -14,7 +14,7 @@ METHODS = ["integrations", "firecrawl", "decodo"]
 
 
 async def retrieve(
-        urls: str | list[str],
+        urls: str | Collection[str],
         remove_urls: bool = False,
         show_progress: bool = True,
         actions: list[dict] = None,
