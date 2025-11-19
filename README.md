@@ -23,14 +23,15 @@ URL (string)   -->   retrieve()   -->   MultimodalSequence
 ```
 The `MultimodalSequence` is a sequence of Markdown-formatted text and media provided by the [ezMM](https://github.com/multimodal-ai-lab/ezmm) library.
 
-Web scraping is done with [Firecrawl](https://github.com/mendableai/firecrawl).
+Web scraping is done with [Firecrawl](https://github.com/mendableai/firecrawl) and [Decodo](https://decodo.com/).
 
 ## Supported Proprietary APIs
 - ✅ X/Twitter
 - ✅ Telegram
 - ✅ Bluesky
 - ✅ TikTok
+- ⚠️ Facebook (working only sometimes and only with yt-dlp and Decodo)
+- ⚠️ Instagram (done for videos but not for images yet)
+- ⚠️ YouTube (working sometimes)
 - ⏳ Threads
 - ⏳ Reddit
-- ⏳ Facebook
-- ⏳ Instagram

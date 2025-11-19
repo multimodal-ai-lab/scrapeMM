@@ -11,7 +11,6 @@ from tweepy.asynchronous import AsyncClient
 
 from scrapemm.secrets import get_secret
 from scrapemm.integrations.base import RetrievalIntegration
-from scrapemm.util import get_domain
 
 logger = logging.getLogger("scrapeMM")
 
@@ -20,6 +19,7 @@ class X(RetrievalIntegration):
     """The X (Twitter) integration. Requires "Basic" API access to work. For more info, see
     https://developer.x.com/en/docs/twitter-api/getting-started/about-twitter-api#v2-access-level
     "Free" API access does NOT include reading Tweets."""
+    name = "X (Twitter)"
     domains = ["twitter.com", "x.com", "t.co"]
 
     account_explanation = """X accounts having a "blue" verification fulfill a basic set of criteria,
@@ -37,17 +37,17 @@ class X(RetrievalIntegration):
     
     The "location" of a user profile is a user-provided string and is not guaranteed to be accurate."""
 
-    def __init__(self):
+    async def _connect(self):
         bearer_token = get_secret("x_bearer_token")
         if bearer_token:
             self.client = AsyncClient(bearer_token=bearer_token, wait_on_rate_limit=True)
             self.connected = True
             logger.info("✅ Successfully connected to X.")
         else:
+            self.connected = False
             logger.warning("❌ X (Twitter) integration not configured: Missing bearer token.")
 
-    async def get(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
-        assert get_domain(url) in self.domains
+    async def _get(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
         tweet_id = extract_tweet_id_from_url(url)
         if tweet_id:
             return await self._get_tweet(tweet_id, session)

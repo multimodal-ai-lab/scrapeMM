@@ -2,8 +2,6 @@ import logging
 from typing import Optional
 
 import aiohttp
-from atproto_client.exceptions import RequestErrorBase
-from atproto_client.models.common import XrpcError
 from ezmm import MultimodalSequence, download_image, download_video
 
 from scrapemm.secrets import get_secret
@@ -14,9 +12,10 @@ logger = logging.getLogger("scrapeMM")
 
 
 class Bluesky(RetrievalIntegration):
+    name = "Bluesky"
     domains = ["bsky.app"]
 
-    def __init__(self):
+    async def _connect(self):
         self.username = get_secret("bluesky_username")
         self.password = get_secret("bluesky_password")
 
@@ -27,14 +26,9 @@ class Bluesky(RetrievalIntegration):
 
         from atproto import Client
         self.client = Client()
-        self.authenticated = False
         self._authenticate()
 
-    async def get(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
-        if not self.authenticated:
-            logger.error("❌ Not authenticated with Bluesky. Cannot retrieve content.")
-            return None
-
+    async def _get(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
         if get_domain(url) not in self.domains:
             logger.error(f"❌ Invalid domain for Bluesky: {get_domain(url)}")
             return None
@@ -169,7 +163,7 @@ Metrics:
         """Authenticate with Bluesky using provided credentials."""
         try:
             self.client.login(self.username, self.password)
-            self.authenticated = True
+            self.connected = True
             logger.info(f"✅ Successfully authenticated with Bluesky as {self.username}")
             return True
         except Exception as e:
@@ -221,12 +215,14 @@ Metrics:
             return handle  # Return the handle itself as fallback
 
 
-def error_to_string(error: RequestErrorBase | Exception) -> str:
+def error_to_string(error: Exception) -> str:
     """Takes an Error object containing a response and prints the contents."""
+    from atproto_client.exceptions import RequestErrorBase
     if isinstance(error, RequestErrorBase):
         response = error.response
         code = response.status_code
         content = response.content
+        from atproto_client.models.common import XrpcError
         if isinstance(content, XrpcError):
             error_type = content.error
             msg = content.message

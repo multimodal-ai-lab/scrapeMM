@@ -6,7 +6,7 @@ import aiohttp
 from ezmm import MultimodalSequence
 
 from scrapemm.secrets import get_secret
-from scrapemm.scraping.util import to_multimodal_sequence
+from scrapemm.scraping.util import to_multimodal_sequence, get_domain_root
 
 logger = logging.getLogger("scrapeMM")
 
@@ -20,7 +20,6 @@ class Decodo:
     def __init__(self):
         self.username = None
         self.password = None
-        self._load_credentials()
         self.n_scrapes = 0
 
     def _load_credentials(self):
@@ -40,8 +39,9 @@ class Decodo:
     async def scrape(self, url: str,
                      remove_urls: bool,
                      session: aiohttp.ClientSession,
+                     format: str,
                      enable_js: bool = True,
-                     timeout: int = 30) -> Optional[MultimodalSequence]:
+                     timeout: int = 30) -> Optional[MultimodalSequence | str]:
         """Downloads the contents of the specified webpage using Decodo's API.
 
         Args:
@@ -54,6 +54,9 @@ class Decodo:
         Returns:
             MultimodalSequence containing the scraped content, or None if scraping failed
         """
+        if not self._has_credentials():
+            self._load_credentials()
+
         if not self._has_credentials():
             logger.warning("Cannot scrape with Decodo: credentials not configured.")
             return None
@@ -68,7 +71,11 @@ class Decodo:
             html = await self._call_decodo(url, session, enable_js=False, timeout=timeout)
 
         if html:
-            return await to_multimodal_sequence(html, remove_urls=remove_urls, session=session)
+            if format == "html":
+                return html
+            else:
+                domain_root = get_domain_root(url)
+                return await to_multimodal_sequence(html, remove_urls=remove_urls, session=session, domain_root=domain_root)
         return None
 
     async def _call_decodo(self, url: str,
@@ -105,8 +112,6 @@ class Decodo:
         # Create basic auth
         auth = aiohttp.BasicAuth(self.username, self.password)
 
-        logger.debug(f"Decodo request payload: {payload}")
-
         try:
             async with session.post(
                 self.DECODO_API_URL,
@@ -115,26 +120,17 @@ class Decodo:
                 auth=auth,
                 timeout=aiohttp.ClientTimeout(total=timeout)
             ) as response:
-
+                # Validate response health
                 if response.status != 200:
-                    # Try to get the error message from response
-                    try:
-                        error_body = await response.json()
-                        error_msg = error_body.get('message', error_body)
-                    except:
-                        error_msg = await response.text()
-
-                    logger.warning(
-                        f"Failed to scrape {url} with Decodo\n"
-                        f"Status code: {response.status} - Reason: {response.reason}\n"
-                        f"Error details: {error_msg}"
-                    )
-
+                    logger.debug("Communication with Decodo API failed.")
                     match response.status:
+                        case 400:
+                            logger.debug("Error 400: Bad request. If you use JavaScript, make sure you have the "
+                                         "Advanced plan subscription.")
                         case 401:
                             logger.error("Error 401: Unauthorized. Check your Decodo credentials.")
                         case 402:
-                            logger.debug("Error 402: Payment required. Check your Decodo subscription.")
+                            logger.error("Error 402: Payment required. Check your Decodo subscription.")
                         case 403:
                             logger.debug("Error 403: Forbidden.")
                         case 408:
@@ -146,11 +142,17 @@ class Decodo:
                         case _:
                             logger.debug(f"Error {response.status}: {response.reason}.")
 
-                    logger.debug("Skipping that URL.")
                     return None
 
                 # Parse response
                 json_response = await response.json()
+
+                # Validate if scrape was successful
+                if json_response.get("status") == "failed":
+                    status_code = json_response.get("status_code")
+                    message = json_response.get("message")
+                    logger.info(f"Decodo failed to scrape. Error {status_code}: {message}")
+                    return None
 
                 # Extract HTML content from results
                 if "results" in json_response and len(json_response["results"]) > 0:

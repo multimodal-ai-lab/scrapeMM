@@ -1,24 +1,22 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import sys
 import tempfile
-import os
-from urllib.parse import urlparse
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 from ezmm import MultimodalSequence, download_image
 from ezmm.common.items import Video, Image
-
 from tiktok_research_api import TikTokResearchAPI, QueryVideoRequest, QueryUserInfoRequest, Criteria, Query
 
+from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.scraping.ytdlp import check_ytdlp_available
 from scrapemm.secrets import get_secret
-from scrapemm.integrations.base import RetrievalIntegration
-from scrapemm.util import get_domain
 
 logger = logging.getLogger("scrapeMM")
 
@@ -32,16 +30,19 @@ class TikTok(RetrievalIntegration):
         ideo download (no credentials needed, but may violate TikTok's Terms of Service)
     """
 
+    name = "TikTok"
     domains = ["tiktok.com", "vm.tiktok.com"]
 
-    def __init__(self):
+    async def _connect(self):
         # Try to initialize TikTok Research API
+        logging.getLogger("tiktok_research_api").setLevel(logging.WARNING)
+
         client_key = get_secret("tiktok_client_key")
         client_secret = get_secret("tiktok_client_secret")
-        
+
         self.api_available = False
         self.api = None
-        
+
         if client_key and client_secret:
             try:
                 self.api = TikTokResearchAPI(
@@ -52,13 +53,13 @@ class TikTok(RetrievalIntegration):
                 self.api_available = True
                 logger.info("✅ Successfully connected to TikTok Research API.")
             except ImportError:
-                logger.warning("❌ TikTok Research API package not installed. Using fallback mode.")
+                logger.info("⚠️ TikTok Research API package not installed. Using fallback mode.")
             except Exception as e:
-                logger.warning(f"❌ TikTok Research API connection failed: {e}. Using fallback mode.")
-        
+                logger.info(f"⚠️ TikTok Research API connection failed: {e}. Using fallback mode.")
+
         # Check if yt-dlp is available
         self.ytdlp_available = check_ytdlp_available()
-        
+
         if self.api_available or self.ytdlp_available:
             self.connected = True
             mode = "API + yt-dlp" if self.api_available else "yt-dlp only"
@@ -67,16 +68,7 @@ class TikTok(RetrievalIntegration):
             self.connected = False
             logger.warning("❌ TikTok integration not available: Neither API credentials nor yt-dlp found.")
 
-    async def get(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
-        """Retrieves content from a TikTok post URL."""
-        if not self.connected:
-            logger.error("❌ TikTok integration not connected. Cannot retrieve content.")
-            return None
-            
-        if get_domain(url) not in self.domains:
-            logger.error(f"❌ Invalid domain for TikTok: {get_domain(url)}")
-            return None
-        
+    async def _get(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
         # Determine if this is a video or profile URL
         if self._is_video_url(url):
             return await self._get_video(url, session)
@@ -85,18 +77,18 @@ class TikTok(RetrievalIntegration):
 
     async def _get_video(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
         """Retrieves content from a TikTok video URL."""
-        
+
         # Try API mode first if available
         if self.api_available:
             result = await self._get_video_with_api(url, session)
             if result:
                 return result
             logger.warning("API method failed, falling back to yt-dlp...")
-        
+
         # Fallback to yt-dlp mode
         if self.ytdlp_available:
             return await self._get_video_with_ytdlp(url, session)
-        
+
         logger.error("❌ No available method to retrieve TikTok video.")
         return None
 
@@ -109,36 +101,38 @@ class TikTok(RetrievalIntegration):
         try:
             # Create criteria to search for the specific video ID
             query_criteria = Criteria(
-                operation="EQ", 
-                field_name="video_id", 
+                operation="EQ",
+                field_name="video_id",
                 field_values=[video_id]
             )
             query = Query(and_criteria=[query_criteria])
 
             # Define the fields we want to retrieve
             video_fields = "id,create_time,username,region_code,video_description,video_duration,hashtag_names,view_count,like_count,comment_count,share_count,music_id,voice_to_text"
-            
+
             # Create the video request
             video_request = QueryVideoRequest(
                 fields=video_fields,
                 query=query,
-                max_count=1
+                max_count=1,
+                start_date="20200101",
+                end_date=datetime.now().strftime("%Y%m%d"),
             )
 
             # Execute the query
             videos, search_id, cursor, has_more, start_date, end_date = self.api.query_videos(
-                video_request, 
+                video_request,
                 fetch_all_pages=False
             )
-            
+
             if not videos or len(videos) == 0:
                 return None
 
             video_data = videos[0]
-            
+
             # Download the video using yt-dlp
             video = await self._download_video_with_ytdlp(url)
-            
+
             return await self._create_video_sequence_from_api(video_data, url, video)
 
         except Exception as e:
@@ -155,7 +149,7 @@ class TikTok(RetrievalIntegration):
 
             video = await self._download_video_with_ytdlp(url)
             thumbnail = await self._download_thumbnail_with_ytdlp(url, session)
-            
+
             return await self._create_video_sequence_from_ytdlp(metadata, url, video, thumbnail)
 
         except Exception as e:
@@ -164,14 +158,14 @@ class TikTok(RetrievalIntegration):
 
     async def _get_user_profile(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
         """Retrieves a TikTok user profile."""
-        
+
         # Try API mode first if available
         if self.api_available:
             result = await self._get_profile_with_api(url, session)
             if result:
                 return result
             logger.warning("API method failed for profile.")
-        
+
         # For profiles, yt-dlp has very limited capabilities
         # We can only provide basic info that we can extract from the URL
         username = self._extract_username(url)
@@ -183,7 +177,7 @@ URL: {url}
 Note: Profile details require TikTok Research API access.
 Configure API credentials for full profile information."""
             return MultimodalSequence([text])
-        
+
         return None
 
     async def _get_profile_with_api(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
@@ -195,7 +189,7 @@ Configure API credentials for full profile information."""
         try:
             user_info_request = QueryUserInfoRequest(username=username)
             user_info = self.api.query_user_info(user_info_request)
-            
+
             if not user_info:
                 return None
 
@@ -224,9 +218,9 @@ Configure API credentials for full profile information."""
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            
+
             stdout, stderr = await process.communicate()
-            
+
             if process.returncode != 0:
                 logger.error(f"❌ yt-dlp metadata extraction failed: {stderr.decode()}")
                 return None
@@ -262,9 +256,9 @@ Configure API credentials for full profile information."""
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            
+
             stdout, stderr = await process.communicate()
-            
+
             if process.returncode != 0:
                 logger.warning(f"yt-dlp video download failed: {stderr.decode()}")
                 return None
@@ -280,9 +274,9 @@ Configure API credentials for full profile information."""
             if downloaded_file and os.path.exists(downloaded_file):
                 with open(downloaded_file, 'rb') as f:
                     video_data = f.read()
-                
+
                 os.unlink(downloaded_file)
-                
+
                 video = Video(binary_data=video_data, source_url=url)
                 video.relocate(move_not_copy=True)
                 return video
@@ -306,10 +300,11 @@ Configure API credentials for full profile information."""
 
         except Exception as e:
             logger.error(f"❌ Error downloading thumbnail: {e}")
-        
+
         return None
 
-    async def _create_video_sequence_from_api(self, video_data: dict, url: str, video: Video | None) -> MultimodalSequence:
+    async def _create_video_sequence_from_api(self, video_data: dict, url: str,
+                                              video: Video | None) -> MultimodalSequence:
         """Creates MultimodalSequence from API data."""
         username = video_data.get('username', 'Unknown')
         description = video_data.get('video_description', '')
@@ -325,7 +320,7 @@ Configure API credentials for full profile information."""
 
         hashtags_text = f"Hashtags: {', '.join(['#' + tag for tag in hashtags])}" if hashtags else ""
         voice_text = f"Voice transcription: {voice_to_text}" if voice_to_text else ""
-        
+
         text = f"""**TikTok Video** (API data)
 Author: @{username}
 Posted: {create_time}
@@ -341,10 +336,11 @@ Views: {view_count:,} - Likes: {like_count:,} - Comments: {comment_count:,} - Sh
         items = [text]
         if video:
             items.append(video)
-            
+
         return MultimodalSequence(items)
 
-    async def _create_video_sequence_from_ytdlp(self, metadata: dict, url: str, video: Video | None, thumbnail: Image | None) -> MultimodalSequence:
+    async def _create_video_sequence_from_ytdlp(self, metadata: dict, url: str, video: Video | None,
+                                                thumbnail: Image | None) -> MultimodalSequence:
         """Creates MultimodalSequence from yt-dlp metadata."""
         # title = metadata.get('title', '')
         uploader = metadata.get('uploader', 'Unknown')
@@ -354,7 +350,7 @@ Views: {view_count:,} - Likes: {like_count:,} - Comments: {comment_count:,} - Sh
         like_count = metadata.get('like_count', 0)
         comment_count = metadata.get('comment_count', 0)
         description = metadata.get('description', '')
-        
+
         # Format upload date
         formatted_date = upload_date
         if upload_date and len(upload_date) == 8:
@@ -377,10 +373,11 @@ Views: {view_count:,} - Likes: {like_count:,} - Comments: {comment_count:,}
             items.append(thumbnail)
         if video:
             items.append(video)
-            
+
         return MultimodalSequence(items)
 
-    async def _create_profile_sequence_from_api(self, user_info: dict, url: str, session: aiohttp.ClientSession) -> MultimodalSequence:
+    async def _create_profile_sequence_from_api(self, user_info: dict, url: str,
+                                                session: aiohttp.ClientSession) -> MultimodalSequence:
         """Creates MultimodalSequence from API profile data."""
         username = user_info.get('username', 'Unknown')
         display_name = user_info.get('display_name', '')
@@ -413,7 +410,7 @@ Metrics:
         items = [text]
         if avatar:
             items.append(avatar)
-            
+
         return MultimodalSequence(items)
 
     def _is_video_url(self, url: str) -> bool:
@@ -432,7 +429,7 @@ Metrics:
                 match = re.search(r'/video/(\d+)', url)
                 if match:
                     return match.group(1)
-                
+
                 parsed = urlparse(url)
                 path_parts = parsed.path.strip('/').split('/')
                 for part in reversed(path_parts):
@@ -450,7 +447,7 @@ Metrics:
             match = re.search(r'/@([^/?]+)', url)
             if match:
                 return match.group(1)
-            
+
             parsed = urlparse(url)
             path_parts = parsed.path.strip('/').split('/')
             for part in path_parts:

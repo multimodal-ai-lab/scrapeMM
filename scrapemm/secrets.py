@@ -9,7 +9,7 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-from scrapemm.common import get_config_var, update_config, CONFIG_PATH, CONFIG_DIR
+from scrapemm.common import get_config_var, update_config, CONFIG_PATH, CONFIG_DIR, logger
 
 SECRETS = {
     "x_bearer_token": "Bearer token of X (Twitter)",
@@ -25,7 +25,7 @@ SECRETS = {
 }
 
 SALT = b'\xa4\x93\xf1\x88\x13\x88'
-SECRETS_PATH = CONFIG_DIR / "secrets.yaml"
+SECRETS_PATH = CONFIG_DIR / "secrets"
 
 _password_cache = None
 
@@ -56,7 +56,7 @@ def _get_password(prompt="🔐 Enter password to unlock secrets: ", pwd: str | N
     """Prompts the user to enter a password and returns a Fernet object.
     Re-uses the password if it was already entered before."""
     global _password_cache
-    password = pwd or _password_cache
+    password = pwd if pwd is not None else _password_cache
     if password is None:
         password = getpass(prompt, stream=sys.stdout)
     _password_cache = password
@@ -75,7 +75,14 @@ def _load_secrets() -> dict:
     with open(SECRETS_PATH, "rb") as f:
         encrypted = f.read()
 
-    # Get the password and decrypt the secrets
+    # Try with empty password first
+    fernet = _get_password(pwd="")
+    try:
+        return _decrypt_dict(encrypted, fernet)
+    except (InvalidToken, ValueError):
+        pass
+
+    # Get the password from the user and decrypt the secrets
     while True:
         fernet = _get_password()
         try:
@@ -113,7 +120,7 @@ def list_secrets():
     return [k for k in data]
 
 
-def set_password(pwd: str):
+def enter_password(pwd: str):
     """Saves the given password into the cache."""
     _get_password(pwd=pwd)
 
@@ -124,11 +131,11 @@ def configure_secrets(all_keys: bool = False):
     logging.debug("Configuring new secrets...")
 
     # Delete existing secrets
-    if SECRETS_PATH.exists():
+    if SECRETS_PATH.exists() and all_keys:
         SECRETS_PATH.unlink()
 
-    # Set up a new password
-    _get_password("🔐 Enter a password to encrypt your secrets (you'll need it later to decrypt them): ")
+        # Set up a new password
+        _get_password("🔐 Enter a password to encrypt your secrets (you'll need it later to decrypt them): ")
 
     prompted = False
     for key_name, description in SECRETS.items():
@@ -152,5 +159,7 @@ if not get_config_var("api_keys_configured"):
     configure_secrets()
 
 
-if __name__ == "__main__":
-    configure_secrets(all_keys=True)
+# Print secret summary
+logger.info("ScrapeMM secrets configuration:")
+for key_name, description in SECRETS.items():
+    logger.info(f" - {description}: {'✅ set' if get_secret(key_name) else '⚠️ not set'}")

@@ -1,13 +1,15 @@
+import base64
+import binascii
 import logging
+import re
 from typing import Optional
 
 import aiohttp
 import requests
-from requests.exceptions import ReadTimeout, ConnectionError, RetryError
+from PIL import UnidentifiedImageError
 from ezmm import MultimodalSequence, download_item, Item, Image, Video
 from markdownify import markdownify as md
-import re
-import base64
+from requests.exceptions import ReadTimeout, ConnectionError, RetryError
 
 from scrapemm.util import run_with_semaphore
 
@@ -18,6 +20,7 @@ DATA_URI_REGEX = r"data:([\w/+.-]+/[\w.+-]+);base64,([A-Za-z0-9+/=]+)"
 MD_HYPERLINK_REGEX = rf'(!?\[([^]^[]*)\]\((.*?)(?: "[^"]*")?\))'
 
 logger = logging.getLogger("scrapeMM")
+
 
 def find_firecrawl(urls):
     for url in urls:
@@ -51,10 +54,11 @@ def postprocess_scraped(text: str) -> str:
 
 async def resolve_media_hyperlinks(
         text: str, session: aiohttp.ClientSession,
+        domain_root: str = None,
         remove_urls: bool = False,
 ) -> Optional[MultimodalSequence]:
-    """Identifies up to MAX_MEDIA_PER_PAGE image URLs, downloads images that
-    have substantial size (larger than 256 x 256) and replaces the
+    """Downloads all media that are hyperlinked in the provided Markdown text.
+    Only considers images with substantial size (larger than 256 x 256) and replaces the
     respective Markdown hyperlinks with their proper image reference."""
 
     if text is None:
@@ -62,19 +66,21 @@ async def resolve_media_hyperlinks(
 
     # Extract URLs and base64-encoded data from the text
     hyperlinks = get_markdown_hyperlinks(text)
-    urls = set()
+    hrefs_urls = dict()
     data_uris = set()
     for _, _, href in hyperlinks:
         if is_url(href):
-            urls.add(href)
+            hrefs_urls[href] = href
+        elif domain_root and is_root_relative_url(href):
+            hrefs_urls[href] = f"{domain_root}{href}"
         elif is_data_uri(href):
             data_uris.add(href)
 
     # Try to download media for each URL
-    tasks = [download_item(url, session=session) for url in urls]
+    tasks = [download_item(url, session=session) for url in hrefs_urls.values()]
     media: list[Item | None] = await run_with_semaphore(tasks, limit=100, show_progress=False)
 
-    href_media = dict(zip(urls, media))
+    href_media = dict(zip(hrefs_urls.keys(), media))
 
     # Convert each base64-encoded data to the respective medium
     for data_uri in data_uris:
@@ -95,20 +101,31 @@ async def resolve_media_hyperlinks(
         elif remove_urls:
             text = text.replace(full_match, hypertext)
 
-        if media_count >= MAX_MEDIA_PER_PAGE:
-            break
-
     return MultimodalSequence(text)
 
 
 def is_url(href: str) -> bool:
-    """Returns True iff the given string is a valid URL."""
+    """Returns True iff the given string is an absolute HTTP URL."""
     return re.match(URL_REGEX, href) is not None
+
+
+def is_root_relative_url(href: str) -> bool:
+    """Returns True iff the given string is a root-relative URL."""
+    return href.startswith("/")
 
 
 def is_data_uri(href: str) -> bool:
     """Returns True iff the given string is a valid data URI."""
     return re.match(DATA_URI_REGEX, href) is not None
+
+
+def get_domain_root(url: str) -> Optional[str]:
+    """Extracts the domain root from the given URL. Allows for missing http(s) prefix."""
+    match = re.match(r"(:?https?://)?([^/]+)", url)
+    if match:
+        return match.group(0)
+    else:
+        return None
 
 
 def get_markdown_hyperlinks(text: str) -> list[tuple[str, str, str]]:
@@ -134,7 +151,11 @@ async def to_multimodal_sequence(
 ) -> Optional[MultimodalSequence]:
     """Turns a scraped output into the corresponding MultimodalSequences
     by converting the HTML into Markdown and resolving media hyperlinks."""
-    text = md(html, heading_style="ATX")
+    try:
+        text = md(html, heading_style="ATX")
+    except RecursionError as e:
+        return None
+
     text = postprocess_scraped(text)
     return await resolve_media_hyperlinks(text, **kwargs)
 
@@ -147,7 +168,7 @@ def sanitize(text: str) -> str:
 def from_base64(b64_data: str, mime_type: str = "image/jpeg") -> Optional[Item]:
     """Converts a base64-encoded image to an Item object."""
     try:
-        binary_data = base64.b64decode(b64_data)
+        binary_data = base64.b64decode(b64_data, validate=True)
         if binary_data:
             if mime_type.startswith("image/"):
                 return Image(binary_data=binary_data)
@@ -155,6 +176,9 @@ def from_base64(b64_data: str, mime_type: str = "image/jpeg") -> Optional[Item]:
                 return Video(binary_data=binary_data)
             else:
                 raise ValueError(f"Unsupported media type: {mime_type}")
+    except binascii.Error:  # base64 validation failed
+        return None
+    except UnidentifiedImageError:  # Pillow could not identify image format
+        return None
     except Exception as e:
-        logger.warning(f"Error decoding base64 data!\n"
-                       f"{type(e).__name__}: {e}")
+        logger.debug(f"Error decoding {mime_type} base64 data. \n {type(e).__name__}: {e}")

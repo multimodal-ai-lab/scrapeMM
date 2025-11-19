@@ -11,9 +11,10 @@ logger = logging.getLogger("scrapeMM")
 
 
 class Instagram(RetrievalIntegration):
+    name = "Instagram"
     domains = ["instagram.com", "www.instagram.com"]
 
-    def __init__(self):
+    async def _connect(self):
         # Check if yt-dlp is available
         self.ytdlp_available = check_ytdlp_available()
 
@@ -25,12 +26,8 @@ class Instagram(RetrievalIntegration):
             self.connected = False
             logger.warning("❌ Instagram integration not available: Neither API credentials nor yt-dlp found.")
 
-    async def get(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
+    async def _get(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
         """Retrieves content from an Instagram post URL."""
-        if not self.connected:
-            logger.error("❌ Instagram integration not connected. Cannot retrieve content.")
-            return None
-            
         if get_domain(url) not in self.domains:
             logger.error(f"❌ Invalid domain for Instagram: {get_domain(url)}")
             return None
