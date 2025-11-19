@@ -132,16 +132,17 @@ class Decodo:
                     if response.status != 200:
                         logger.debug("Communication with Decodo API failed.")
 
-                        # Handle rate limiting with retry
-                        if response.status == 429:
+                        # Handle rate limiting and 613 errors with retry
+                        if response.status in (429, 613):
                             if attempt < max_retries:
                                 # Exponential backoff: 2^attempt seconds (1s, 2s, 4s, 8s, 16s)
                                 wait_time = 2 ** attempt
-                                logger.warning(f"Error 429: Rate limit exceeded. Retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})...")
+                                error_msg = "Rate limit exceeded" if response.status == 429 else "Error 613"
+                                logger.warning(f"Error {response.status}: {error_msg}. Retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})...")
                                 await asyncio.sleep(wait_time)
                                 continue
                             else:
-                                logger.warning("Error 429: Rate limit exceeded. Maximum retries reached.")
+                                logger.warning(f"Error {response.status}: Maximum retries reached.")
                                 return None
 
                         # Log other errors
