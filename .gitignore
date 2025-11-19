@@ -5,3 +5,6 @@
 /config.yaml
 __pycache__/
 .DS_Store
+build/
+.pytest_cache/
+.claude/
