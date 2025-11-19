@@ -72,7 +72,8 @@ Configure API credentials for full profile information."""
     def _is_video_url(self, url: str) -> bool:
         """Checks if the URL is a Facebook video URL."""
         # video URLS are in the format: https://www.facebook.com/watch?v=VIDEO_ID
-        return "facebook.com/watch" in url
+        # or Reels: https://www.facebook.com/reel/REEL_ID
+        return "facebook.com/watch" in url or "facebook.com/reel" in url
     
     def _extract_video_id(self, url: str) -> str:
         """Extracts the video ID from a Facebook video URL."""
