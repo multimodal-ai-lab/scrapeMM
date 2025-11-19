@@ -36,12 +36,14 @@ class Decodo:
         """Checks if Decodo credentials are available."""
         return bool(self.username and self.password)
 
-    async def scrape(self, url: str,
-                     remove_urls: bool,
-                     session: aiohttp.ClientSession,
-                     format: str,
-                     enable_js: bool = True,
-                     timeout: int = 30) -> Optional[MultimodalSequence | str]:
+    async def scrape(
+        self, url: str,
+        remove_urls: bool,
+        session: aiohttp.ClientSession,
+        format: str,
+        enable_js: bool = True,
+        timeout: int = 30,
+    ) -> Optional[MultimodalSequence | str]:
         """Downloads the contents of the specified webpage using Decodo's API.
 
         Args:
