@@ -20,8 +20,10 @@ SECRETS = {
     "bluesky_password": "Bluesky password",
     "tiktok_client_key": "TikTok client key",
     "tiktok_client_secret": "TikTok client secret",
-    "decodo_username": "Decodo API username",
-    "decodo_password": "Decodo API password",
+    "decodo_username": "Decodo Web Scraping API username",
+    "decodo_password": "Decodo Web Scraping API password",
+    "decodo_proxy_username": "Decodo Proxy Service username (optional)",
+    "decodo_proxy_password": "Decodo Proxy Service password (optional)",
 }
 
 SALT = b'\xa4\x93\xf1\x88\x13\x88'
