@@ -78,17 +78,21 @@ class Decodo:
                 return await to_multimodal_sequence(html, remove_urls=remove_urls, session=session, domain_root=domain_root)
         return None
 
-    async def _call_decodo(self, url: str,
-                          session: aiohttp.ClientSession,
-                          enable_js: bool = True,
-                          timeout: int = 30) -> Optional[str]:
-        """Calls the Decodo API to scrape the given URL.
+    async def _call_decodo(
+        self, url: str,
+        session: aiohttp.ClientSession,
+        enable_js: bool = True,
+        timeout: int = 30,
+        max_retries: int = 5
+    ) -> Optional[str]:
+        """Calls the Decodo API to scrape the given URL with exponential backoff retry logic.
 
         Args:
             url: The URL to scrape
             session: The aiohttp ClientSession to use
             enable_js: Whether to enable JavaScript rendering
             timeout: Request timeout in seconds
+            max_retries: Maximum number of retry attempts for rate limits (default: 5)
 
         Returns:
             HTML content as a string, or None if scraping failed
@@ -112,80 +116,97 @@ class Decodo:
         # Create basic auth
         auth = aiohttp.BasicAuth(self.username, self.password)
 
-        try:
-            async with session.post(
-                self.DECODO_API_URL,
-                json=payload,
-                headers=headers,
-                auth=auth,
-                timeout=aiohttp.ClientTimeout(total=timeout)
-            ) as response:
-                # Validate response health
-                if response.status != 200:
-                    logger.debug("Communication with Decodo API failed.")
-                    match response.status:
-                        case 400:
-                            logger.debug("Error 400: Bad request. If you use JavaScript, make sure you have the "
-                                         "Advanced plan subscription.")
-                        case 401:
-                            logger.error("Error 401: Unauthorized. Check your Decodo credentials.")
-                        case 402:
-                            logger.error("Error 402: Payment required. Check your Decodo subscription.")
-                        case 403:
-                            logger.debug("Error 403: Forbidden.")
-                        case 408:
-                            logger.warning("Error 408: Timeout! Website did not respond in time.")
-                        case 429:
-                            logger.warning("Error 429: Rate limit exceeded. Too many requests.")
-                        case 500:
-                            logger.debug("Error 500: Server error.")
-                        case _:
-                            logger.debug(f"Error {response.status}: {response.reason}.")
+        # Retry loop with exponential backoff
+        for attempt in range(max_retries + 1):
+            try:
+                async with session.post(
+                    self.DECODO_API_URL,
+                    json=payload,
+                    headers=headers,
+                    auth=auth,
+                    timeout=aiohttp.ClientTimeout(total=timeout)
+                ) as response:
+                    # Validate response health
+                    if response.status != 200:
+                        logger.debug("Communication with Decodo API failed.")
 
-                    return None
+                        # Handle rate limiting with retry
+                        if response.status == 429:
+                            if attempt < max_retries:
+                                # Exponential backoff: 2^attempt seconds (1s, 2s, 4s, 8s, 16s)
+                                wait_time = 2 ** attempt
+                                logger.warning(f"Error 429: Rate limit exceeded. Retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})...")
+                                await asyncio.sleep(wait_time)
+                                continue
+                            else:
+                                logger.warning("Error 429: Rate limit exceeded. Maximum retries reached.")
+                                return None
 
-                # Parse response
-                json_response = await response.json()
+                        # Log other errors
+                        match response.status:
+                            case 400:
+                                logger.debug("Error 400: Bad request. If you use JavaScript, make sure you have the "
+                                             "Advanced plan subscription.")
+                            case 401:
+                                logger.error("Error 401: Unauthorized. Check your Decodo credentials.")
+                            case 402:
+                                logger.error("Error 402: Payment required. Check your Decodo subscription.")
+                            case 403:
+                                logger.debug("Error 403: Forbidden.")
+                            case 408:
+                                logger.warning("Error 408: Timeout! Website did not respond in time.")
+                            case 500:
+                                logger.debug("Error 500: Server error.")
+                            case _:
+                                logger.debug(f"Error {response.status}: {response.reason}.")
 
-                # Validate if scrape was successful
-                if json_response.get("status") == "failed":
-                    status_code = json_response.get("status_code")
-                    message = json_response.get("message")
-                    logger.info(f"Decodo failed to scrape. Error {status_code}: {message}")
-                    return None
-
-                # Extract HTML content from results
-                if "results" in json_response and len(json_response["results"]) > 0:
-                    result = json_response["results"][0]
-
-                    # Check status code from the actual request
-                    status_code = result.get("status_code")
-                    if status_code and status_code >= 400:
-                        logger.warning(f"Target website returned status {status_code} for {url}")
                         return None
 
-                    html_content = result.get("content")
-                    if html_content:
-                        self.n_scrapes += 1
-                        logger.debug(f"Successfully scraped {url} with Decodo (scrape #{self.n_scrapes})")
-                        return html_content
+                    # Parse response
+                    json_response = await response.json()
+
+                    # Validate if scrape was successful
+                    if json_response.get("status") == "failed":
+                        status_code = json_response.get("status_code")
+                        message = json_response.get("message")
+                        logger.info(f"Decodo failed to scrape. Error {status_code}: {message}")
+                        return None
+
+                    # Extract HTML content from results
+                    if "results" in json_response and len(json_response["results"]) > 0:
+                        result = json_response["results"][0]
+
+                        # Check status code from the actual request
+                        status_code = result.get("status_code")
+                        if status_code and status_code >= 400:
+                            logger.warning(f"Target website returned status {status_code} for {url}")
+                            return None
+
+                        html_content = result.get("content")
+                        if html_content:
+                            self.n_scrapes += 1
+                            logger.debug(f"Successfully scraped {url} with Decodo (scrape #{self.n_scrapes})")
+                            return html_content
+                        else:
+                            logger.warning(f"No content in Decodo response for {url}")
+                            return None
                     else:
-                        logger.warning(f"No content in Decodo response for {url}")
+                        logger.warning(f"No results in Decodo response for {url}")
+                        logger.debug(f"Response: {json_response}")
                         return None
-                else:
-                    logger.warning(f"No results in Decodo response for {url}")
-                    logger.debug(f"Response: {json_response}")
-                    return None
 
-        except aiohttp.ClientError as e:
-            logger.error(f"Network error while scraping {url} with Decodo: {repr(e)}")
-            return None
-        except asyncio.TimeoutError:
-            logger.warning(f"Timeout while scraping {url} with Decodo. Skipping...")
-            return None
-        except Exception as e:
-            logger.error(f"Unexpected error while scraping {url} with Decodo: {repr(e)}")
-            return None
+            except aiohttp.ClientError as e:
+                logger.error(f"Network error while scraping {url} with Decodo: {repr(e)}")
+                return None
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout while scraping {url} with Decodo. Skipping...")
+                return None
+            except Exception as e:
+                logger.error(f"Unexpected error while scraping {url} with Decodo: {repr(e)}")
+                return None
+
+        # Should not reach here, but return None as fallback
+        return None
 
 
 # Create a singleton instance
