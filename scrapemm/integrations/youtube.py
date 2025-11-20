@@ -15,10 +15,8 @@ class YouTube(RetrievalIntegration):
 
     name = "YouTube"
     domains = [
-        "youtube.com", 
-        "www.youtube.com", 
-        "youtu.be", 
-        "m.youtube.com"
+        "youtube.com",
+        "youtu.be",
     ]
 
     async def _connect(self):

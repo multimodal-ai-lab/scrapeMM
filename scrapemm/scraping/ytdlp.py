@@ -147,8 +147,8 @@ async def download_thumbnail_with_ytdlp(url: str, session: aiohttp.ClientSession
 def fmt_count(v):
     return f"{v:,}" if isinstance(v, int) else "Unknown"
 
-async def create_video_sequence_from_ytdlp(metadata: dict, url: str, video: Video | None, thumbnail: Image | None, platform: str) -> MultimodalSequence:
-    """Creates MultimodalSequence from yt-dlp metadata."""
+async def compose_data_to_sequence(metadata: dict, video: Video | None, thumbnail: Image | None, platform: str) -> MultimodalSequence:
+    """Creates a MultimodalSequence from the yt-dlp metadata."""
     # title = metadata.get('title', '')
     uploader = metadata.get('uploader', 'Unknown')
     upload_date = metadata.get('upload_date', '')
@@ -192,9 +192,11 @@ async def get_video_with_ytdlp(url: str, session: aiohttp.ClientSession, platfor
             return None
 
         video = await download_video_with_ytdlp(url)
+        if not video:
+            logger.warning(f"Video download failed for {url}")
         thumbnail = await download_thumbnail_with_ytdlp(url, session)
         
-        return await create_video_sequence_from_ytdlp(metadata, url, video, thumbnail, platform)
+        return await compose_data_to_sequence(metadata, video, thumbnail, platform)
 
     except Exception as e:
         import traceback

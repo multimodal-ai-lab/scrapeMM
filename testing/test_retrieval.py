@@ -12,6 +12,7 @@ from scrapemm import retrieve
     "https://assamese.factcrescendo.com/viral-claim-that-the-video-shows-the-incident-from-uttar-pradesh-and-the-youth-on-the-bike-and-the-youth-being-beaten-and-taken-away-by-the-police-are-the-same-youth-named-abdul-is-false/",
     "https://factuel.afp.com/doc.afp.com.43ZN7NP",
     "https://leadstories.com/365cb414b83e29d26fecae374d55c743a3eac4c7.png",
+    "https://leadstories.com/assets_c/2025/08/193f14f06dd6f15b89bf8050e553ad7fb1be6530-thumb-900xauto-3165872.png"
 ])
 @pytest.mark.parametrize("method", ["firecrawl", "decodo"])
 async def test_generic_retrieval(url, method):
@@ -44,7 +45,7 @@ async def test_html_retrieval(url, method):
     "https://t.me/tglobaleye/6289",  # GIF (treated as video)
     "https://t.me/tglobaleye/16192",  # Images and video
 ])
-async def test_telegram_retrieval(url):
+async def test_telegram(url):
     result = await retrieve(url)
     print(result)
     assert result
@@ -55,7 +56,7 @@ async def test_telegram_retrieval(url):
     "https://www.tiktok.com/@realdonaldtrump/video/7433870905635409198",
     "https://www.tiktok.com/@xxxx.xxxx5743/video/7521704371109793046"
 ])
-async def test_tiktok_retrieval(url):
+async def test_tiktok(url):
     result = await retrieve(url)
     print(result)
     assert result
@@ -66,7 +67,7 @@ async def test_tiktok_retrieval(url):
     "https://x.com/PopBase/status/1938496291908030484",
     "https://x.com/realDonaldTrump"
 ])
-async def test_x_retrieval(url):
+async def test_x(url):
     result = await retrieve(url)
     print(result)
     assert result
@@ -74,35 +75,60 @@ async def test_x_retrieval(url):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url", [
-    "https://www.instagram.com/p/CqJDbyOP839",  # image (post)
-    "https://www.instagram.com/reel/DKqPQqpTDW4",  # video (Reel)
-    "https://www.instagram.com/reel/C75nh7Lvo8F",  # video (Reel)
-    "https://www.instagram.com/p/DMuOe6th94D",  # video (Reel)
+    "https://www.instagram.com/p/CqJDbyOP839",
 ])
-async def test_instagram_retrieval(url):
+async def test_instagram_images(url):
     result = await retrieve(url)
     print(result)
     assert result
+    assert result.has_images()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url", [
-    "https://www.facebook.com/reel/1089214926521000",  # video
-    "https://www.facebook.com/reel/3466446073497470",  # video, restricted for misinformation
-    "https://www.facebook.com/groups/1973976962823632/posts/3992825270938781/",  # video, restricted for misinformation
-    "https://www.facebook.com/photo/?fbid=1721085455188778&set=a.107961589834514&_rdc=1&_rdr",  # image
+    "https://www.instagram.com/reel/DKqPQqpTDW4",
+    "https://www.instagram.com/reel/C75nh7Lvo8F",
+    "https://www.instagram.com/p/DMuOe6th94D",  # yes, this is a video
 ])
-async def test_facebook_retrieval(url):
+async def test_instagram_videos(url):
     result = await retrieve(url)
     print(result)
     assert result
+    assert result.has_videos()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", [
+    "https://www.facebook.com/reel/1089214926521000",
+    "https://www.facebook.com/reel/3466446073497470",  # restricted for misinformation
+    "https://www.facebook.com/61561558177010/videos/1445957793080961/",
+    "https://www.facebook.com/watch/?v=1445957793080961",
+    "https://www.facebook.com/groups/1973976962823632/posts/3992825270938781/",  # restricted for misinformation
+])
+async def test_facebook_videos(url):
+    result = await retrieve(url)
+    print(result)
+    assert result
+    assert result.has_videos()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", [
+    "https://www.facebook.com/photo/?fbid=1721085455188778&set=a.107961589834514&_rdc=1&_rdr",
+])
+async def test_facebook_images(url):
+    result = await retrieve(url)
+    print(result)
+    assert result
+    assert result.has_images()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url", [
     "https://www.youtube.com/watch?v=ykQZPdaXTJc",
+    "https://www.youtube.com/shorts/cE0zgN6pYOc",
 ])
-async def test_youtube_retrieval(url):
+async def test_youtube(url):
     result = await retrieve(url)
     print(result)
     assert result
