@@ -23,6 +23,8 @@ async def test_scrape(url: str):
         print(result)
         print("=" * 80)
         print(f"\nContent length: {len(str(result))} characters")
+        print(f"Number of images: {len(result.images) if hasattr(result, 'images') else 0}")
+        print(f"Number of videos: {len(result.videos) if hasattr(result, 'videos') else 0}")
     else:
         print("❌ Failed to scrape the URL.")
         return 1
