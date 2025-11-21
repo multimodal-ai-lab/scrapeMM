@@ -1,153 +1,71 @@
-import sys
-from typing import Any, cast
-
-import aiohttp
-import asyncio
-from datetime import datetime
-import json
 import logging
-import os
-import subprocess
 import tempfile
+import traceback
+from datetime import datetime
+from typing import Any, Optional
 
-from ezmm import MultimodalSequence, download_image
-from ezmm.common.items import Video, Image
+import asyncio
+import aiohttp
+from ezmm import MultimodalSequence, download_image, Video, Image
+from yt_dlp import YoutubeDL
 
 logger = logging.getLogger("scrapeMM")
 
 
-def check_ytdlp_available() -> bool:
-    """Returns True if yt-dlp is available, else False."""
+async def _download_with_ytdlp(
+        url: str,
+        session: aiohttp.ClientSession
+) -> tuple[Optional[Video], Optional[Image], Optional[dict[str, Any]]]:
+    """Downloads a video, its thumbnail, and the metadata using yt-dlp."""
     try:
-        # Run yt-dlp --version to check if it's installed and working'
-        subprocess.run([sys.executable, '-m', 'yt_dlp', '--version'],
-                     capture_output=True, check=True, timeout=5)
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
-        return False
-
-
-async def extract_metadata_with_ytdlp(url: str) -> dict[str, Any] | None:
-    """Extracts metadata using yt-dlp without downloading the video."""
-    try:
-        cmd = [
-            sys.executable,  # Ensure to use the same Python interpreter as the calling process
-            '-m',
-            'yt_dlp',
-            '--no-download',
-            '--print-json',
-            '--no-warnings',
-            '--quiet',
-            url
-        ]
-
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        stdout, stderr = await process.communicate()
-        
-        if process.returncode != 0:
-            logger.error(f"❌ yt-dlp metadata extraction failed: {stderr.decode()}")
-            return None
-
-        # Parse JSON output
-        metadata = json.loads(stdout.decode())
-        return metadata
-
-    except Exception as e:
-        logger.error(f"❌ Error extracting metadata with yt-dlp: {e}")
-        return None
-    
-
-async def download_video_with_ytdlp(url: str) -> Video | None:
-    """Downloads a video using yt-dlp."""
-    try:
-        with tempfile.NamedTemporaryFile(suffix='.%(ext)s', delete=False) as temp_file:
+        with tempfile.NamedTemporaryFile() as temp_file:
             temp_path = temp_file.name
 
-        cmd = [
-            sys.executable,  # Ensure to use the same Python interpreter as the calling process
-            "-m",
-            "yt_dlp",
-            "--no-playlist",
-            "--no-warnings",
-            "--quiet",
-            "--retries", "10",
-        ]
+        ydl_opts: dict[str, Any] = dict(
+            outtmpl=f'{temp_path}.%(ext)s',  # Output filename format
+            format='best[ext=mp4]/best',  # Download the best video/audio quality
+            quiet=False,  # Show progress in terminal
+            noplaylist=True,  # Disable playlist downloading
+            retries=3,
+            cookies_from_browser='firefox',
+            cookies='cookies.txt',  # Use cookies from Firefox to bypass sign-in requirements
+        )
 
         if "youtube" in url or "youtu.be" in url:
-            cmd.extend([
-                "-f", "bv*[vcodec~='^avc1']+ba/bv*+ba/b",
-                "--merge-output-format", "mp4",
-            ])
-        else:
-            cmd.extend(['--format', 'best[ext=mp4]/best'])
+            # YouTube delivers video and audio separately when downloaded above 720p.
+            # This would require FFmpeg to merge them. Restrict to 720p to avoid that.
+            ydl_opts['format'] = 'best[height<=720][acodec!=none]'
+            ydl_opts['extractor_args'] = dict(youtube=dict(player_client=["default"]))
 
-        cmd.extend([
-            "--output", temp_path,
-            url
-        ])
+        with YoutubeDL(ydl_opts) as ydl:
+            metadata = ydl.extract_info(url, download=True)
 
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        _, stderr = await process.communicate()
-        
-        if process.returncode != 0:
-            logger.warning(f"yt-dlp video download failed: {stderr.decode()}")
-            return None
+        ext = metadata.get("ext")
 
-        # Find the actual downloaded file (yt-dlp changes extension)
-        downloaded_file = None
-        for ext in ['.mp4', '.webm', '.mkv']:
-            potential_file = temp_path.replace('.%(ext)s', ext)
-            if os.path.exists(potential_file) and os.path.getsize(potential_file) > 0:
-                downloaded_file = potential_file
-                break
-
-        if downloaded_file and os.path.exists(downloaded_file):
-            with open(downloaded_file, 'rb') as f:
-                video_data = f.read()
-            
-            os.unlink(downloaded_file)
-            
-            video = Video(binary_data=video_data, source_url=url)
+        try:
+            video = Video(file_path=temp_path + f".{ext}", source_url=url)
             video.relocate(move_not_copy=True)
-            return cast(Video, video)
+        except Exception as e:
+            logger.warning(f"Could not load downloaded video: {e}\n{traceback.format_exc()}")
+            video = None
 
-        return None
+        thumbnail = None
+        if thumbnail_url := metadata.get('thumbnail'):
+            thumbnail = await download_image(thumbnail_url, session)
 
-    except Exception as e:
-        logger.error(f"❌ Error downloading video with yt-dlp: {e}")
-        return None
-    
-
-async def download_thumbnail_with_ytdlp(url: str, session: aiohttp.ClientSession) -> Image | None:
-    """Downloads thumbnail using yt-dlp metadata."""
-    try:
-        metadata = await extract_metadata_with_ytdlp(url)
-        if not metadata:
-            return None
-
-        thumbnail_url = metadata.get('thumbnail')
-        if thumbnail_url:
-            return await download_image(thumbnail_url, session)
+        return video, thumbnail, metadata
 
     except Exception as e:
-        logger.error(f"❌ Error downloading thumbnail: {e}")
-    
-    return None
+        logger.warning(f"Could not download video with yt-dlp: {e}\n{traceback.format_exc()}")
+        return None, None, None
+
 
 def fmt_count(v):
     return f"{v:,}" if isinstance(v, int) else "Unknown"
 
-async def compose_data_to_sequence(metadata: dict, video: Video | None, thumbnail: Image | None, platform: str) -> MultimodalSequence:
+
+async def compose_data_to_sequence(metadata: dict, video: Video | None, thumbnail: Image | None,
+                                   platform: str) -> MultimodalSequence:
     """Creates a MultimodalSequence from the yt-dlp metadata."""
     # title = metadata.get('title', '')
     uploader = metadata.get('uploader', 'Unknown')
@@ -157,7 +75,7 @@ async def compose_data_to_sequence(metadata: dict, video: Video | None, thumbnai
     like_count = metadata.get('like_count', 0)
     comment_count = metadata.get('comment_count', 0)
     description = metadata.get('description', '')
-    
+
     # Format upload date
     formatted_date = upload_date
     if upload_date and len(upload_date) == 8:
@@ -180,26 +98,17 @@ Views: {fmt_count(view_count)} - Likes: {fmt_count(like_count)} - Comments: {fmt
         items.append(thumbnail)
     if video:
         items.append(video)
-        
+
     return MultimodalSequence(items)
 
-async def get_video_with_ytdlp(url: str, session: aiohttp.ClientSession, platform: str) -> MultimodalSequence | None:
-    """Retrieves video using only yt-dlp (no API required)."""
-    try:
-        # Get metadata and video using yt-dlp
-        metadata = await extract_metadata_with_ytdlp(url)
-        if not metadata:
-            return None
 
-        video = await download_video_with_ytdlp(url)
-        if not video:
-            logger.warning(f"Video download failed for {url}")
-        thumbnail = await download_thumbnail_with_ytdlp(url, session)
-        
+async def get_content_with_ytdlp(url: str, session: aiohttp.ClientSession, platform: str) -> MultimodalSequence | None:
+    """Retrieves video, thumbnail, and metadata using the powerful yt-dlp package."""
+    # Run the download in a separate thread to avoid blocking the event loop
+    coroutine = await asyncio.to_thread(_download_with_ytdlp, url, session)
+    video, thumbnail, metadata = await coroutine
+    if not video:
+        logger.warning(f"Video download failed for {url}")
+    if metadata:
         return await compose_data_to_sequence(metadata, video, thumbnail, platform)
-
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        logger.error(f"❌ Error retrieving video with yt-dlp: {e}")
-        return None
+    return None

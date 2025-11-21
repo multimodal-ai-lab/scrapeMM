@@ -103,7 +103,7 @@ async def test_instagram_videos(url):
     "https://www.facebook.com/reel/3466446073497470",  # restricted for misinformation
     "https://www.facebook.com/61561558177010/videos/1445957793080961/",
     "https://www.facebook.com/watch/?v=1445957793080961",
-    "https://www.facebook.com/groups/1973976962823632/posts/3992825270938781/",  # restricted for misinformation
+    "https://www.facebook.com/groups/1973976962823632/posts/3992825270938781/",  # restricted for misinformation, yt-dlp fails here
 ])
 async def test_facebook_videos(url):
     result = await retrieve(url)
@@ -125,7 +125,7 @@ async def test_facebook_images(url):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url", [
-    "https://www.youtube.com/watch?v=ykQZPdaXTJc",
+    "https://www.youtube.com/watch?v=A4dVOznX6Kk",
     "https://www.youtube.com/shorts/cE0zgN6pYOc",
 ])
 async def test_youtube(url):

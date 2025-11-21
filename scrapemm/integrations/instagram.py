@@ -1,10 +1,11 @@
 import logging
 from urllib.parse import urlparse
-import aiohttp
-from ezmm import MultimodalSequence, download_image
 
-from scrapemm.scraping.ytdlp import check_ytdlp_available,  get_video_with_ytdlp
+import aiohttp
+from ezmm import MultimodalSequence
+
 from scrapemm.integrations.base import RetrievalIntegration
+from scrapemm.scraping.ytdlp import get_content_with_ytdlp
 from scrapemm.util import get_domain
 
 logger = logging.getLogger("scrapeMM")
@@ -15,48 +16,37 @@ class Instagram(RetrievalIntegration):
     domains = ["instagram.com", "www.instagram.com"]
 
     async def _connect(self):
-        # Check if yt-dlp is available
-        self.ytdlp_available = check_ytdlp_available()
-
-        if self.ytdlp_available:
-            self.connected = True
-            mode = "yt-dlp only"
-            logger.info(f"✅ Instagram integration ready ({mode} mode).")
-        else:
-            self.connected = False
-            logger.warning("❌ Instagram integration not available: Neither API credentials nor yt-dlp found.")
+        self.api_available = False
+        logger.info(f"✅ Instagram integration ready (yt-dlp only mode).")
+        self.connected = True
 
     async def _get(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
         """Retrieves content from an Instagram post URL."""
         if get_domain(url) not in self.domains:
             logger.error(f"❌ Invalid domain for Instagram: {get_domain(url)}")
             return None
-        
+
         # Determine if this is a video or profile URL
         if self._is_video_url(url):
             return await self._get_video(url, session)
         elif self._is_photo_url(url):
-            return await self._get_photo(url, session)
+            # /p/ URLs can also be reels, so try both
+            return await self._get_video(url, session) or await self._get_photo(url, session)
         else:
             return await self._get_user_profile(url, session)
-        
+
     async def _get_video(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
         """Retrieves content from an Instagram video URL."""
-        if self.ytdlp_available:
-            return await get_video_with_ytdlp(url, session, platform="Instagram")
+        if self.api_available:
+            raise NotImplementedError
+        else:
+            return await get_content_with_ytdlp(url, session, platform="Instagram")
 
-        logger.error("❌ No available method to retrieve Instagram video.")
-        return None
-    
     async def _get_photo(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
         """Retrieves content from an Instagram photo URL (can also be a reel)."""
-        # Try yt-dlp first since /p/ URLs can be either photos or reels
-        if self.ytdlp_available:
-            return await get_video_with_ytdlp(url, session, platform="Instagram")
-
         logger.error("❌ No available method to retrieve Instagram photo.")
         return None
-    
+
     async def _get_user_profile(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
         """Retrieves content from an Instagram user profile URL."""
         username = self._extract_username(url)

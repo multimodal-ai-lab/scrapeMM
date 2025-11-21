@@ -6,7 +6,7 @@ import aiohttp
 from ezmm import MultimodalSequence
 
 from scrapemm.integrations.base import RetrievalIntegration
-from scrapemm.scraping.ytdlp import check_ytdlp_available, get_video_with_ytdlp
+from scrapemm.scraping.ytdlp import get_content_with_ytdlp
 from scrapemm.util import get_domain
 
 logger = logging.getLogger("scrapeMM")
@@ -19,16 +19,9 @@ class Facebook(RetrievalIntegration):
     domains = ["facebook.com", "www.facebook.com"]
 
     async def _connect(self):
-        # Check if yt-dlp is available
-        self.ytdlp_available = check_ytdlp_available()
-
-        if self.ytdlp_available:
-            self.connected = True
-            mode = "yt-dlp only"
-            logger.info(f"✅ Facebook integration ready ({mode} mode).")
-        else:
-            self.connected = False
-            logger.warning("❌ Facebook integration not available: Neither API credentials nor yt-dlp found.")
+        self.api_available = False  # TODO
+        logger.info(f"✅ Facebook integration ready (yt-dlp only mode).")
+        self.connected = True
 
     async def _get(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
         """Retrieves content from a Facebook post URL."""
@@ -48,14 +41,11 @@ class Facebook(RetrievalIntegration):
                 await self._get_user_profile(url, session))
 
     async def _get_video(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
-        """Retrieves content from a TikTok video URL."""
-
-        # Fallback to yt-dlp mode
-        if self.ytdlp_available:
-            return await get_video_with_ytdlp(url, session, platform="Facebook")
-
-        logger.error("❌ No available method to retrieve Facebook video.")
-        return None
+        """Retrieves content from a Facebook video URL."""
+        if self.api_available:
+            raise NotImplementedError
+        else:
+            return await get_content_with_ytdlp(url, session, platform="Facebook")
 
     async def _get_photo(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
         """Retrieves content from a Facebook photo URL."""

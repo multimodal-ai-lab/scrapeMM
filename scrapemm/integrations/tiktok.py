@@ -15,7 +15,6 @@ from ezmm.common.items import Video, Image
 from tiktok_research_api import TikTokResearchAPI, QueryVideoRequest, QueryUserInfoRequest, Criteria, Query
 
 from scrapemm.integrations.base import RetrievalIntegration
-from scrapemm.scraping.ytdlp import check_ytdlp_available
 from scrapemm.secrets import get_secret
 
 logger = logging.getLogger("scrapeMM")
@@ -57,16 +56,9 @@ class TikTok(RetrievalIntegration):
             except Exception as e:
                 logger.info(f"⚠️ TikTok Research API connection failed: {e}. Using fallback mode.")
 
-        # Check if yt-dlp is available
-        self.ytdlp_available = check_ytdlp_available()
-
-        if self.api_available or self.ytdlp_available:
-            self.connected = True
-            mode = "API + yt-dlp" if self.api_available else "yt-dlp only"
-            logger.info(f"✅ TikTok integration ready ({mode} mode).")
-        else:
-            self.connected = False
-            logger.warning("❌ TikTok integration not available: Neither API credentials nor yt-dlp found.")
+        mode = "API" if self.api_available else "yt-dlp only"
+        logger.info(f"✅ TikTok integration ready ({mode} mode).")
+        self.connected = True
 
     async def _get(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
         # Determine if this is a video or profile URL
@@ -86,11 +78,8 @@ class TikTok(RetrievalIntegration):
             logger.warning("API method failed, falling back to yt-dlp...")
 
         # Fallback to yt-dlp mode
-        if self.ytdlp_available:
+        else:
             return await self._get_video_with_ytdlp(url, session)
-
-        logger.error("❌ No available method to retrieve TikTok video.")
-        return None
 
     async def _get_video_with_api(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
         """Retrieves video using TikTok Research API."""

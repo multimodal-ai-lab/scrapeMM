@@ -30,8 +30,8 @@ Web scraping is done with [Firecrawl](https://github.com/mendableai/firecrawl) a
 - ✅ Telegram
 - ✅ Bluesky
 - ✅ TikTok
-- ⚠️ Facebook (working only sometimes and only with yt-dlp and Decodo)
+- ✅ YouTube (working sometimes)
+- ⚠️ Facebook (done for videos but not for images yet)
 - ⚠️ Instagram (done for videos but not for images yet)
-- ⚠️ YouTube (working sometimes)
 - ⏳ Threads
 - ⏳ Reddit
