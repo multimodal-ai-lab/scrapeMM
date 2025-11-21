@@ -49,7 +49,11 @@ class Instagram(RetrievalIntegration):
         return None
     
     async def _get_photo(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
-        """Retrieves content from an Instagram photo URL."""
+        """Retrieves content from an Instagram photo URL (can also be a reel)."""
+        # Try yt-dlp first since /p/ URLs can be either photos or reels
+        if self.ytdlp_available:
+            return await get_video_with_ytdlp(url, session, platform="Instagram")
+
         logger.error("❌ No available method to retrieve Instagram photo.")
         return None
     
