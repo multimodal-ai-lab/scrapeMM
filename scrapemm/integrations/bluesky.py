@@ -28,11 +28,12 @@ class Bluesky(RetrievalIntegration):
         self.client = Client()
         self._authenticate()
 
-    async def _get(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
+    async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
         if get_domain(url) not in self.domains:
             logger.error(f"❌ Invalid domain for Bluesky: {get_domain(url)}")
             return None
 
+        session = kwargs.get("session")
         if "post" in url:
             result = await self._retrieve_post(url, session)
         else:

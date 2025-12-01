@@ -20,7 +20,7 @@ class Instagram(RetrievalIntegration):
         logger.info(f"✅ Instagram integration ready (yt-dlp only mode).")
         self.connected = True
 
-    async def _get(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
+    async def _get(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from an Instagram post URL."""
         if get_domain(url) not in self.domains:
             logger.error(f"❌ Invalid domain for Instagram: {get_domain(url)}")
@@ -28,26 +28,30 @@ class Instagram(RetrievalIntegration):
 
         # Determine if this is a video or profile URL
         if self._is_video_url(url):
-            return await self._get_video(url, session)
+            return await self._get_video(url, **kwargs)
         elif self._is_photo_url(url):
             # /p/ URLs can also be reels, so try both
-            return await self._get_video(url, session) or await self._get_photo(url, session)
+            content = await self._get_video(url, **kwargs)
+            if content and content.has_videos():
+                return content
+            else:
+                return await self._get_photo(url, **kwargs)
         else:
-            return await self._get_user_profile(url, session)
+            return await self._get_user_profile(url, **kwargs)
 
-    async def _get_video(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
+    async def _get_video(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from an Instagram video URL."""
         if self.api_available:
             raise NotImplementedError
         else:
-            return await get_content_with_ytdlp(url, session, platform="Instagram")
+            return await get_content_with_ytdlp(url, platform="Instagram", **kwargs)
 
-    async def _get_photo(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
+    async def _get_photo(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from an Instagram photo URL (can also be a reel)."""
-        logger.error("❌ No available method to retrieve Instagram photo.")
+        logger.warning("❌ Native Instagram photo download not yet supported. Use Decodo for that.")
         return None
 
-    async def _get_user_profile(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
+    async def _get_user_profile(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from an Instagram user profile URL."""
         username = self._extract_username(url)
         if username:

@@ -44,6 +44,7 @@ class TikTok(RetrievalIntegration):
 
         if client_key and client_secret:
             try:
+                # TODO: Replace with async version
                 self.api = TikTokResearchAPI(
                     client_key=client_key,
                     client_secret=client_secret,
@@ -60,7 +61,9 @@ class TikTok(RetrievalIntegration):
         logger.info(f"✅ TikTok integration ready ({mode} mode).")
         self.connected = True
 
-    async def _get(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
+    async def _get(self, url: str, **kwargs) -> MultimodalSequence | None:
+        session = kwargs.get('session')
+
         # Determine if this is a video or profile URL
         if self._is_video_url(url):
             return await self._get_video(url, session)
@@ -72,7 +75,7 @@ class TikTok(RetrievalIntegration):
 
         # Try API mode first if available
         if self.api_available:
-            result = await self._get_video_with_api(url, session)
+            result = await self._get_video_with_api(url)
             if result:
                 return result
             logger.warning("API method failed, falling back to yt-dlp...")
@@ -81,7 +84,7 @@ class TikTok(RetrievalIntegration):
         else:
             return await self._get_video_with_ytdlp(url, session)
 
-    async def _get_video_with_api(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
+    async def _get_video_with_api(self, url: str) -> MultimodalSequence | None:
         """Retrieves video using TikTok Research API."""
         video_id = self._extract_video_id(url)
         if not video_id:

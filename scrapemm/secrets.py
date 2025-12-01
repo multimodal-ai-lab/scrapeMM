@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from scrapemm.common import get_config_var, update_config, CONFIG_PATH, CONFIG_DIR, logger
+from scrapemm.util import get_multiline_user_input
 
 SECRETS = {
     "x_bearer_token": "Bearer token of X (Twitter)",
@@ -22,6 +23,7 @@ SECRETS = {
     "tiktok_client_secret": "TikTok client secret",
     "decodo_username": "Decodo Web Scraping API username",
     "decodo_password": "Decodo Web Scraping API password",
+    "youtube_cookie": "YouTube cookie string"
 }
 
 SALT = b'\xa4\x93\xf1\x88\x13\x88'
@@ -125,39 +127,52 @@ def enter_password(pwd: str):
     _get_password(pwd=pwd)
 
 
-def configure_secrets(all_keys: bool = False):
-    """Gets the secrets from the user by running a CLI dialogue.
-    Saves them in an encrypted file. Deletes the existing secrets file if existing."""
-    logging.debug("Configuring new secrets...")
-
+def _set_new_password():
     # Delete existing secrets
-    if SECRETS_PATH.exists() and all_keys:
+    if SECRETS_PATH.exists():
         SECRETS_PATH.unlink()
 
-        # Set up a new password
-        _get_password("🔐 Enter a password to encrypt your secrets (you'll need it later to decrypt them): ")
+    # Set up a new password
+    _get_password("🔐 Enter a password to encrypt your secrets (you'll need it later to decrypt them): ")
 
-    prompted = False
-    for key_name, description in SECRETS.items():
+
+def override_secret(key_name: str):
+    """Prompts the user to enter a new value for the given secret key. Does nothing
+    when nothing entered."""
+    description = SECRETS[key_name]
+    if key_name == "youtube_cookie":
+        user_input = get_multiline_user_input(f"Please enter the {description}. Hit Ctrl-D or Ctrl-Z to save it.")
+    else:
+        user_input = getpass(f"Please enter the {description} (leave empty to skip): ", stream=sys.stdout)
+    if user_input:
+        set_secret(key_name, user_input)
+
+
+def configure_secrets(all_keys: bool = False):
+    """Gets the secrets from the user by running a CLI dialogue.
+    Saves them in an encrypted file. Only overrides an existing secret on non-empty input."""
+    logger.info("Starting secrets configuration...")
+
+    for key_name in SECRETS.keys():
         key_value = get_secret(key_name)
         if all_keys or not key_value:
             # Get and save the missing API key
-            user_input = getpass(f"Please enter the {description} (leave empty to skip): ", stream=sys.stdout)
-            prompted = True
-            if user_input:
-                set_secret(key_name, user_input)
+            override_secret(key_name)
 
     update_config(api_keys_configured=True)
 
-    if prompted:
-        print("API keys configured successfully! If you want to change them, go to "
-              f"{CONFIG_PATH.as_posix()} and set 'api_keys_configured' to 'false' or "
-              f"run scrapemm.api_keys.configure_api_keys().")
+    logger.info("API keys configured successfully! If you want to change them, go to "
+          f"{CONFIG_PATH.as_posix()} and set 'api_keys_configured' to 'false' or "
+          f"run scrapemm.api_keys.configure_api_keys().")
 
 
+# Ensure secrets file exists
+if not SECRETS_PATH.exists():
+    _set_new_password()
+
+# Ensure secrets are configured
 if not get_config_var("api_keys_configured"):
     configure_secrets()
-
 
 # Print secret summary
 logger.info("ScrapeMM secrets configuration:")

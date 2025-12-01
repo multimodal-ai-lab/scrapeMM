@@ -133,3 +133,20 @@ async def test_youtube(url):
     print(result)
     assert result
     assert result.has_videos()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url, max_video_size, download_expected", [
+    # ("https://www.facebook.com/reel/1089214926521000", None, True),
+    # ("https://www.facebook.com/reel/1089214926521000", 128_000_000, True),
+    ("https://www.facebook.com/reel/1089214926521000", 1_000_000, False),
+    # ("https://www.youtube.com/shorts/cE0zgN6pYOc", None, True),
+    # ("https://www.youtube.com/shorts/cE0zgN6pYOc", 4_000_000, True),
+    # ("https://www.youtube.com/shorts/cE0zgN6pYOc", 3_000_000, False),
+])
+async def test_max_video_size(url, max_video_size, download_expected):
+    result = await retrieve(url, max_video_size=max_video_size)
+    assert result.has_videos() == download_expected
+    if max_video_size and result.has_videos():
+        video = result.videos[0]
+        assert video.size <= max_video_size

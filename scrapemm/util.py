@@ -71,3 +71,9 @@ async def run_with_semaphore(tasks: Iterable[Awaitable],
 def read_urls_from_file(file_path):
     with open(file_path, 'r') as f:
         return f.read().splitlines()
+
+
+def get_multiline_user_input(prompt: str) -> str:
+    print(prompt)
+    lines = sys.stdin.readlines()
+    return "".join(lines)

@@ -42,7 +42,7 @@ class Telegram(RetrievalIntegration):
             self.connected = False
             logger.warning("❌ Telegram integration not configured: Missing API keys.")
 
-    async def _get(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
+    async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
         """Retrieves content from a Telegram post URL."""
         assert get_domain(url) in self.domains
 

@@ -1,6 +1,6 @@
 import logging
-from typing import Optional, Collection
 from traceback import format_exc
+from typing import Optional, Collection
 
 import aiohttp
 from ezmm import MultimodalSequence, download_item
@@ -20,6 +20,7 @@ async def retrieve(
         actions: list[dict] = None,
         methods: list[str] = None,
         format: str = "multimodal_sequence",
+        max_video_size: int = None
 ) -> Optional[MultimodalSequence | str] | list[Optional[MultimodalSequence | str]]:
     """Main function of this repository. Downloads the contents present at the given URL(s).
     For each URL, returns a MultimodalSequence containing text, images, and videos.
@@ -41,6 +42,7 @@ async def retrieve(
     :param format: The format of the output. Available formats:
         - "multimodal_sequence" (MultimodalSequence containing parsed and downloaded media from the page)
         - "html" (string containing the raw HTML code of the page, not compatible with 'integrations' method)
+    :param max_video_size: Maximum size of videos to download, in MB. If None, no limit is applied.
     """
     if methods is None:
         methods = METHODS
@@ -66,7 +68,8 @@ async def retrieve(
         urls_unique = set(urls_to_retrieve)
 
         # Retrieve URLs concurrently
-        tasks = [_retrieve_single(url, remove_urls, session, methods, actions, format) for url in urls_unique]
+        tasks = [_retrieve_single(url, remove_urls, session, methods, actions, format, max_video_size) for url in
+                 urls_unique]
         results = await run_with_semaphore(tasks, limit=20, show_progress=show_progress and len(urls_to_retrieve) > 1,
                                            progress_description="Retrieving URLs...")
 
@@ -85,6 +88,7 @@ async def _retrieve_single(
         methods: list[str],
         actions: list[dict] = None,
         format: str = "multimodal_sequence",
+        max_video_size: int = None,
 ) -> Optional[MultimodalSequence | str]:
     try:
         # Ensure URL is a string
@@ -101,9 +105,9 @@ async def _retrieve_single(
 
         # Define available retrieval methods
         method_map = {
-            "integrations": lambda: retrieve_via_integration(url, session),
+            "integrations": lambda: retrieve_via_integration(url, session=session, max_video_size=max_video_size),
             "firecrawl": lambda: fire.scrape(url, remove_urls=remove_urls,
-                                                  session=session, format=format, actions=actions),
+                                             session=session, format=format, actions=actions),
             "decodo": lambda: decodo.scrape(url, remove_urls, session, format=format),
         }
 

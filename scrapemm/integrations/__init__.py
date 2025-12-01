@@ -18,9 +18,9 @@ DOMAIN_TO_INTEGRATION = {domain: integration
                          for domain in integration.domains}
 
 
-async def retrieve_via_integration(url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
+async def retrieve_via_integration(url: str, **kwargs) -> Optional[MultimodalSequence]:
     domain = get_domain(url)
     if domain in DOMAIN_TO_INTEGRATION:
         integration = DOMAIN_TO_INTEGRATION[domain]
         if integration.connected or integration.connected is None:
-            return await integration.get(url, session)
+            return await integration.get(url, **kwargs)

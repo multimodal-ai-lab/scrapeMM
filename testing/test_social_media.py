@@ -77,6 +77,8 @@ async def test_facebook(url):
     print(f"Facebook URL: {url}")
     print(f"Result type: {type(result)}")
     print(f"Success: {result is not None}")
+    assert result
+
     if result:
         is_photo = "photo" in url
         is_reel = "reel" in url
@@ -85,7 +87,6 @@ async def test_facebook(url):
         print(f"Has videos: {result.has_videos()}")
         print(f"Length: {len(result)}")
     print(f"{'='*80}\n")
-    assert result is not None
 
     # Verify media based on URL type
     is_photo = "/photo" in url

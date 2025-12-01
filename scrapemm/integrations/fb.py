@@ -23,7 +23,7 @@ class Facebook(RetrievalIntegration):
         logger.info(f"✅ Facebook integration ready (yt-dlp only mode).")
         self.connected = True
 
-    async def _get(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
+    async def _get(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from a Facebook post URL."""
         if get_domain(url) not in self.domains:
             logger.error(f"❌ Invalid domain for Facebook: {get_domain(url)}")
@@ -31,28 +31,28 @@ class Facebook(RetrievalIntegration):
 
         # Determine if this is a video or photo URL, act accordingly
         if self._is_video_url(url):
-            return await self._get_video(url, session)
+            return await self._get_video(url, **kwargs)
         elif self._is_photo_url(url):
-            return await self._get_photo(url, session)
+            return await self._get_photo(url, **kwargs)
 
         # The URL is not indicative, so try all methods
-        return (await self._get_video(url, session) or
-                await self._get_photo(url, session) or
-                await self._get_user_profile(url, session))
+        return (await self._get_video(url, **kwargs) or
+                await self._get_photo(url, **kwargs) or
+                await self._get_user_profile(url, **kwargs))
 
-    async def _get_video(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
+    async def _get_video(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from a Facebook video URL."""
         if self.api_available:
             raise NotImplementedError
         else:
-            return await get_content_with_ytdlp(url, session, platform="Facebook")
+            return await get_content_with_ytdlp(url, platform="Facebook", **kwargs)
 
-    async def _get_photo(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
+    async def _get_photo(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from a Facebook photo URL."""
         logger.error("❌ No available method to retrieve Facebook photo.")
         return None
 
-    async def _get_user_profile(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
+    async def _get_user_profile(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from a Facebook user profile URL."""
         logger.error("❌ No available method to retrieve Facebook profiles.")
         return None

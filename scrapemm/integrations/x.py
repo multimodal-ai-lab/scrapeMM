@@ -47,7 +47,8 @@ class X(RetrievalIntegration):
             self.connected = False
             logger.warning("❌ X (Twitter) integration not configured: Missing bearer token.")
 
-    async def _get(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
+    async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
+        session = kwargs.get("session")
         tweet_id = extract_tweet_id_from_url(url)
         if tweet_id:
             return await self._get_tweet(tweet_id, session)

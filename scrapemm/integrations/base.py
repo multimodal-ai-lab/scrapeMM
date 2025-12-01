@@ -1,7 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Optional
 
-import aiohttp
 from ezmm import MultimodalSequence
 
 from scrapemm.common import logger
@@ -22,7 +21,7 @@ class RetrievalIntegration(ABC):
         Must set self.connet = True if connection was successful, else False."""
         raise NotImplementedError
 
-    async def get(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
+    async def get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
         """Ensures connectivity before invoking the service for retrieval."""
         assert get_domain(url) in self.domains
         if self.connected is None:
@@ -31,9 +30,9 @@ class RetrievalIntegration(ABC):
                 logger.warning(f"❌ Connection to {self.name} service could not be established.")
         if self.connected:
             logger.debug(f"Calling {self.name} service for {url}")
-            return await self._get(url, session)
+            return await self._get(url, **kwargs)
 
     @abstractmethod
-    async def _get(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
+    async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
         """Retrieves the contents present at the given URL."""
         raise NotImplementedError
