@@ -1,4 +1,5 @@
 import logging
+import sqlite3
 from traceback import format_exc
 from typing import Optional, Collection
 
@@ -20,7 +21,8 @@ async def retrieve(
         actions: list[dict] = None,
         methods: list[str] = None,
         format: str = "multimodal_sequence",
-        max_video_size: int = None
+        max_video_size: int = None,
+        do_raise: bool = False,
 ) -> Optional[MultimodalSequence | str] | list[Optional[MultimodalSequence | str]]:
     """Main function of this repository. Downloads the contents present at the given URL(s).
     For each URL, returns a MultimodalSequence containing text, images, and videos.
@@ -43,6 +45,7 @@ async def retrieve(
         - "multimodal_sequence" (MultimodalSequence containing parsed and downloaded media from the page)
         - "html" (string containing the raw HTML code of the page, not compatible with 'integrations' method)
     :param max_video_size: Maximum size of videos to download, in MB. If None, no limit is applied.
+    :param do_raise: Whether to raise exceptions occurring during retrieval.
     """
     if methods is None:
         methods = METHODS
@@ -68,7 +71,8 @@ async def retrieve(
         urls_unique = set(urls_to_retrieve)
 
         # Retrieve URLs concurrently
-        tasks = [_retrieve_single(url, remove_urls, session, methods, actions, format, max_video_size) for url in
+        tasks = [_retrieve_single(url, remove_urls, session, methods, actions,
+                                  format, max_video_size, do_raise) for url in
                  urls_unique]
         results = await run_with_semaphore(tasks, limit=20, show_progress=show_progress and len(urls_to_retrieve) > 1,
                                            progress_description="Retrieving URLs...")
@@ -89,6 +93,7 @@ async def _retrieve_single(
         actions: list[dict] = None,
         format: str = "multimodal_sequence",
         max_video_size: int = None,
+        do_raise: bool = False
 ) -> Optional[MultimodalSequence | str]:
     try:
         # Ensure URL is a string
@@ -118,11 +123,26 @@ async def _retrieve_single(
                 continue
 
             logger.debug(f"Trying method: {method_name}")
+
             try:
                 result = await method_map[method_name]()
+
+            except sqlite3.OperationalError as e:
+                if str(e) == "attempt to write a readonly database":
+                    logger.error("ezMM database is read-only! Please check the database.")
+                else:
+                    logger.warning(f"Error while retrieving with method '{method_name}': {e}")
+                if do_raise:
+                    raise
+                else:
+                    result = None
+
             except Exception as e:
                 logger.warning(f"Error while retrieving with method '{method_name}': {e}")
-                result = None
+                if do_raise:
+                    raise
+                else:
+                    result = None
 
             if result is not None:
                 logger.debug(f"Successfully retrieved with method: {method_name}")

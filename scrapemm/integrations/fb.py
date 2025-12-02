@@ -43,19 +43,17 @@ class Facebook(RetrievalIntegration):
     async def _get_video(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from a Facebook video URL."""
         if self.api_available:
-            raise NotImplementedError
+            raise NotImplementedError("❌ Facebook video retrieval through API not yet supported.")
         else:
             return await get_content_with_ytdlp(url, platform="Facebook", **kwargs)
 
     async def _get_photo(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from a Facebook photo URL."""
-        logger.error("❌ No available method to retrieve Facebook photo.")
-        return None
+        raise NotImplementedError("❌ No available method to retrieve Facebook photos.")
 
     async def _get_user_profile(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from a Facebook user profile URL."""
-        logger.error("❌ No available method to retrieve Facebook profiles.")
-        return None
+        raise NotImplementedError("❌ No available method to retrieve Facebook profiles.")
 
     def _is_video_url(self, url: str) -> bool:
         """Checks if the URL is a Facebook video URL."""
