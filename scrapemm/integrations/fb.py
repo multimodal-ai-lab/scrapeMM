@@ -2,11 +2,10 @@ import logging
 import re
 from urllib.parse import urlparse
 
-import aiohttp
 from ezmm import MultimodalSequence
 
 from scrapemm.integrations.base import RetrievalIntegration
-from scrapemm.scraping.ytdlp import get_content_with_ytdlp
+from scrapemm.integrations.ytdlp import get_content_with_ytdlp
 from scrapemm.util import get_domain
 
 logger = logging.getLogger("scrapeMM")

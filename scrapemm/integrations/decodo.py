@@ -6,7 +6,7 @@ import aiohttp
 from ezmm import MultimodalSequence
 
 from scrapemm.secrets import get_secret
-from scrapemm.scraping.util import to_multimodal_sequence, get_domain_root
+from scrapemm.util import get_domain_root, to_multimodal_sequence
 
 logger = logging.getLogger("scrapeMM")
 

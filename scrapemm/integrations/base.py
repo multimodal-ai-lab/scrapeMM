@@ -1,10 +1,12 @@
+import logging
 from abc import ABC, abstractmethod
 from typing import Optional
 
 from ezmm import MultimodalSequence
 
-from scrapemm.common import logger
 from scrapemm.util import get_domain
+
+logger = logging.getLogger("scrapeMM")
 
 
 class RetrievalIntegration(ABC):

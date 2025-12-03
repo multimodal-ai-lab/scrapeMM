@@ -25,13 +25,13 @@ The `MultimodalSequence` is a sequence of Markdown-formatted text and media prov
 
 Web scraping is done with [Firecrawl](https://github.com/mendableai/firecrawl) and [Decodo](https://decodo.com/).
 
-## Supported Proprietary APIs
+## Supported Platforms
 - ✅ X/Twitter
 - ✅ Telegram
 - ✅ Bluesky
 - ✅ TikTok
-- ✅ YouTube (working sometimes)
+- ✅ YouTube
+- (✅️) Instagram (works for most content)
 - ⚠️ Facebook (done for videos but not for images yet)
-- ⚠️ Instagram (done for videos but not for images yet)
-- ⏳ Threads
-- ⏳ Reddit
+- ⏳ Threads (TBD)
+- ⏳ Reddit (TBD)

@@ -1,11 +1,12 @@
 from typing import Optional
 
-import aiohttp
 from ezmm import MultimodalSequence
 
 from scrapemm.util import get_domain
 from .bluesky import Bluesky
+from .decodo import Decodo, decodo
 from .fb import Facebook
+from .firecrawl import Firecrawl, fire
 from .instagram import Instagram
 from .telegram import Telegram
 from .tiktok import TikTok

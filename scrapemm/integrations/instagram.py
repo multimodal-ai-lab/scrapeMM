@@ -1,11 +1,11 @@
 import logging
 from urllib.parse import urlparse
 
-import aiohttp
 from ezmm import MultimodalSequence
+from yt_dlp import DownloadError
 
 from scrapemm.integrations.base import RetrievalIntegration
-from scrapemm.scraping.ytdlp import get_content_with_ytdlp
+from scrapemm.integrations.ytdlp import get_content_with_ytdlp
 from scrapemm.util import get_domain
 
 logger = logging.getLogger("scrapeMM")
@@ -44,7 +44,15 @@ class Instagram(RetrievalIntegration):
         if self.api_available:
             raise NotImplementedError
         else:
-            return await get_content_with_ytdlp(url, platform="Instagram", **kwargs)
+            try:
+                return await get_content_with_ytdlp(url, platform="Instagram", **kwargs)
+            except DownloadError as e:
+                if "rate-limit reached" in str(e):
+                    msg = "Instagram rate limit likely reached!"
+                    logger.error(msg)
+                    raise RuntimeError(msg) from e
+                else:
+                    raise e
 
     async def _get_photo(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from an Instagram photo URL (can also be a reel)."""

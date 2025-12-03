@@ -78,11 +78,10 @@ class TikTok(RetrievalIntegration):
             result = await self._get_video_with_api(url)
             if result:
                 return result
-            logger.warning("API method failed, falling back to yt-dlp...")
+            logger.info("API method failed, falling back to yt-dlp...")
 
         # Fallback to yt-dlp mode
-        else:
-            return await self._get_video_with_ytdlp(url, session)
+        return await self._get_video_with_ytdlp(url, session)
 
     async def _get_video_with_api(self, url: str) -> MultimodalSequence | None:
         """Retrieves video using TikTok Research API."""

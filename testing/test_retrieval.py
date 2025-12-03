@@ -19,8 +19,9 @@ async def test_generic_retrieval(url, method):
     result = await retrieve(url, methods=[method])
     print(result)
     assert result
-    assert isinstance(result, MultimodalSequence)
-    assert result.has_images()
+    content = result.content
+    assert isinstance(content, MultimodalSequence)
+    assert content.has_images()
 
 
 @pytest.mark.asyncio
@@ -32,9 +33,10 @@ async def test_generic_retrieval(url, method):
 @pytest.mark.parametrize("method", ["firecrawl", "decodo"])
 async def test_html_retrieval(url, method):
     result = await retrieve(url, format="html", methods=[method])
-    print(result)
-    assert result
-    assert isinstance(result, str)
+    content = result.content
+    print(content)
+    assert content
+    assert isinstance(content, str)
 
 
 @pytest.mark.asyncio
@@ -47,8 +49,9 @@ async def test_html_retrieval(url, method):
 ])
 async def test_telegram(url):
     result = await retrieve(url)
-    print(result)
-    assert result
+    content = result.content
+    print(content)
+    assert content
 
 
 @pytest.mark.asyncio
@@ -58,8 +61,9 @@ async def test_telegram(url):
 ])
 async def test_tiktok(url):
     result = await retrieve(url)
-    print(result)
-    assert result
+    content = result.content
+    print(content)
+    assert content
 
 
 @pytest.mark.asyncio
@@ -69,8 +73,9 @@ async def test_tiktok(url):
 ])
 async def test_x(url):
     result = await retrieve(url)
-    print(result)
-    assert result
+    content = result.content
+    print(content)
+    assert content
 
 
 @pytest.mark.asyncio
@@ -79,9 +84,10 @@ async def test_x(url):
 ])
 async def test_instagram_images(url):
     result = await retrieve(url)
-    print(result)
-    assert result
-    assert result.has_images()
+    content = result.content
+    print(content)
+    assert content
+    assert content.has_images()
 
 
 @pytest.mark.asyncio
@@ -92,9 +98,10 @@ async def test_instagram_images(url):
 ])
 async def test_instagram_videos(url):
     result = await retrieve(url)
-    print(result)
-    assert result
-    assert result.has_videos()
+    content = result.content
+    print(content)
+    assert content
+    assert content.has_videos()
 
 
 @pytest.mark.asyncio
@@ -107,9 +114,10 @@ async def test_instagram_videos(url):
 ])
 async def test_facebook_videos(url):
     result = await retrieve(url)
-    print(result)
-    assert result
-    assert result.has_videos()
+    content = result.content
+    print(content)
+    assert content
+    assert content.has_videos()
 
 
 @pytest.mark.asyncio
@@ -118,9 +126,10 @@ async def test_facebook_videos(url):
 ])
 async def test_facebook_images(url):
     result = await retrieve(url)
-    print(result)
-    assert result
-    assert result.has_images()
+    content = result.content
+    print(content)
+    assert content
+    assert content.has_images()
 
 
 @pytest.mark.asyncio
@@ -130,23 +139,25 @@ async def test_facebook_images(url):
 ])
 async def test_youtube(url):
     result = await retrieve(url)
-    print(result)
-    assert result
-    assert result.has_videos()
+    content = result.content
+    print(content)
+    assert content
+    assert content.has_videos()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url, max_video_size, download_expected", [
-    # ("https://www.facebook.com/reel/1089214926521000", None, True),
-    # ("https://www.facebook.com/reel/1089214926521000", 128_000_000, True),
+    ("https://www.facebook.com/reel/1089214926521000", None, True),
+    ("https://www.facebook.com/reel/1089214926521000", 128_000_000, True),
     ("https://www.facebook.com/reel/1089214926521000", 1_000_000, False),
-    # ("https://www.youtube.com/shorts/cE0zgN6pYOc", None, True),
-    # ("https://www.youtube.com/shorts/cE0zgN6pYOc", 4_000_000, True),
-    # ("https://www.youtube.com/shorts/cE0zgN6pYOc", 3_000_000, False),
+    ("https://www.youtube.com/shorts/cE0zgN6pYOc", None, True),
+    ("https://www.youtube.com/shorts/cE0zgN6pYOc", 4_000_000, True),
+    ("https://www.youtube.com/shorts/cE0zgN6pYOc", 3_000_000, False),
 ])
 async def test_max_video_size(url, max_video_size, download_expected):
     result = await retrieve(url, max_video_size=max_video_size)
-    assert result.has_videos() == download_expected
-    if max_video_size and result.has_videos():
-        video = result.videos[0]
+    content = result.content
+    assert content.has_videos() == download_expected
+    if max_video_size and content.has_videos():
+        video = content.videos[0]
         assert video.size <= max_video_size

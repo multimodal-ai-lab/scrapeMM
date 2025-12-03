@@ -1,9 +1,9 @@
 [project]
 name = "scrapeMM"
-version = "0.3.6"
-description = "LLM-friendly scraper for media and text from social media and the open web."
+version = "0.4.0"
+description = "Flexible multimodal scraper for social media and the open web."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = "Apache-2.0"
 authors = [{name = "Mark Rothermel", email = "mark.rothermel@tu-darmstadt.de"}]
 dependencies = [
@@ -30,8 +30,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 namespaces = false  # Disable implicit namespaces
-# include = ["scrapemm/*"]
-# exclude = ["*.egg-info", "tests*", "in*", "scripts*", "temp*", "secrets.yaml", "dist*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.txt"]  # Include all .txt files contained in any (sub)package in the build

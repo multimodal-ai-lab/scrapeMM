@@ -1,13 +1,13 @@
 import logging
 import sqlite3
 from traceback import format_exc
-from typing import Optional, Collection
+from typing import Collection
 
 import aiohttp
 from ezmm import MultimodalSequence, download_item
 
-from scrapemm.integrations import retrieve_via_integration
-from scrapemm.scraping import fire, decodo
+from scrapemm.common import ScrapingResponse
+from scrapemm.integrations import retrieve_via_integration, fire, decodo
 from scrapemm.util import run_with_semaphore
 
 logger = logging.getLogger("scrapeMM")
@@ -22,11 +22,9 @@ async def retrieve(
         methods: list[str] = None,
         format: str = "multimodal_sequence",
         max_video_size: int = None,
-        do_raise: bool = False,
-) -> Optional[MultimodalSequence | str] | list[Optional[MultimodalSequence | str]]:
+) -> ScrapingResponse | list[ScrapingResponse]:
     """Main function of this repository. Downloads the contents present at the given URL(s).
-    For each URL, returns a MultimodalSequence containing text, images, and videos.
-    Returns None if the corresponding URL is not supported or if retrieval failed.
+    For each URL, returns a ScrapingResponse containing the retrieved content, error, and method.
 
     :param urls: The URL(s) to retrieve.
     :param remove_urls: Whether to remove URLs from hyperlinks contained in the
@@ -45,7 +43,6 @@ async def retrieve(
         - "multimodal_sequence" (MultimodalSequence containing parsed and downloaded media from the page)
         - "html" (string containing the raw HTML code of the page, not compatible with 'integrations' method)
     :param max_video_size: Maximum size of videos to download, in MB. If None, no limit is applied.
-    :param do_raise: Whether to raise exceptions occurring during retrieval.
     """
     if methods is None:
         methods = METHODS
@@ -72,7 +69,7 @@ async def retrieve(
 
         # Retrieve URLs concurrently
         tasks = [_retrieve_single(url, remove_urls, session, methods, actions,
-                                  format, max_video_size, do_raise) for url in
+                                  format, max_video_size) for url in
                  urls_unique]
         results = await run_with_semaphore(tasks, limit=20, show_progress=show_progress and len(urls_to_retrieve) > 1,
                                            progress_description="Retrieving URLs...")
@@ -93,8 +90,7 @@ async def _retrieve_single(
         actions: list[dict] = None,
         format: str = "multimodal_sequence",
         max_video_size: int = None,
-        do_raise: bool = False
-) -> Optional[MultimodalSequence | str]:
+) -> ScrapingResponse:
     try:
         # Ensure URL is a string
         url = str(url)
@@ -106,9 +102,9 @@ async def _retrieve_single(
         # Try to download as medium
         if format != "html":
             if medium := await download_item(url, session=session):
-                return MultimodalSequence(medium)
+                return ScrapingResponse(url=url, content=MultimodalSequence(medium), method="ezmm")
 
-        # Define available retrieval methods
+        # Find available integrations TODO: Propagate name of actual integration to ScrapingResponse
         method_map = {
             "integrations": lambda: retrieve_via_integration(url, session=session, max_video_size=max_video_size),
             "firecrawl": lambda: fire.scrape(url, remove_urls=remove_urls,
@@ -116,41 +112,46 @@ async def _retrieve_single(
             "decodo": lambda: decodo.scrape(url, remove_urls, session, format=format),
         }
 
-        # Try each method in the specified order until one succeeds
-        for method_name in methods:
-            if method_name not in method_map:
-                logger.warning(f"Unknown retrieval method '{method_name}'. Skipping...")
-                continue
-
-            logger.debug(f"Trying method: {method_name}")
-
-            try:
-                result = await method_map[method_name]()
-
-            except sqlite3.OperationalError as e:
-                if str(e) == "attempt to write a readonly database":
-                    logger.error("ezMM database is read-only! Please check the database.")
-                else:
-                    logger.warning(f"Error while retrieving with method '{method_name}': {e}")
-                if do_raise:
-                    raise
-                else:
-                    result = None
-
-            except Exception as e:
-                logger.warning(f"Error while retrieving with method '{method_name}': {e}")
-                if do_raise:
-                    raise
-                else:
-                    result = None
-
-            if result is not None:
-                logger.debug(f"Successfully retrieved with method: {method_name}")
-                return result
-
-        # All methods failed
-        logger.warning(f"All retrieval methods failed for URL: {url}")
-        return None
+        result = None
+        errors = {}
 
     except Exception as e:
-        logger.error(f"Error while retrieving URL '{url}'.\n" + format_exc())
+        logger.error(f"Error while preparing retrieval for '{url}'.\n" + format_exc())
+        return ScrapingResponse(url=url, content=None, errors=dict(all=e))
+
+    # Try each method in the specified order until one succeeds
+    for method_name in methods:
+        if method_name not in method_map:
+            logger.warning(f"Unknown retrieval method '{method_name}'. Skipping...")
+            continue
+
+        logger.debug(f"Trying method: {method_name}")
+
+        try:
+            result = await method_map[method_name]()
+
+        except NotImplementedError as e:
+            logger.debug(e)
+            errors[method_name] = e
+
+        except sqlite3.OperationalError as e:
+            if str(e) == "attempt to write a readonly database":
+                logger.error("ezMM database is read-only! Please check the database.")
+                raise
+            else:
+                logger.warning(f"Error while retrieving with method '{method_name}': {e}")
+                errors[method_name] = e
+                result = None
+
+        except Exception as e:
+            logger.warning(f"Error while retrieving with method '{method_name}': {e}")
+            errors[method_name] = e
+            result = None
+
+        if result is not None:
+            logger.debug(f"Successfully retrieved with method: {method_name}")
+            return ScrapingResponse(url=url, content=result, method=method_name)
+
+    # All methods failed
+    logger.warning(f"All retrieval methods failed for URL: {url}")
+    return ScrapingResponse(url=url, content=None, errors=errors)

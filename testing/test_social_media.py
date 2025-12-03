@@ -14,53 +14,30 @@ from scrapemm import retrieve
 async def test_youtube(url):
     """Test YouTube video and shorts retrieval"""
     result = await retrieve(url)
-    print(f"\n{'='*80}")
-    print(f"YouTube URL: {url}")
-    print(f"Result type: {type(result)}")
-    print(f"Success: {result is not None}")
-    if result:
-        print(f"Has videos: {result.has_videos()}")
-        print(f"Length: {len(result)}")
-        # Print first 200 chars of text
-        text_items = [str(item) for item in result if isinstance(item, str)]
-        if text_items:
-            print(f"Text preview: {text_items[0][:200]}...")
-    print(f"{'='*80}\n")
-    assert result is not None
-    assert result.has_videos(), "YouTube videos must have video content"
+    content = result.content
+    print(content)
+    assert content
+    assert content.has_videos()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url", [
-    "https://www.instagram.com/p/DRJ94KKDhpx/?utm_source=ig_web_copy_link&igsh=NTc4MTIwNjQ2YQ==",
-    "https://www.instagram.com/p/DRNcdbPiPCj/?utm_source=ig_web_copy_link&igsh=NTc4MTIwNjQ2YQ==",
-    "https://www.instagram.com/reel/DRKtWnhAI0j/?utm_source=ig_web_copy_link",
-    "https://www.instagram.com/reel/DRE38jKDIYb/?utm_source=ig_web_copy_link&igsh=MzRlODBiNWFlZA==",
+    "https://www.instagram.com/p/DRJ94KKDhpx",
+    "https://www.instagram.com/p/DRNcdbPiPCj",
+    "https://www.instagram.com/reel/DRKtWnhAI0j",
+    "https://www.instagram.com/reel/DRE38jKDIYb",
 ])
 async def test_instagram(url):
     """Test Instagram post and reel retrieval"""
     result = await retrieve(url)
-    print(f"\n{'='*80}")
-    print(f"Instagram URL: {url}")
-    print(f"Result type: {type(result)}")
-    print(f"Success: {result is not None}")
-    if result:
-        print(f"Has images: {result.has_images()}")
-        print(f"Has videos: {result.has_videos()}")
-        print(f"Length: {len(result)}")
-        # Count media types
-        images = sum(1 for item in result if hasattr(item, 'width'))
-        videos = sum(1 for item in result if hasattr(item, 'duration'))
-        print(f"Images: {images}, Videos: {videos}")
-    print(f"{'='*80}\n")
-    assert result is not None
+    content = result.content
+    print(content)
+    assert content
 
-    # Verify media based on URL type
-    is_reel = "/reel/" in url
-    if is_reel:
-        assert result.has_videos(), "Instagram Reels must have video content"
+    if "reel" in url:
+        assert content.has_videos()
     else:
-        assert result.has_images(), "Instagram posts must have images"
+        assert content.has_images()
 
 
 @pytest.mark.asyncio
@@ -73,25 +50,11 @@ async def test_instagram(url):
 async def test_facebook(url):
     """Test Facebook reel and photo retrieval"""
     result = await retrieve(url)
-    print(f"\n{'='*80}")
-    print(f"Facebook URL: {url}")
-    print(f"Result type: {type(result)}")
-    print(f"Success: {result is not None}")
-    assert result
+    content = result.content
+    print(content)
+    assert content
 
-    if result:
-        is_photo = "photo" in url
-        is_reel = "reel" in url
-        print(f"Type: {'Photo' if is_photo else 'Reel' if is_reel else 'Unknown'}")
-        print(f"Has images: {result.has_images()}")
-        print(f"Has videos: {result.has_videos()}")
-        print(f"Length: {len(result)}")
-    print(f"{'='*80}\n")
-
-    # Verify media based on URL type
-    is_photo = "/photo" in url
-    is_reel = "/reel/" in url
-    if is_reel:
-        assert result.has_videos(), "Facebook Reels must have video content"
-    elif is_photo:
-        assert result.has_images(), "Facebook photos must have images"
+    if "photo" in url:
+        assert content.has_images()
+    elif "reel" in url:
+        assert content.has_videos()

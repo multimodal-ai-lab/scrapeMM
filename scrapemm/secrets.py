@@ -9,8 +9,10 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-from scrapemm.common import get_config_var, update_config, CONFIG_PATH, CONFIG_DIR, logger
+from scrapemm.common import get_config_var, update_config, CONFIG_PATH, CONFIG_DIR
 from scrapemm.util import get_multiline_user_input
+
+logger = logging.getLogger("scrapeMM")
 
 SECRETS = {
     "x_bearer_token": "Bearer token of X (Twitter)",
@@ -162,8 +164,8 @@ def configure_secrets(all_keys: bool = False):
     update_config(api_keys_configured=True)
 
     logger.info("API keys configured successfully! If you want to change them, go to "
-          f"{CONFIG_PATH.as_posix()} and set 'api_keys_configured' to 'false' or "
-          f"run scrapemm.api_keys.configure_api_keys().")
+                f"{CONFIG_PATH.as_posix()} and set 'api_keys_configured' to 'false' or "
+                f"run scrapemm.api_keys.configure_api_keys().")
 
 
 # Ensure secrets file exists

@@ -1,10 +1,9 @@
 import logging
 from typing import Optional
 
-import aiohttp
 from ezmm import MultimodalSequence
 
-from scrapemm.scraping.ytdlp import get_content_with_ytdlp
+from scrapemm.integrations.ytdlp import get_content_with_ytdlp
 from .base import RetrievalIntegration
 from scrapemm.secrets import get_secret
 from ..common import CONFIG_DIR

@@ -3,11 +3,13 @@ from pathlib import Path
 from typing import Optional
 
 import aiohttp
+import requests
 from ezmm import MultimodalSequence
+from requests import ConnectionError, ReadTimeout
+from requests.exceptions import RetryError
 
 from scrapemm.common import get_config_var, update_config
-from scrapemm.util import read_urls_from_file, get_domain
-from scrapemm.scraping.util import find_firecrawl, to_multimodal_sequence, firecrawl_is_running, get_domain_root
+from scrapemm.util import read_urls_from_file, get_domain, get_domain_root, to_multimodal_sequence
 
 logger = logging.getLogger("scrapeMM")
 
@@ -69,7 +71,7 @@ class Firecrawl:
                      format: str,
                      **kwargs) -> Optional[MultimodalSequence | str]:
         if is_no_bot_site(url):
-            return None
+            raise ValueError(f"Firecrawl cannot scrape sites from {get_domain(url)}")
 
         if not self._firecrawl:
             self.connect()
@@ -90,7 +92,8 @@ class Firecrawl:
                 return html
             else:
                 domain_root = get_domain_root(url)
-                return await to_multimodal_sequence(html, remove_urls=remove_urls, session=session, domain_root=domain_root)
+                return await to_multimodal_sequence(html, remove_urls=remove_urls,
+                                                    session=session, domain_root=domain_root)
         return None
 
 
@@ -101,3 +104,23 @@ def is_no_bot_site(url: str) -> bool:
     """Checks if the URL belongs to a known unsupported website."""
     domain = get_domain(url)
     return domain is None or domain.endswith(".gov") or domain in NO_BOT_DOMAINS
+
+
+def find_firecrawl(urls):
+    for url in urls:
+        if firecrawl_is_running(url):
+            return url
+    return None
+
+
+def firecrawl_is_running(url: str) -> bool:
+    """Returns True iff Firecrawl is running at the specified URL."""
+    if not url:
+        return False
+    try:
+        if not url.startswith("http"):
+            url = "https://" + url
+        response = requests.get(url, timeout=0.2)
+    except (ConnectionError, RetryError, ReadTimeout):
+        return False
+    return response.status_code == 200

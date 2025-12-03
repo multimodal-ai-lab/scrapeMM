@@ -70,7 +70,7 @@ async def _download_with_ytdlp(
 
     except Exception as e:
         logger.warning(f"Could not download video with yt-dlp: {e}")
-        return None, None, None
+        raise e
 
 
 def fmt_count(v):
