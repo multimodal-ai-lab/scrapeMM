@@ -18,10 +18,10 @@ async def retrieve(
         urls: str | Collection[str],
         remove_urls: bool = False,
         show_progress: bool = True,
-        actions: list[dict] = None,
-        methods: list[str] = None,
+        actions: list[dict] = [],
+        methods: list[str] = [],
         format: str = "multimodal_sequence",
-        max_video_size: int = None,
+        max_video_size: int | None = None,
 ) -> ScrapingResponse | list[ScrapingResponse]:
     """Main function of this repository. Downloads the contents present at the given URL(s).
     For each URL, returns a ScrapingResponse containing the retrieved content, error, and method.
@@ -87,9 +87,9 @@ async def _retrieve_single(
         remove_urls: bool,
         session: aiohttp.ClientSession,
         methods: list[str],
-        actions: list[dict] = None,
+        actions: list[dict] = [],
         format: str = "multimodal_sequence",
-        max_video_size: int = None,
+        max_video_size: int | None = None,
 ) -> ScrapingResponse:
     try:
         # Ensure URL is a string
