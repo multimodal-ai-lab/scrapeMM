@@ -103,7 +103,7 @@ def postprocess_scraped(text: str) -> str:
 
 async def resolve_media_hyperlinks(
         text: str, session: aiohttp.ClientSession,
-        domain_root: str = None,
+        domain_root: str | None = None,
         remove_urls: bool = False,
 ) -> Optional[MultimodalSequence]:
     """Downloads all media that are hyperlinked in the provided Markdown text.
