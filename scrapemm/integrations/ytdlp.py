@@ -10,6 +10,8 @@ import aiohttp
 from ezmm import MultimodalSequence, download_image, Video, Image
 from yt_dlp import YoutubeDL
 
+from scrapemm.common.exceptions import IPBannedError
+
 logger = logging.getLogger("scrapeMM")
 
 # Add yt-dlp-specific logger to print warnings to console
@@ -18,13 +20,13 @@ logger_yt_dlp.setLevel(logging.WARNING)
 logger_yt_dlp.addHandler(logging.StreamHandler(sys.stdout))
 
 
-async def _download_with_ytdlp(
+async def download_video_with_ytdlp(
         url: str,
         session: aiohttp.ClientSession,
         max_video_size: int = None,
         cookie_file: str = None
 ) -> tuple[Optional[Video], Optional[Image], Optional[dict[str, Any]]]:
-    """Downloads a video, its thumbnail, and the metadata using yt-dlp.
+    """Downloads a video and (if not available or exceeds max. duration) its thumbnail, and the metadata using yt-dlp.
     @param max_video_size: Maximum video size in bytes. If the video is larger, the download will be aborted."""
     try:
         with tempfile.NamedTemporaryFile() as temp_file:
@@ -55,22 +57,30 @@ async def _download_with_ytdlp(
             try:
                 video = Video(file_path=temp_path + f".{ext}", source_url=url)
                 video.relocate(move_not_copy=True)
-                if video.size > max_video_size:
-                    video = None  # Discard video
             except FileNotFoundError:
                 pass
             except Exception as e:
-                logger.warning(f"Could not load downloaded video: {e}\n{traceback.format_exc()}")
+                logger.warning(f"Could not load downloaded video: {e}")
+
+        if video and max_video_size and video.size > max_video_size:
+            logger.info(f"Removing video {video.reference} because it exceeds the maximum size "
+                        f"of {max_video_size / 1024 / 1024:.2f} MB.")
+            video = None  # Discard video
 
         thumbnail = None
-        if thumbnail_url := metadata.get('thumbnail'):
-            thumbnail = await download_image(thumbnail_url, session)
+        if not video:
+            thumbnail_url = metadata.get('thumbnail')
+            if thumbnail_url:
+                thumbnail = await download_image(thumbnail_url, session)
 
         return video, thumbnail, metadata
 
     except Exception as e:
-        logger.warning(f"Could not download video with yt-dlp: {e}")
-        raise e
+        if "The following content is not available on this app" in str(e):
+            logger.warning(f"You should update yt-dlp to re-enable YouTube downloads.")
+            raise e
+        else:
+            raise RuntimeError(f"Could not download video with yt-dlp: {e}")
 
 
 def fmt_count(v):
@@ -107,22 +117,23 @@ Views: {fmt_count(view_count)} - Likes: {fmt_count(like_count)} - Comments: {fmt
 {description}"""
 
     items: list = [text]
-    if thumbnail:
-        items.append(thumbnail)
     if video:
         items.append(video)
+    elif thumbnail:  # Only add thumbnail if video could not be downloaded
+        items.append(thumbnail)
 
     return MultimodalSequence(items)
 
 
 async def get_content_with_ytdlp(
-        url: str, session: aiohttp.ClientSession,
+        url: str,
+        session: aiohttp.ClientSession,
         platform: str,
         **kwargs
 ) -> MultimodalSequence | None:
     """Retrieves video, thumbnail, and metadata using the powerful yt-dlp package."""
     # Run the download in a separate thread to avoid blocking the event loop
-    coroutine = await asyncio.to_thread(_download_with_ytdlp, url, session, **kwargs)
+    coroutine = await asyncio.to_thread(download_video_with_ytdlp, url, session, **kwargs)
     video, thumbnail, metadata = await coroutine
     if metadata:
         return await compose_data_to_sequence(metadata, video, thumbnail, platform)

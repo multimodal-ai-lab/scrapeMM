@@ -25,7 +25,7 @@ class RetrievalIntegration(ABC):
 
     async def get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
         """Ensures connectivity before invoking the service for retrieval."""
-        assert get_domain(url) in self.domains
+        assert get_domain(url) in self.domains, f"Invalid domain {get_domain(url)} for integration {self.name}."
         if self.connected is None:
             await self._connect()
             if not self.connected:

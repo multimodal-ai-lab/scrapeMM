@@ -49,15 +49,16 @@ class X(RetrievalIntegration):
 
     async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
         session = kwargs.get("session")
+        max_video_size = kwargs.get("max_video_size")
         tweet_id = extract_tweet_id_from_url(url)
         if tweet_id:
-            return await self._get_tweet(tweet_id, session)
+            return await self._get_tweet(tweet_id, session, max_video_size)
         else:
             username = extract_username_from_url(url)
             if username:
                 return await self._get_user(username, session)
 
-    async def _get_tweet(self, tweet_id: int, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
+    async def _get_tweet(self, tweet_id: int, session: aiohttp.ClientSession, max_video_size: int = None) -> Optional[MultimodalSequence]:
         """Returns a MultimodalSequence containing the tweet's text and media
         along with information like metrics, etc."""
 
@@ -90,6 +91,10 @@ class X(RetrievalIntegration):
                         # Get the variant with the highest bitrate
                         url = _get_best_quality_video_url(medium_raw.variants)
                         medium = await download_video(url, session=session)
+                        if medium and medium.size > max_video_size:
+                            logger.info(f"Removing video {medium.reference} because it exceeds the maximum size "
+                                        f"of {max_video_size / 1024 / 1024:.2f} MB.")
+                            medium = None
                     else:
                         raise ValueError(f"Unsupported media type: {medium_raw.type}")
                     if medium:

@@ -1,12 +1,7 @@
 import asyncio
-import json
 import logging
-import os
 import re
-import sys
-import tempfile
 from datetime import datetime
-from typing import Any
 from urllib.parse import urlparse
 
 import aiohttp
@@ -14,7 +9,9 @@ from ezmm import MultimodalSequence, download_image
 from ezmm.common.items import Video, Image
 from tiktok_research_api import TikTokResearchAPI, QueryVideoRequest, QueryUserInfoRequest, Criteria, Query
 
+from scrapemm.common.exceptions import RateLimitError
 from scrapemm.integrations.base import RetrievalIntegration
+from scrapemm.integrations.ytdlp import download_video_with_ytdlp
 from scrapemm.secrets import get_secret
 
 logger = logging.getLogger("scrapeMM")
@@ -44,7 +41,6 @@ class TikTok(RetrievalIntegration):
 
         if client_key and client_secret:
             try:
-                # TODO: Replace with async version
                 self.api = TikTokResearchAPI(
                     client_key=client_key,
                     client_secret=client_secret,
@@ -63,27 +59,32 @@ class TikTok(RetrievalIntegration):
 
     async def _get(self, url: str, **kwargs) -> MultimodalSequence | None:
         session = kwargs.get('session')
+        max_video_size = kwargs.get('max_video_size')
 
         # Determine if this is a video or profile URL
-        if self._is_video_url(url):
-            return await self._get_video(url, session)
-        else:
-            return await self._get_user_profile(url, session)
+        try:
+            if self._is_video_url(url):
+                return await self._get_video(url, session, max_video_size)
+            else:
+                return await self._get_user_profile(url, session)
+        except Exception as e:
+            if "quota" in str(e).lower():
+                raise RateLimitError(f"TikTok rate limit likely reached: {e}")
+            else:
+                raise e
 
-    async def _get_video(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
+    async def _get_video(self, url: str, session: aiohttp.ClientSession,
+                         max_video_size=None) -> MultimodalSequence | None:
         """Retrieves content from a TikTok video URL."""
 
         # Try API mode first if available
         if self.api_available:
-            result = await self._get_video_with_api(url)
+            result = await self._get_video_with_api(url, session, max_video_size=max_video_size)
             if result:
                 return result
-            logger.info("API method failed, falling back to yt-dlp...")
 
-        # Fallback to yt-dlp mode
-        return await self._get_video_with_ytdlp(url, session)
-
-    async def _get_video_with_api(self, url: str) -> MultimodalSequence | None:
+    async def _get_video_with_api(self, url: str, session: aiohttp.ClientSession,
+                                  max_video_size=None) -> MultimodalSequence | None:
         """Retrieves video using TikTok Research API."""
         video_id = self._extract_video_id(url)
         if not video_id:
@@ -110,42 +111,22 @@ class TikTok(RetrievalIntegration):
                 end_date=datetime.now().strftime("%Y%m%d"),
             )
 
-            # Execute the query
-            videos, search_id, cursor, has_more, start_date, end_date = self.api.query_videos(
+            # Execute the query asynchronously (API call is synchronous/blocking)
+            videos, search_id, cursor, has_more, start_date, end_date = await asyncio.to_thread(
+                self.api.query_videos,
                 video_request,
-                fetch_all_pages=False
+                fetch_all_pages=False,
             )
 
-            if not videos or len(videos) == 0:
-                return None
-
-            video_data = videos[0]
+            video_data = videos[0] if videos else None
 
             # Download the video using yt-dlp
-            video = await self._download_video_with_ytdlp(url)
+            video, thumbnail, metadata = await download_video_with_ytdlp(url, session, max_video_size=max_video_size)
 
-            return await self._create_video_sequence_from_api(video_data, url, video)
-
-        except Exception as e:
-            logger.error(f"❌ Error retrieving TikTok video with API: {e}")
-            return None
-
-    async def _get_video_with_ytdlp(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
-        """Retrieves video using only yt-dlp (no API required)."""
-        try:
-            # Get metadata and video using yt-dlp
-            metadata = await self._extract_metadata_with_ytdlp(url)
-            if not metadata:
-                return None
-
-            video = await self._download_video_with_ytdlp(url)
-            thumbnail = await self._download_thumbnail_with_ytdlp(url, session)
-
-            return await self._create_video_sequence_from_ytdlp(metadata, url, video, thumbnail)
+            return await self._create_video_sequence_from_api(video_data or metadata, video, thumbnail)
 
         except Exception as e:
-            logger.error(f"❌ Error retrieving TikTok video with yt-dlp: {e}")
-            return None
+            raise RuntimeError(f"Error retrieving TikTok video: {e}")
 
     async def _get_user_profile(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
         """Retrieves a TikTok user profile."""
@@ -187,127 +168,23 @@ Configure API credentials for full profile information."""
             return await self._create_profile_sequence_from_api(user_info, url, session)
 
         except Exception as e:
-            logger.error(f"❌ Error retrieving TikTok user profile with API: {e}")
-            return None
+            raise RuntimeError(f"Error retrieving TikTok user profile with API: {e}")
 
-    async def _extract_metadata_with_ytdlp(self, url: str) -> dict[str, Any] | None:
-        """Extracts metadata using yt-dlp without downloading the video."""
-        try:
-            cmd = [
-                sys.executable,  # Ensure to use the same Python interpreter as the calling process
-                '-m',
-                'yt_dlp',
-                '--no-download',
-                '--print-json',
-                '--no-warnings',
-                '--quiet',
-                url
-            ]
-
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-
-            stdout, stderr = await process.communicate()
-
-            if process.returncode != 0:
-                logger.error(f"❌ yt-dlp metadata extraction failed: {stderr.decode()}")
-                return None
-
-            # Parse JSON output
-            metadata = json.loads(stdout.decode())
-            return metadata
-
-        except Exception as e:
-            logger.error(f"❌ Error extracting metadata with yt-dlp: {e}")
-            return None
-
-    async def _download_video_with_ytdlp(self, url: str) -> Video | None:
-        """Downloads a TikTok video using yt-dlp."""
-        try:
-            with tempfile.NamedTemporaryFile(suffix='.%(ext)s', delete=False) as temp_file:
-                temp_path = temp_file.name
-
-            cmd = [
-                sys.executable,  # Ensure to use the same Python interpreter as the calling process
-                '-m',
-                'yt_dlp',
-                '--no-playlist',
-                '--no-warnings',
-                '--quiet',
-                '--format', 'best[ext=mp4]/best',
-                '--output', temp_path,
-                url
-            ]
-
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-
-            stdout, stderr = await process.communicate()
-
-            if process.returncode != 0:
-                logger.warning(f"yt-dlp video download failed: {stderr.decode()}")
-                return None
-
-            # Find the actual downloaded file (yt-dlp changes extension)
-            downloaded_file = None
-            for ext in ['.mp4', '.webm', '.mkv']:
-                potential_file = temp_path.replace('.%(ext)s', ext)
-                if os.path.exists(potential_file) and os.path.getsize(potential_file) > 0:
-                    downloaded_file = potential_file
-                    break
-
-            if downloaded_file and os.path.exists(downloaded_file):
-                with open(downloaded_file, 'rb') as f:
-                    video_data = f.read()
-
-                os.unlink(downloaded_file)
-
-                video = Video(binary_data=video_data, source_url=url)
-                video.relocate(move_not_copy=True)
-                return video
-
-            return None
-
-        except Exception as e:
-            logger.error(f"❌ Error downloading video with yt-dlp: {e}")
-            return None
-
-    async def _download_thumbnail_with_ytdlp(self, url: str, session: aiohttp.ClientSession) -> Image | None:
-        """Downloads thumbnail using yt-dlp metadata."""
-        try:
-            metadata = await self._extract_metadata_with_ytdlp(url)
-            if not metadata:
-                return None
-
-            thumbnail_url = metadata.get('thumbnail')
-            if thumbnail_url:
-                return await download_image(thumbnail_url, session)
-
-        except Exception as e:
-            logger.error(f"❌ Error downloading thumbnail: {e}")
-
-        return None
-
-    async def _create_video_sequence_from_api(self, video_data: dict, url: str,
-                                              video: Video | None) -> MultimodalSequence:
+    async def _create_video_sequence_from_api(self, metadata: dict, video: Video | None,
+                                              thumbnail: Image | None) -> MultimodalSequence:
         """Creates MultimodalSequence from API data."""
-        username = video_data.get('username', 'Unknown')
-        description = video_data.get('video_description', '')
-        create_time = video_data.get('create_time', 'Unknown')
-        duration = video_data.get('video_duration', 0)
-        view_count = video_data.get('view_count', 0)
-        like_count = video_data.get('like_count', 0)
-        comment_count = video_data.get('comment_count', 0)
-        share_count = video_data.get('share_count', 0)
-        hashtags = video_data.get('hashtag_names', [])
-        voice_to_text = video_data.get('voice_to_text', '')
-        region_code = video_data.get('region_code', 'Unknown')
+        # Extract relevant metadata (coming from either TikTok Research API or yt-dlp)
+        username = metadata.get('username') or metadata.get('uploader', 'Unknown')
+        description = metadata.get('video_description') or metadata.get('description', '')
+        create_time = metadata.get('create_time') or metadata.get('upload_date', 'Unknown')
+        duration = metadata.get('video_duration') or metadata.get('duration', 0)
+        view_count = metadata.get('view_count', 0)
+        like_count = metadata.get('like_count', 0)
+        comment_count = metadata.get('comment_count', 0)
+        share_count = metadata.get('share_count', 0)
+        hashtags = metadata.get('hashtag_names', [])
+        voice_to_text = metadata.get('voice_to_text', '')
+        region_code = metadata.get('region_code', 'Unknown')
 
         hashtags_text = f"Hashtags: {', '.join(['#' + tag for tag in hashtags])}" if hashtags else ""
         voice_text = f"Voice transcription: {voice_to_text}" if voice_to_text else ""
@@ -327,43 +204,8 @@ Views: {view_count:,} - Likes: {like_count:,} - Comments: {comment_count:,} - Sh
         items = [text]
         if video:
             items.append(video)
-
-        return MultimodalSequence(items)
-
-    async def _create_video_sequence_from_ytdlp(self, metadata: dict, url: str, video: Video | None,
-                                                thumbnail: Image | None) -> MultimodalSequence:
-        """Creates MultimodalSequence from yt-dlp metadata."""
-        # title = metadata.get('title', '')
-        uploader = metadata.get('uploader', 'Unknown')
-        upload_date = metadata.get('upload_date', '')
-        duration = metadata.get('duration', 0)
-        view_count = metadata.get('view_count', 0)
-        like_count = metadata.get('like_count', 0)
-        comment_count = metadata.get('comment_count', 0)
-        description = metadata.get('description', '')
-
-        # Format upload date
-        formatted_date = upload_date
-        if upload_date and len(upload_date) == 8:
-            try:
-                date_obj = datetime.strptime(upload_date, '%Y%m%d')
-                formatted_date = date_obj.strftime('%Y-%m-%d')
-            except ValueError:
-                pass
-
-        text = f"""**TikTok Video**
-Author: @{uploader}
-Posted: {formatted_date}
-Duration: {duration}s
-Views: {view_count:,} - Likes: {like_count:,} - Comments: {comment_count:,}
-
-{description}"""
-
-        items = [text]
-        if thumbnail:
+        elif thumbnail:
             items.append(thumbnail)
-        if video:
-            items.append(video)
 
         return MultimodalSequence(items)
 

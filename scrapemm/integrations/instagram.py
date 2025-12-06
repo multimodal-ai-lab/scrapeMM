@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 from ezmm import MultimodalSequence
 from yt_dlp import DownloadError
 
+from scrapemm.common.exceptions import RateLimitError
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.integrations.ytdlp import get_content_with_ytdlp
 from scrapemm.util import get_domain
@@ -22,10 +23,6 @@ class Instagram(RetrievalIntegration):
 
     async def _get(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from an Instagram post URL."""
-        if get_domain(url) not in self.domains:
-            logger.error(f"❌ Invalid domain for Instagram: {get_domain(url)}")
-            return None
-
         # Determine if this is a video or profile URL
         if self._is_video_url(url):
             return await self._get_video(url, **kwargs)
@@ -48,9 +45,7 @@ class Instagram(RetrievalIntegration):
                 return await get_content_with_ytdlp(url, platform="Instagram", **kwargs)
             except DownloadError as e:
                 if "rate-limit reached" in str(e):
-                    msg = "Instagram rate limit likely reached!"
-                    logger.error(msg)
-                    raise RuntimeError(msg) from e
+                    raise RateLimitError(f"Instagram rate limit likely reached: {e}")
                 else:
                     raise e
 

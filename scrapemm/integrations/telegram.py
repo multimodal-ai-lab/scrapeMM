@@ -44,8 +44,6 @@ class Telegram(RetrievalIntegration):
 
     async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
         """Retrieves content from a Telegram post URL."""
-        assert get_domain(url) in self.domains
-
         # Parse the URL to get channel/group name and post ID
         parsed = urlparse(url)
         path_parts = parsed.path.strip("/").split("/")
@@ -56,40 +54,40 @@ class Telegram(RetrievalIntegration):
         channel_name = path_parts[0]
         post_id = int(path_parts[1])
 
-        try:
-            # Get the message
-            channel = await self.client.get_entity(channel_name)
-            message = await self.client.get_messages(channel, ids=post_id)
+        # Get the message
+        channel = await self.client.get_entity(channel_name)
+        message = await self.client.get_messages(channel, ids=post_id)
 
-            if not message:
-                return None
+        if not message:
+            return None
 
-            # Handle media
-            media = await self._get_media_from_message(channel, message)
+        # Handle media
+        max_video_size = kwargs.get("max_video_size")
+        media = await self._get_media_from_message(channel, message, max_video_size=max_video_size)
 
-            author = message.sender
-            author_type = type(author).__name__
-            if isinstance(author, Channel):
-                name = f'"{author.title}"'
-                if author.username:
-                    name += f" (@{author.username})"
-            elif isinstance(author, User):
-                if author.bot:
-                    author_type = "Bot"
-                name = f"{author.first_name} {author.last_name}" if author.last_name else author.first_name
-                if author.username:
-                    name += f" (@{author.username})"
-                if author.phone:
-                    name += f", Phone: {author.phone}"
-                if author.verified:
-                    name += " (Verified)"
-            else:
-                name = "Unknown"
+        author = message.sender
+        author_type = type(author).__name__
+        if isinstance(author, Channel):
+            name = f'"{author.title}"'
+            if author.username:
+                name += f" (@{author.username})"
+        elif isinstance(author, User):
+            if author.bot:
+                author_type = "Bot"
+            name = f"{author.first_name} {author.last_name}" if author.last_name else author.first_name
+            if author.username:
+                name += f" (@{author.username})"
+            if author.phone:
+                name += f", Phone: {author.phone}"
+            if author.verified:
+                name += " (Verified)"
+        else:
+            name = "Unknown"
 
-            edit_text = "\nEdit date: " + message.edit_date.strftime("%B %d, %Y at %H:%M") if message.edit_date else ""
-            reactions_text = "\nReactions: " + message.reactions.stringify() if message.reactions else ""
+        edit_text = "\nEdit date: " + message.edit_date.strftime("%B %d, %Y at %H:%M") if message.edit_date else ""
+        reactions_text = "\nReactions: " + message.reactions.stringify() if message.reactions else ""
 
-            text = f"""**Telegram Post**
+        text = f"""**Telegram Post**
 Author: {author_type} {name}
 Date: {message.date.strftime("%B %d, %Y at %H:%M")}{edit_text}
 Views: {message.views}
@@ -98,13 +96,9 @@ Forwards: {message.forwards}{reactions_text}
 {' '.join(m.reference for m in media)}
 {message.text}"""
 
-            return MultimodalSequence(text)
+        return MultimodalSequence(text)
 
-        except Exception as e:
-            logger.warning(f"Error retrieving Telegram content: {e}")
-            return None
-
-    async def _get_media_from_message(self, chat, original_post, max_amp=10) -> list[Item]:
+    async def _get_media_from_message(self, chat, original_post, max_amp=10, max_video_size=None) -> list[Item]:
         """
         Searches for Telegram posts that are part of the same group of uploads.
         The search is conducted around the id of the original post with an amplitude
@@ -129,6 +123,10 @@ Forwards: {message.forwards}{reactions_text}
                         item = Image(binary_data=medium_bytes, source_url=post_url)
                     elif hasattr(medium, "video"):
                         item = Video(binary_data=medium_bytes, source_url=post_url)
+                        if max_video_size is not None and item.size > max_video_size:
+                            logger.info(f"Removing video {item.reference} because it exceeds the maximum size "
+                                        f"of {max_video_size / 1024 / 1024:.2f} MB.")
+                            item = None
                     else:
                         raise ValueError(f"Unsupported medium: {medium.__dict__}")
                     media.append(item)

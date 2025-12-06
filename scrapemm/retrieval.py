@@ -7,6 +7,7 @@ import aiohttp
 from ezmm import MultimodalSequence, download_item
 
 from scrapemm.common import ScrapingResponse
+from scrapemm.common.exceptions import IPBannedError
 from scrapemm.integrations import retrieve_via_integration, fire, decodo
 from scrapemm.util import run_with_semaphore
 
@@ -18,8 +19,8 @@ async def retrieve(
         urls: str | Collection[str],
         remove_urls: bool = False,
         show_progress: bool = True,
-        actions: list[dict] = [],
-        methods: list[str] = [],
+        actions: list[dict] = None,
+        methods: list[str] = None,
         format: str = "multimodal_sequence",
         max_video_size: int | None = None,
 ) -> ScrapingResponse | list[ScrapingResponse]:
@@ -46,10 +47,10 @@ async def retrieve(
     """
     if methods is None:
         methods = METHODS
-
-    assert len(methods) >= 1
-    for method in methods:
-        assert method in METHODS
+    else:
+        assert len(methods) >= 1
+        for method in methods:
+            assert method in METHODS
 
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
 
@@ -87,10 +88,12 @@ async def _retrieve_single(
         remove_urls: bool,
         session: aiohttp.ClientSession,
         methods: list[str],
-        actions: list[dict] = [],
+        actions: list[dict] = None,
         format: str = "multimodal_sequence",
         max_video_size: int | None = None,
 ) -> ScrapingResponse:
+    logger.debug(f"Retrieving {url}")
+
     try:
         # Ensure URL is a string
         url = str(url)
@@ -142,6 +145,11 @@ async def _retrieve_single(
                 logger.warning(f"Error while retrieving with method '{method_name}': {e}")
                 errors[method_name] = e
                 result = None
+
+        except IPBannedError as e:
+            logger.error(e)
+            errors[method_name] = e
+            result = None
 
         except Exception as e:
             logger.warning(f"Error while retrieving with method '{method_name}': {e}")

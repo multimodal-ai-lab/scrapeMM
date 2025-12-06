@@ -24,10 +24,6 @@ class Facebook(RetrievalIntegration):
 
     async def _get(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from a Facebook post URL."""
-        if get_domain(url) not in self.domains:
-            logger.error(f"❌ Invalid domain for Facebook: {get_domain(url)}")
-            return None
-
         # Determine if this is a video or photo URL, act accordingly
         if self._is_video_url(url):
             return await self._get_video(url, **kwargs)
@@ -42,17 +38,17 @@ class Facebook(RetrievalIntegration):
     async def _get_video(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from a Facebook video URL."""
         if self.api_available:
-            raise NotImplementedError("❌ Facebook video retrieval through API not yet supported.")
+            raise NotImplementedError("Facebook video retrieval through API not yet supported.")
         else:
             return await get_content_with_ytdlp(url, platform="Facebook", **kwargs)
 
     async def _get_photo(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from a Facebook photo URL."""
-        raise NotImplementedError("❌ No available method to retrieve Facebook photos.")
+        raise NotImplementedError("No available method to retrieve Facebook photos.")
 
     async def _get_user_profile(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from a Facebook user profile URL."""
-        raise NotImplementedError("❌ No available method to retrieve Facebook profiles.")
+        raise NotImplementedError("No available method to retrieve Facebook profiles.")
 
     def _is_video_url(self, url: str) -> bool:
         """Checks if the URL is a Facebook video URL."""

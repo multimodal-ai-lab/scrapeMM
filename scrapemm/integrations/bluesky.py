@@ -34,14 +34,15 @@ class Bluesky(RetrievalIntegration):
             return None
 
         session = kwargs.get("session")
+        max_video_size = kwargs.get("max_video_size")
         if "post" in url:
-            result = await self._retrieve_post(url, session)
+            result = await self._retrieve_post(url, session, max_video_size)
         else:
             result = await self._retrieve_profile(url, session)
 
         return result
 
-    async def _retrieve_post(self, url: str, session: aiohttp.ClientSession = None) -> Optional[MultimodalSequence]:
+    async def _retrieve_post(self, url: str, session: aiohttp.ClientSession = None, max_video_size: int = None) -> Optional[MultimodalSequence]:
         """Retrieve a post from the given Bluesky URL."""
         uri = self._construct_uri(url)
         if not uri:
@@ -94,7 +95,11 @@ class Bluesky(RetrievalIntegration):
                 elif hasattr(embed, 'py_type') and getattr(embed, 'py_type') == 'app.bsky.embed.video#view':
                     video = await download_video(embed.playlist, session)
                     if video:
-                        media.append(video)
+                        if max_video_size is None or video.size <= max_video_size:
+                            media.append(video)
+                        else:
+                            logger.info(f"Removing video {video.reference} because it exceeds the maximum size "
+                                        f"of {max_video_size / 1024 / 1024:.2f} MB.")
 
                         # Extract hashtags and mentions
             hashtags, mentions, external_links = [], [], []
