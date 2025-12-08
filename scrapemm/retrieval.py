@@ -19,8 +19,8 @@ async def retrieve(
         urls: str | Collection[str],
         remove_urls: bool = False,
         show_progress: bool = True,
-        actions: list[dict] = None,
-        methods: list[str] = None,
+        actions: list[dict] | None = None,
+        methods: list[str] | None = None,
         format: str = "multimodal_sequence",
         max_video_size: int | None = None,
 ) -> ScrapingResponse | list[ScrapingResponse]:

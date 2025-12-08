@@ -1,5 +1,6 @@
 import pytest
 from ezmm import MultimodalSequence
+from scrapemm.common import ScrapingResponse
 
 from scrapemm import retrieve
 
@@ -14,9 +15,9 @@ from scrapemm import retrieve
 async def test_youtube(url):
     """Test YouTube video and shorts retrieval"""
     result = await retrieve(url)
+    assert isinstance(result, ScrapingResponse)
     content = result.content
-    print(content)
-    assert content
+    assert isinstance(content, MultimodalSequence)
     assert content.has_videos()
 
 
@@ -30,9 +31,9 @@ async def test_youtube(url):
 async def test_instagram(url):
     """Test Instagram post and reel retrieval"""
     result = await retrieve(url)
+    assert isinstance(result, ScrapingResponse)
     content = result.content
-    print(content)
-    assert content
+    assert isinstance(content, MultimodalSequence)
 
     if "reel" in url:
         assert content.has_videos()
@@ -50,9 +51,9 @@ async def test_instagram(url):
 async def test_facebook(url):
     """Test Facebook reel and photo retrieval"""
     result = await retrieve(url)
+    assert isinstance(result, ScrapingResponse)
     content = result.content
-    print(content)
-    assert content
+    assert isinstance(content, MultimodalSequence)
 
     if "photo" in url:
         assert content.has_images()

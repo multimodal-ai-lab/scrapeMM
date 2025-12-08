@@ -1,5 +1,6 @@
 import pytest
 from ezmm import MultimodalSequence
+from scrapemm.common import ScrapingResponse
 
 from scrapemm import retrieve
 
@@ -17,6 +18,7 @@ from scrapemm import retrieve
 @pytest.mark.parametrize("method", ["firecrawl", "decodo"])
 async def test_generic_retrieval(url, method):
     result = await retrieve(url, methods=[method])
+    assert isinstance(result, ScrapingResponse)
     print(result)
     assert result
     content = result.content
@@ -33,6 +35,7 @@ async def test_generic_retrieval(url, method):
 @pytest.mark.parametrize("method", ["firecrawl", "decodo"])
 async def test_html_retrieval(url, method):
     result = await retrieve(url, format="html", methods=[method])
+    assert isinstance(result, ScrapingResponse)
     content = result.content
     print(content)
     assert content
@@ -49,6 +52,7 @@ async def test_html_retrieval(url, method):
 ])
 async def test_telegram(url):
     result = await retrieve(url)
+    assert isinstance(result, ScrapingResponse)
     content = result.content
     print(content)
     assert content
@@ -61,6 +65,7 @@ async def test_telegram(url):
 ])
 async def test_tiktok(url):
     result = await retrieve(url)
+    assert isinstance(result, ScrapingResponse)
     content = result.content
     print(content)
     assert content
@@ -73,6 +78,7 @@ async def test_tiktok(url):
 ])
 async def test_x(url):
     result = await retrieve(url)
+    assert isinstance(result, ScrapingResponse)
     content = result.content
     print(content)
     assert content
@@ -84,9 +90,10 @@ async def test_x(url):
 ])
 async def test_instagram_images(url):
     result = await retrieve(url)
+    assert isinstance(result, ScrapingResponse)
     content = result.content
     print(content)
-    assert content
+    assert isinstance(content, MultimodalSequence)
     assert content.has_images()
 
 
@@ -98,9 +105,10 @@ async def test_instagram_images(url):
 ])
 async def test_instagram_videos(url):
     result = await retrieve(url)
+    assert isinstance(result, ScrapingResponse)
     content = result.content
     print(content)
-    assert content
+    assert isinstance(content, MultimodalSequence)
     assert content.has_videos()
 
 
@@ -114,9 +122,10 @@ async def test_instagram_videos(url):
 ])
 async def test_facebook_videos(url):
     result = await retrieve(url)
+    assert isinstance(result, ScrapingResponse)
     content = result.content
     print(content)
-    assert content
+    assert isinstance(content, MultimodalSequence)
     assert content.has_videos()
 
 
@@ -126,9 +135,10 @@ async def test_facebook_videos(url):
 ])
 async def test_facebook_images(url):
     result = await retrieve(url)
+    assert isinstance(result, ScrapingResponse)
     content = result.content
     print(content)
-    assert content
+    assert isinstance(content, MultimodalSequence)
     assert content.has_images()
 
 
@@ -139,9 +149,10 @@ async def test_facebook_images(url):
 ])
 async def test_youtube(url):
     result = await retrieve(url)
+    assert isinstance(result, ScrapingResponse)
     content = result.content
     print(content)
-    assert content
+    assert isinstance(content, MultimodalSequence)
     assert content.has_videos()
 
 
@@ -156,7 +167,9 @@ async def test_youtube(url):
 ])
 async def test_max_video_size(url, max_video_size, download_expected):
     result = await retrieve(url, max_video_size=max_video_size)
+    assert isinstance(result, ScrapingResponse)
     content = result.content
+    assert isinstance(content, MultimodalSequence)
     assert content.has_videos() == download_expected
     if max_video_size and content.has_videos():
         video = content.videos[0]
