@@ -42,7 +42,12 @@ class Bluesky(RetrievalIntegration):
 
         return result
 
-    async def _retrieve_post(self, url: str, session: aiohttp.ClientSession = None, max_video_size: int = None) -> Optional[MultimodalSequence]:
+    async def _retrieve_post(
+        self,
+        url: str,
+        session: aiohttp.ClientSession | None = None,
+        max_video_size: int | None = None
+    ) -> Optional[MultimodalSequence]:
         """Retrieve a post from the given Bluesky URL."""
         uri = self._construct_uri(url)
         if not uri:

@@ -23,8 +23,8 @@ logger_yt_dlp.addHandler(logging.StreamHandler(sys.stdout))
 async def download_video_with_ytdlp(
         url: str,
         session: aiohttp.ClientSession,
-        max_video_size: int = None,
-        cookie_file: str = None
+        max_video_size: int | None = None,
+        cookie_file: str | None = None
 ) -> tuple[Optional[Video], Optional[Image], Optional[dict[str, Any]]]:
     """Downloads a video and (if not available or exceeds max. duration) its thumbnail, and the metadata using yt-dlp.
     @param max_video_size: Maximum video size in bytes. If the video is larger, the download will be aborted."""

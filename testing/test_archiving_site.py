@@ -1,6 +1,9 @@
 from scrapemm import retrieve
 import pytest
 
+from ezmm import MultimodalSequence
+from scrapemm.common import ScrapingResponse
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url, expected", [
     ("https://mvau.lt/media/b286c959-00da-4765-8f49-88d4ca87a555", dict(video=1)),
@@ -18,9 +21,10 @@ import pytest
 ])
 async def test_archiving_service(url: str, expected: dict[str, int]):
     result = await retrieve(url)
+    assert isinstance(result, ScrapingResponse)
     content = result.content
     print(content)
-    assert content
+    assert isinstance(content, MultimodalSequence)
     for medium, count in expected.items():
         match medium:
             case "image": assert len(content.images) >= count

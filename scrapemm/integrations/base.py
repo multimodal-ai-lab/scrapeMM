@@ -15,7 +15,7 @@ class RetrievalIntegration(ABC):
 
     name: str
     domains: list[str]  # The domains supported by this integration
-    connected: bool = None
+    connected: bool | None = None
 
     @abstractmethod
     async def _connect(self):
