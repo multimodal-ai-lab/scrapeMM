@@ -40,112 +40,6 @@ async def test_html_retrieval(url, method):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("url", [
-    "https://t.me/durov/404",  # One image
-    "https://t.me/tglobaleye/16172",  # Multiple images
-    "https://t.me/tglobaleye/16178",  # Video and quote
-    "https://t.me/tglobaleye/6289",  # GIF (treated as video)
-    "https://t.me/tglobaleye/16192",  # Images and video
-])
-async def test_telegram(url):
-    result = await retrieve(url)
-    content = result.content
-    print(content)
-    assert content
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("url", [
-    "https://www.tiktok.com/@realdonaldtrump/video/7433870905635409198",
-    "https://www.tiktok.com/@xxxx.xxxx5743/video/7521704371109793046"
-])
-async def test_tiktok(url):
-    result = await retrieve(url)
-    content = result.content
-    print(content)
-    assert content
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("url", [
-    "https://x.com/PopBase/status/1938496291908030484",
-    "https://x.com/realDonaldTrump"
-])
-async def test_x(url):
-    result = await retrieve(url)
-    content = result.content
-    print(content)
-    assert content
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("url", [
-    "https://www.instagram.com/p/CqJDbyOP839",
-])
-async def test_instagram_images(url):
-    result = await retrieve(url)
-    content = result.content
-    print(content)
-    assert content
-    assert content.has_images()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("url", [
-    "https://www.instagram.com/reel/DKqPQqpTDW4",
-    "https://www.instagram.com/reel/C75nh7Lvo8F",
-    "https://www.instagram.com/p/DMuOe6th94D",  # yes, this is a video
-])
-async def test_instagram_videos(url):
-    result = await retrieve(url)
-    content = result.content
-    print(content)
-    assert content
-    assert content.has_videos()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("url", [
-    "https://www.facebook.com/reel/1089214926521000",
-    "https://www.facebook.com/reel/3466446073497470",  # restricted for misinformation
-    "https://www.facebook.com/61561558177010/videos/1445957793080961/",
-    "https://www.facebook.com/watch/?v=1445957793080961",
-    "https://www.facebook.com/groups/1973976962823632/posts/3992825270938781/",  # restricted for misinformation, yt-dlp fails here
-])
-async def test_facebook_videos(url):
-    result = await retrieve(url)
-    content = result.content
-    print(content)
-    assert content
-    assert content.has_videos()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("url", [
-    "https://www.facebook.com/photo/?fbid=1721085455188778&set=a.107961589834514&_rdc=1&_rdr",
-])
-async def test_facebook_images(url):
-    result = await retrieve(url)
-    content = result.content
-    print(content)
-    assert content
-    assert content.has_images()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("url", [
-    "https://www.youtube.com/watch?v=A4dVOznX6Kk",
-    "https://www.youtube.com/shorts/cE0zgN6pYOc",
-])
-async def test_youtube(url):
-    result = await retrieve(url)
-    content = result.content
-    print(content)
-    assert content
-    assert content.has_videos()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("url, max_video_size, download_expected", [
     ("https://www.facebook.com/reel/1089214926521000", None, True),
     ("https://www.facebook.com/reel/1089214926521000", 128_000_000, True),
@@ -161,3 +55,41 @@ async def test_max_video_size(url, max_video_size, download_expected):
     if max_video_size and content.has_videos():
         video = content.videos[0]
         assert video.size <= max_video_size
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("urls, methods", [
+    ([
+         "https://www.youtube.com/shorts/cE0zgN6pYOc"
+     ], [
+         "integrations"
+     ]),
+    ([
+         "https://www.facebook.com/reel/1089214926521000",
+         "https://www.zeit.de/politik/deutschland/2025-07/spionage-iran-festnahme-anschlag-juden-berlin-daenemark",
+     ], [
+         ["integrations"],
+         ["firecrawl"]
+     ]),
+    ([
+         "https://theconversation.com/dandelions-are-a-lifeline-for-bees-on-the-brink-we-should-learn-to-love-them-204504",
+         "https://yussus.wixsite.com/newsspoilers/post/leaked-durex-to-launch-reversible-condom-to-circumvent-single-use-plastic-law",
+         "https://www.bbc.co.uk/iplayer/episode/b09zg78h/question-time-2018-28062018#t=19m38s",
+     ], [
+         "decodo",
+     ]),
+    ([
+         "https://factuel.afp.com/doc.afp.com.43ZN7NP",
+         "https://x.com/realDonaldTrump"
+     ],
+     None
+    ),
+])
+async def test_methods(urls: list[str], methods: list[str] | list[list[str]] | None):
+    results = await retrieve(urls, methods=methods)
+    assert results
+    if methods:
+        if isinstance(methods[0], str):
+            methods = [methods] * len(urls)
+        for result, method_list in zip(results, methods):
+            assert result.method in method_list

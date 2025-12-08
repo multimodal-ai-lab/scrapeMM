@@ -28,7 +28,10 @@ class Instagram(RetrievalIntegration):
             return await self._get_video(url, **kwargs)
         elif self._is_photo_url(url):
             # /p/ URLs can also be reels, so try both
-            content = await self._get_video(url, **kwargs)
+            try:
+                content = await self._get_video(url, **kwargs)
+            except Exception:
+                content = None
             if content and content.has_videos():
                 return content
             else:
@@ -51,8 +54,7 @@ class Instagram(RetrievalIntegration):
 
     async def _get_photo(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from an Instagram photo URL (can also be a reel)."""
-        logger.warning("❌ Native Instagram photo download not yet supported. Use Decodo for that.")
-        return None
+        raise NotImplementedError("Native Instagram photo download not yet supported. Use Decodo for that.")
 
     async def _get_user_profile(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from an Instagram user profile URL."""

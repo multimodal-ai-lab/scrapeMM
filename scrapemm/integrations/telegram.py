@@ -31,11 +31,12 @@ class Telegram(RetrievalIntegration):
         if api_id and api_hash and bot_token:
             self.client = TelegramClient(self.session_path, api_id, api_hash)
             try:
-                self.client.start(bot_token=bot_token)
+                await self.client.start(bot_token=bot_token)  # Returns a coroutine b/c event loop exists already
             except sqlite3.OperationalError:  # Database is locked from an interrupted previous session
                 # Remove the database file and try again
                 journal_path = Path(self.session_path + ".session-journal")
                 journal_path.unlink(missing_ok=True)
+                await self.client.start(bot_token=bot_token)  # Returns a coroutine b/c event loop exists already
             self.connected = True
             logger.info("✅ Successfully connected to Telegram.")
         else:
@@ -56,8 +57,12 @@ class Telegram(RetrievalIntegration):
 
         # Get the message
         channel = await self.client.get_entity(channel_name)
-        message = await self.client.get_messages(channel, ids=post_id)
+        if not channel:
+            return None
 
+        assert isinstance(channel, Channel), f"Can only retrieve posts from Telegram channels, but got {type(channel).__name__}."
+
+        message = await self.client.get_messages(channel, ids=post_id)
         if not message:
             return None
 

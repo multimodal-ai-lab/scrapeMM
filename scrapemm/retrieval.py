@@ -20,7 +20,7 @@ async def retrieve(
         remove_urls: bool = False,
         show_progress: bool = True,
         actions: list[dict] = None,
-        methods: list[str] = None,
+        methods: list[str] | list[list[str]] = None,
         format: str = "multimodal_sequence",
         max_video_size: int | None = None,
 ) -> ScrapingResponse | list[ScrapingResponse]:
@@ -39,24 +39,24 @@ async def retrieve(
         - "integrations" (API integrations for Twitter, Instagram, etc.)
         - "firecrawl" (Firecrawl scraping service)
         - "decodo" (Decodo Web Scraping API)
-        You can specify any subset in any order, e.g., ["decodo", "firecrawl"] or ["integrations"].
+        You can specify any subset in any order, e.g., ["decodo", "firecrawl"] or ["integrations"]. If provided
+        a list of strings, that order of methods will be applied to all submitted URLs. In contrast, if provided
+        a list of lists, each list will be applied to the corresponding URL in the batch.
     :param format: The format of the output. Available formats:
         - "multimodal_sequence" (MultimodalSequence containing parsed and downloaded media from the page)
         - "html" (string containing the raw HTML code of the page, not compatible with 'integrations' method)
     :param max_video_size: Maximum size of videos to download, in MB. If None, no limit is applied.
     """
     if methods is None:
-        methods = METHODS
+        methods = METHODS.copy()  # Use copy to avoid modifying the original list
     else:
-        assert len(methods) >= 1
-        for method in methods:
-            assert method in METHODS
+        assert isinstance(methods, list) and len(methods) >= 1, "'methods' must be a non-empty list."
 
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
 
     # Ensure URLs are string or list
     single_url = isinstance(urls, str)
-    urls_to_retrieve = [urls] if single_url else urls
+    urls_to_retrieve: list[str] = [urls] if single_url else urls
 
     if len(urls_to_retrieve) == 0:
         return []
@@ -64,15 +64,24 @@ async def retrieve(
     if actions:
         raise NotImplementedError("Actions are not supported yet.")
 
-    async with aiohttp.ClientSession() as session:
-        # Remove duplicates
-        urls_unique = set(urls_to_retrieve)
+    # Build per-URL method dict according to the provided 'methods'
+    if isinstance(methods[0], str):
+        # methods: list[str] → apply same order to all URLs
+        url_to_methods = {url: methods[:] for url in urls_to_retrieve}
+    elif isinstance(methods[0], list):
+        # methods: list[list[str]] → each inner list corresponds to the URL at the same index
+        url_to_methods = dict(zip(urls_to_retrieve, methods))
+    else:
+        raise AssertionError("'methods' must be either a list[str] or a list[list[str]]")
 
+    urls_unique = set(urls_to_retrieve)
+
+    async with aiohttp.ClientSession() as session:
         # Retrieve URLs concurrently
-        tasks = [_retrieve_single(url, remove_urls, session, methods, actions,
+        tasks = [_retrieve_single(url, remove_urls, session, url_to_methods[url], actions,
                                   format, max_video_size) for url in
                  urls_unique]
-        results = await run_with_semaphore(tasks, limit=20, show_progress=show_progress and len(urls_to_retrieve) > 1,
+        results = await run_with_semaphore(tasks, limit=20, show_progress=show_progress and len(urls_unique) > 1,
                                            progress_description="Retrieving URLs...")
 
         # Reconstruct output list
@@ -87,16 +96,23 @@ async def _retrieve_single(
         url: str,
         remove_urls: bool,
         session: aiohttp.ClientSession,
-        methods: list[str],
+        methods: list[str] = None,
         actions: list[dict] = None,
         format: str = "multimodal_sequence",
         max_video_size: int | None = None,
 ) -> ScrapingResponse:
     logger.debug(f"Retrieving {url}")
 
+    if methods is None:
+        methods = METHODS.copy()
+
     try:
         # Ensure URL is a string
         url = str(url)
+
+        # Validate methods
+        for method in methods:
+            assert method in METHODS, f"Unknown method '{method}'. Allowed: {METHODS}"
 
         # Ensure compatibility with methods
         if format == "html" and "integrations" in methods:

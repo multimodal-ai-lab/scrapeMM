@@ -15,7 +15,7 @@ VIDEO_URL_REGEX = r"facebook\.com/\d+/videos/\d+/?"
 
 class Facebook(RetrievalIntegration):
     name = "Facebook"
-    domains = ["facebook.com", "www.facebook.com"]
+    domains = ["facebook.com", "fb.watch"]
 
     async def _connect(self):
         self.api_available = False  # TODO
@@ -52,9 +52,12 @@ class Facebook(RetrievalIntegration):
 
     def _is_video_url(self, url: str) -> bool:
         """Checks if the URL is a Facebook video URL."""
-        # video URLS are in the format: https://www.facebook.com/watch?v=VIDEO_ID
+        # video URLS are in the format: https://www.facebook.com/watch?v=VIDEO_ID or fb.watch/...
         # or Reels: https://www.facebook.com/reel/REEL_ID
-        return "facebook.com/watch" in url or "facebook.com/reel" in url or bool(re.search(VIDEO_URL_REGEX, url))
+        return ("facebook.com/watch" in url
+                or "facebook.com/reel" in url
+                or bool(re.search(VIDEO_URL_REGEX, url))
+                or "fb.watch" in url)
 
     def _extract_video_id(self, url: str) -> str:
         """Extracts the video ID from a Facebook video URL."""

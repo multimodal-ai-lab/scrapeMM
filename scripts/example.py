@@ -8,4 +8,3 @@ if __name__ == "__main__":
         print(result.errors)
     else:
         print(result.content)
-        print(str(result.content))

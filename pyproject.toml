@@ -1,6 +1,6 @@
 [project]
 name = "scrapeMM"
-version = "0.4.1"
+version = "0.4.2"
 description = "Flexible multimodal scraper for social media and the open web."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,3 +33,9 @@ namespaces = false  # Disable implicit namespaces
 
 [tool.setuptools.package-data]
 "*" = ["*.txt"]  # Include all .txt files contained in any (sub)package in the build
+
+[tool.pytest.ini_options]
+testpaths = [
+    "testing/",
+]
+asyncio_default_fixture_loop_scope = "session"
