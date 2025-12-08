@@ -1,14 +1,17 @@
 import asyncio
 import logging
 import re
+import traceback
 from typing import Optional
 from urllib.parse import urlparse
 
 import aiohttp
 from ezmm import MultimodalSequence, download_video, download_image
-from tweepy import Tweet, User
+from tweepy import Tweet, User, BadRequest, TooManyRequests
 from tweepy.asynchronous import AsyncClient
 
+import scrapemm.common
+from scrapemm.common.exceptions import RateLimitError
 from scrapemm.secrets import get_secret
 from scrapemm.integrations.base import RetrievalIntegration
 
@@ -40,7 +43,7 @@ class X(RetrievalIntegration):
     async def _connect(self):
         bearer_token = get_secret("x_bearer_token")
         if bearer_token:
-            self.client = AsyncClient(bearer_token=bearer_token, wait_on_rate_limit=True)
+            self.client = AsyncClient(bearer_token=bearer_token, wait_on_rate_limit=scrapemm.common.WAIT_ON_RATE_LIMIT)
             self.connected = True
             logger.info("✅ Successfully connected to X.")
         else:
@@ -51,12 +54,16 @@ class X(RetrievalIntegration):
         session = kwargs.get("session")
         max_video_size = kwargs.get("max_video_size")
         tweet_id = extract_tweet_id_from_url(url)
-        if tweet_id:
-            return await self._get_tweet(tweet_id, session, max_video_size)
-        else:
-            username = extract_username_from_url(url)
-            if username:
-                return await self._get_user(username, session)
+        try:
+            if tweet_id:
+                return await self._get_tweet(tweet_id, session, max_video_size)
+            else:
+                username = extract_username_from_url(url)
+                if username:
+                    return await self._get_user(username, session)
+        except TooManyRequests:
+            raise RateLimitError("X API rate limit reached.")
+
 
     async def _get_tweet(self, tweet_id: int, session: aiohttp.ClientSession, max_video_size: int = None) -> Optional[MultimodalSequence]:
         """Returns a MultimodalSequence containing the tweet's text and media

@@ -2,7 +2,6 @@ import asyncio
 import logging
 import sys
 import tempfile
-import traceback
 from datetime import datetime
 from typing import Any, Optional
 
@@ -10,7 +9,7 @@ import aiohttp
 from ezmm import MultimodalSequence, download_image, Video, Image
 from yt_dlp import YoutubeDL
 
-from scrapemm.common.exceptions import IPBannedError, ContentNotFoundError
+from scrapemm.common.exceptions import ContentNotFoundError
 
 logger = logging.getLogger("scrapeMM")
 
@@ -79,7 +78,8 @@ async def download_video_with_ytdlp(
         if "The following content is not available on this app" in str(e):
             logger.warning(f"You should update yt-dlp to re-enable YouTube downloads.")
             raise e
-        elif "Video unavailable" in str(e):
+        elif ("Video unavailable" in str(e)
+              or "HTTP Error 404: Not Found" in str(e)):
             raise ContentNotFoundError(f"Video is unavailable.")
         elif "Cannot parse data; please report this issue" in str(e):
             raise RuntimeError(f"yt-dlp is unable to parse the received video metadata.")

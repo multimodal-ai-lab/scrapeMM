@@ -2,7 +2,7 @@ import logging
 import sys
 
 import scrapemm.common
-from .common import APP_NAME
+from .common import APP_NAME, set_wait_on_rate_limit, RateLimitError, ContentNotFoundError
 from .integrations import Telegram, X
 from .retrieval import retrieve
 from .secrets import configure_secrets

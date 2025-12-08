@@ -1,6 +1,6 @@
 import logging
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 from ezmm import MultimodalSequence
 
@@ -24,6 +24,8 @@ class Facebook(RetrievalIntegration):
 
     async def _get(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from a Facebook post URL."""
+        url = self._normalize_url(url)
+
         # Determine if this is a video or photo URL, act accordingly
         if self._is_video_url(url):
             return await self._get_video(url, **kwargs)
@@ -49,6 +51,13 @@ class Facebook(RetrievalIntegration):
     async def _get_user_profile(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from a Facebook user profile URL."""
         raise NotImplementedError("No available method to retrieve Facebook profiles.")
+
+    def _normalize_url(self, url: str) -> str:
+        """If the URL is a login Facebook URL, i.e., of the form https://www.facebook.com/login/?next=...
+        extracts the actual post's URL."""
+        if url.startswith("https://www.facebook.com/login/?next="):
+            url = unquote(url.split("?next=")[1])
+        return url
 
     def _is_video_url(self, url: str) -> bool:
         """Checks if the URL is a Facebook video URL."""
