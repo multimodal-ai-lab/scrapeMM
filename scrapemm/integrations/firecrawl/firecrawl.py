@@ -25,10 +25,10 @@ NO_BOT_DOMAINS_FILE_PATH = Path(__file__).parent / "no_bot_domains.txt"
 NO_BOT_DOMAINS = read_urls_from_file(NO_BOT_DOMAINS_FILE_PATH)
 
 
-def locate_firecrawl() -> str:
+async def locate_firecrawl() -> str:
     """Scans a list of URLs (included the user-specified one) to find a
     running Firecrawl instance."""
-    firecrawl_url = find_firecrawl(FIRECRAWL_URLS)
+    firecrawl_url = await find_firecrawl(FIRECRAWL_URLS)
     while not firecrawl_url:
         current_url = get_config_var("firecrawl_url") or "any of " + ", ".join(FIRECRAWL_URLS)
         firecrawl_url = input(f"❌ Unable to locate Firecrawl! It is not running "
@@ -42,10 +42,9 @@ def locate_firecrawl() -> str:
 
             update_config(firecrawl_url=firecrawl_url)
 
-        if not firecrawl_is_running(firecrawl_url):
+        if not await firecrawl_is_running(firecrawl_url):
             firecrawl_url = None
 
-    logger.info(f"✅ Detected Firecrawl running at {firecrawl_url}.")
     return firecrawl_url
 
 
@@ -58,10 +57,12 @@ class Firecrawl:
         self.n_scrapes = 0
         self._firecrawl = None
 
-    def connect(self):
+    async def connect(self):
         from firecrawl import AsyncFirecrawl
         logging.getLogger("firecrawl").setLevel(logging.WARNING)
-        self.firecrawl_url = locate_firecrawl()
+        self.firecrawl_url = await locate_firecrawl()
+        if self.firecrawl_url:
+            logger.info(f"✅ Detected Firecrawl running at {self.firecrawl_url}.")
         self._firecrawl = AsyncFirecrawl(api_url=self.firecrawl_url)
 
     async def scrape(self,
@@ -74,17 +75,28 @@ class Firecrawl:
             raise ValueError(f"Firecrawl cannot scrape sites from {get_domain(url)}")
 
         if not self._firecrawl:
-            self.connect()
+            await self.connect()
+
+        try:
+            document = await self._firecrawl.scrape(
+                url,
+                formats=["html"],
+                only_main_content=False,
+                remove_base64_images=False,
+                exclude_tags=["script", "style", "noscript", "footer", "aside"],
+                timeout=30_000,
+                wait_for=1_000,
+                **kwargs
+            )
+        except Exception as e:
+            # Ensure firecrawl is still running
+            if not await firecrawl_is_running(self.firecrawl_url):
+                logger.error(f"❌ Firecrawl stopped running at {self.firecrawl_url}.")
+                raise RuntimeError("Firecrawl stopped running.")
+            else:
+                raise e
 
         self.n_scrapes += 1
-        document = await self._firecrawl.scrape(url,
-                                                formats=["html"],
-                                                only_main_content=False,
-                                                remove_base64_images=False,
-                                                exclude_tags=["script", "style", "noscript", "footer", "aside"],
-                                                timeout=30_000,
-                                                wait_for=1_000,
-                                                **kwargs)
         html = document.html
 
         if html:
@@ -106,21 +118,24 @@ def is_no_bot_site(url: str) -> bool:
     return domain is None or domain.endswith(".gov") or domain in NO_BOT_DOMAINS
 
 
-def find_firecrawl(urls):
+async def find_firecrawl(urls):
     for url in urls:
-        if firecrawl_is_running(url):
+        if await firecrawl_is_running(url):
             return url
     return None
 
 
-def firecrawl_is_running(url: str) -> bool:
-    """Returns True iff Firecrawl is running at the specified URL."""
+async def firecrawl_is_running(url: str) -> bool:
+    """Returns True iff Firecrawl can be successfully pinged at the specified URL."""
     if not url:
         return False
-    try:
-        if not url.startswith("http"):
-            url = "https://" + url
-        response = requests.get(url, timeout=0.2)
-    except (ConnectionError, RetryError, ReadTimeout):
-        return False
-    return response.status_code == 200
+    if not url.startswith("http"):
+        url = "https://" + url
+
+    async with aiohttp.ClientSession() as session:
+        # Retrieve the head of the homepage
+        try:
+            async with session.head(url, timeout=1) as response:
+                return response.status == 200
+        except (aiohttp.ClientError, ConnectionError, ReadTimeout, RetryError, TimeoutError):
+            return False

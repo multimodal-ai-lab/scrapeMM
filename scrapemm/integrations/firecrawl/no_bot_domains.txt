@@ -13,3 +13,4 @@ telegram.me
 twitter.com
 x.com
 t.co
+snopes.com
