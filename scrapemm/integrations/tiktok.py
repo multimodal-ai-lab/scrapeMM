@@ -9,7 +9,7 @@ from ezmm import MultimodalSequence, download_image
 from ezmm.common.items import Video, Image
 from tiktok_research_api import TikTokResearchAPI, QueryVideoRequest, QueryUserInfoRequest, Criteria, Query
 
-from scrapemm.common.exceptions import RateLimitError
+from scrapemm.common.exceptions import RateLimitError, ContentBlockedError
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.integrations.ytdlp import download_video_with_ytdlp
 from scrapemm.secrets import get_secret
@@ -68,8 +68,11 @@ class TikTok(RetrievalIntegration):
             else:
                 return await self._get_user_profile(url, session)
         except Exception as e:
-            if "quota" in str(e).lower():
-                raise RateLimitError(f"TikTok rate limit likely reached: {e}")
+            if "Your IP address is blocked from accessing this post":
+                raise ContentBlockedError("Video is blocked by TikTok.")
+            elif "This post may not be comfortable for some audiences" in str(e):
+                raise ContentBlockedError("Video is blocked by TikTok for being 'uncomfortable for some audiences'. "
+                                          "Set a 'tiktok_cookie' in ScrapeMM to download this video.")
             else:
                 raise e
 

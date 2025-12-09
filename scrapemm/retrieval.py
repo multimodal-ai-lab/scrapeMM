@@ -7,12 +7,27 @@ import aiohttp
 from ezmm import MultimodalSequence, download_item
 
 from scrapemm.common import ScrapingResponse
-from scrapemm.common.exceptions import IPBannedError
+from scrapemm.common.exceptions import IPBannedError, UnsupportedDomainError
 from scrapemm.integrations import retrieve_via_integration, fire, decodo
-from scrapemm.util import run_with_semaphore
+from scrapemm.util import run_with_semaphore, get_domain
 
 logger = logging.getLogger("scrapeMM")
 METHODS = ["integrations", "firecrawl", "decodo"]
+
+UNSUPPORTED_DOMAINS = [
+    "archive.today",
+    "archive.is",
+    "archive.ph",
+    "archive.vn",
+    "archive.li",
+    "archive.fo",
+    "archive.md",
+    "perma.cc",
+    "ghostarchive.org",
+    "archive.org",
+    "mvau.lt",
+    "archive.st",
+]
 
 
 async def retrieve(
@@ -102,6 +117,10 @@ async def _retrieve_single(
         max_video_size: int | None = None,
 ) -> ScrapingResponse:
     logger.debug(f"Retrieving {url}")
+
+    if get_domain(url) in UNSUPPORTED_DOMAINS:
+        return ScrapingResponse(url=url, content=None,
+                                errors=dict(scrapemm=UnsupportedDomainError("Unsupported domain.")))
 
     if methods is None:
         methods = METHODS.copy()

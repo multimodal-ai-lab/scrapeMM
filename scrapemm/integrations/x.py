@@ -1,19 +1,18 @@
 import asyncio
 import logging
 import re
-import traceback
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote, urljoin, parse_qs
 
 import aiohttp
 from ezmm import MultimodalSequence, download_video, download_image
-from tweepy import Tweet, User, BadRequest, TooManyRequests
+from tweepy import Tweet, User, TooManyRequests
 from tweepy.asynchronous import AsyncClient
 
 import scrapemm.common
 from scrapemm.common.exceptions import RateLimitError
-from scrapemm.secrets import get_secret
 from scrapemm.integrations.base import RetrievalIntegration
+from scrapemm.secrets import get_secret
 
 logger = logging.getLogger("scrapeMM")
 
@@ -53,6 +52,7 @@ class X(RetrievalIntegration):
     async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
         session = kwargs.get("session")
         max_video_size = kwargs.get("max_video_size")
+        url = self._normalize(url)
         tweet_id = extract_tweet_id_from_url(url)
         try:
             if tweet_id:
@@ -64,6 +64,13 @@ class X(RetrievalIntegration):
         except TooManyRequests:
             raise RateLimitError("X API rate limit reached.")
 
+    def _normalize(self, url: str) -> str:
+        """Turns URLs of the form https://publish.twitter.com/?query=...
+        into the bare Twitter URL."""
+        if url.startswith("https://publish.twitter.com/?query="):
+            query = urlparse(url).query
+            return parse_qs(query).get("query", [])[0] or url
+        return url
 
     async def _get_tweet(self, tweet_id: int, session: aiohttp.ClientSession, max_video_size: int = None) -> Optional[MultimodalSequence]:
         """Returns a MultimodalSequence containing the tweet's text and media

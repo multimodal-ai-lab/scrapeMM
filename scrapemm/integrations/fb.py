@@ -1,12 +1,15 @@
 import logging
 import re
-from urllib.parse import urlparse, unquote
+from urllib.parse import urlparse, parse_qs
 
 from ezmm import MultimodalSequence
 
+from scrapemm import RateLimitError
+from scrapemm.common import CONFIG_DIR
+from scrapemm.common.exceptions import ContentBlockedError
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.integrations.ytdlp import get_content_with_ytdlp
-from scrapemm.util import get_domain
+from scrapemm.secrets import get_secret
 
 logger = logging.getLogger("scrapeMM")
 
@@ -16,9 +19,20 @@ VIDEO_URL_REGEX = r"facebook\.com/\d+/videos/\d+/?"
 class Facebook(RetrievalIntegration):
     name = "Facebook"
     domains = ["facebook.com", "fb.watch"]
+    cookie_file = CONFIG_DIR / "facebook_cookie.txt"
 
     async def _connect(self):
         self.api_available = False  # TODO
+
+        cookie = get_secret("facebook_cookie")
+        if cookie:
+            # Save the cookie in a .txt file next to the secrets file
+            with open(self.cookie_file, "w") as f:
+                f.write(cookie)
+            logger.info(f"✅ Using cookie to connect to Facebook.")
+        else:
+            logger.warning(f"⚠️ Missing Facebook cookie. Won't be able to download videos that require login.")
+
         logger.info(f"✅ Facebook integration ready (yt-dlp only mode).")
         self.connected = True
 
@@ -28,7 +42,15 @@ class Facebook(RetrievalIntegration):
 
         # Determine if this is a video or photo URL, act accordingly
         if self._is_video_url(url):
-            return await self._get_video(url, **kwargs)
+            try:
+                return await self._get_video(url, **kwargs)
+            except Exception as e:
+                if "No video formats found" in str(e):
+                    raise ContentBlockedError(f"Video is blocked by Facebook.")
+                elif "This video is only available for registered users" in str(e):
+                    raise RateLimitError(f"Facebook is rate-limiting your IP address. Set a 'facebook_cookie' in ScrapeMM.")
+                else:
+                    raise e
         elif self._is_photo_url(url):
             return await self._get_photo(url, **kwargs)
 
@@ -42,7 +64,10 @@ class Facebook(RetrievalIntegration):
         if self.api_available:
             raise NotImplementedError("Facebook video retrieval through API not yet supported.")
         else:
-            return await get_content_with_ytdlp(url, platform="Facebook", **kwargs)
+            return await get_content_with_ytdlp(url,
+                                                platform="Facebook",
+                                                cookie_file=self.cookie_file.as_posix(),
+                                                **kwargs)
 
     async def _get_photo(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from a Facebook photo URL."""
@@ -54,9 +79,13 @@ class Facebook(RetrievalIntegration):
 
     def _normalize_url(self, url: str) -> str:
         """If the URL is a login Facebook URL, i.e., of the form https://www.facebook.com/login/?next=...
-        extracts the actual post's URL."""
-        if url.startswith("https://www.facebook.com/login/?next="):
-            url = unquote(url.split("?next=")[1])
+        or https://www.facebook.com/plugins/post.php?href=..., extracts the actual post's URL."""
+        if url.startswith("https://www.facebook.com/login/?next="):  # Login redirect URLs
+            query = urlparse(url).query
+            return parse_qs(query).get("next", [])[0] or url
+        elif url.startswith("https://www.facebook.com/plugins/post.php?href="):  # Post embedding links
+            query = urlparse(url).query
+            return parse_qs(query).get("href", [])[0] or url
         return url
 
     def _is_video_url(self, url: str) -> bool:

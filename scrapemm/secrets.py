@@ -25,7 +25,8 @@ SECRETS = {
     "tiktok_client_secret": "TikTok client secret",
     "decodo_username": "Decodo Web Scraping API username",
     "decodo_password": "Decodo Web Scraping API password",
-    "youtube_cookie": "YouTube cookie string"
+    "youtube_cookie": "YouTube cookie string",
+    "facebook_cookie": "Facebook cookie string",
 }
 
 SALT = b'\xa4\x93\xf1\x88\x13\x88'
@@ -142,7 +143,7 @@ def override_secret(key_name: str):
     """Prompts the user to enter a new value for the given secret key. Does nothing
     when nothing entered."""
     description = SECRETS[key_name]
-    if key_name == "youtube_cookie":
+    if key_name in ["youtube_cookie", "facebook_cookie"]:
         user_input = get_multiline_user_input(f"Please enter the {description}. Hit Ctrl-D or Ctrl-Z to save it.")
     else:
         user_input = getpass(f"Please enter the {description} (leave empty to skip): ", stream=sys.stdout)

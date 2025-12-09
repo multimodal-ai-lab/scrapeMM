@@ -23,7 +23,7 @@ async def test_archiving_service(url: str, expected: dict[str, int]):
     result = await retrieve(url)
     assert isinstance(result, ScrapingResponse)
     content = result.content
-    print(content)
+    print(content or result.errors)
     assert isinstance(content, MultimodalSequence)
     for medium, count in expected.items():
         match medium:

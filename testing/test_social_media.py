@@ -13,9 +13,11 @@ def assert_expectations(response: ScrapingResponse, expected: dict[str, int]):
     for medium, count in expected.items():
         match medium:
             case "image":
-                assert len(content.images) >= count
+                n_images = len(content.images)
+                assert n_images >= count, f"Expected at least {count} images, got {n_images}"
             case "video":
-                assert len(content.videos) >= count
+                n_videos = len(content.videos)
+                assert n_videos >= count, f"Expected at least {count} videos, got {n_videos}"
 
 
 @pytest.mark.asyncio
@@ -53,16 +55,22 @@ async def test_instagram(url: str, expected: dict[str, int]):
     ("https://www.facebook.com/photo/?fbid=1721085455188778&set=a.107961589834514&_rdc=1&_rdr", dict(image=1)),
     ("https://www.facebook.com/photo/?fbid=1287391456760943&set=a.644291054404323", dict(image=1)),
     ("https://www.facebook.com/photo/?fbid=1148555903931627&set=a.859126372874583", dict(image=1)),
+    # Login redirect URL:
+    ("https://www.facebook.com/login/?next=https%3A%2F%2Fwww.facebook.com%2Fphoto%3Ffbid%3D860758296160977%26set%3Da.513585680878242",
+     dict(image=1)),
+    # Post embedding URL:
+    ("https://www.facebook.com/plugins/post.php?href=https%3A%2F%2Fwww.facebook.com%2FTheWolverLing%2Fposts%2Fpfbid02FRKrQUdWmULer6VnVZsoDshBBdqYbsz4dERZiN52499HzGFSRJQtsrQFdZf8dXXyl&show_text=true&width=500",
+     dict(image=4)),
     ("https://www.facebook.com/reel/2038221060315031", dict(video=1)),
     ("https://www.facebook.com/reel/1954696035077530", dict(video=1)),
+    ("https://www.facebook.com/reel/1089214926521000", dict(video=1)),
+    ("https://www.facebook.com/reel/3466446073497470", dict(video=1)),  # restricted for misinformation
     ("https://m.facebook.com/watch/?v=567654417277309", dict(video=1)),
     ("https://www.facebook.com/S.Angel000/videos/2081147972022130/", dict(video=1)),
     ("https://fb.watch/dmMvfqIFqC/", dict(video=1)),
-    ("https://www.facebook.com/reel/1089214926521000", dict(video=1)),
-    ("https://www.facebook.com/reel/3466446073497470", dict(video=1)),  # restricted for misinformation
     ("https://www.facebook.com/61561558177010/videos/1445957793080961/", dict(video=1)),
     ("https://www.facebook.com/watch/?v=1445957793080961", dict(video=1)),
-    ("https://www.facebook.com/login/?next=https%3A%2F%2Fwww.facebook.com%2Fphoto%3Ffbid%3D860758296160977%26set%3Da.513585680878242", dict(image=1)),
+    ("https://www.facebook.com/watch/?v=502482344935053", dict(video=1)),  # requires login
     # restricted for misinformation, yt-dlp fails here:
     ("https://www.facebook.com/groups/1973976962823632/posts/3992825270938781/", dict(video=1)),
 ])
@@ -98,7 +106,9 @@ async def test_tiktok(url):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url, expected", [
     ("https://x.com/PopBase/status/1938496291908030484", dict(image=1)),
-    ("https://x.com/realDonaldTrump", dict())
+    ("https://x.com/realDonaldTrump", dict()),
+    ("https://publish.twitter.com/?query=https%3A%2F%2Ftwitter.com%2FRain2097952%2Fstatus%2F1719525724279976200&widget=Tweet",
+     dict(image=1)),
 ])
 async def test_x(url: str, expected: dict[str, int]):
     result = await retrieve(url)
