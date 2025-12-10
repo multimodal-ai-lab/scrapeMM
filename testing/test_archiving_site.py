@@ -21,8 +21,8 @@ from test_social_media import assert_expectations
     # ("http://web.archive.org/web/20230308184253/https://newspunch.com/hungary-prepares-to-prosecute-lifelong-nazi-george-soros-for-holocaust-atrocities/", dict(video=3, image=1)),
     # ("https://ghostarchive.org/archive/d63Zd", dict(image=1)),
     # ("https://ghostarchive.org/archive/gz80n", dict(video=1)),
-    # ("https://archive.is/uTVE4", dict(image=1)),
-    # ("https://archive.is/0VrgI", dict(image=3)),
+    ("https://archive.is/uTVE4", dict(image=1)),
+    ("https://archive.is/0VrgI", dict(image=3)),
     # ("https://www.awesomescreenshot.com/image/40260716?key=c50159e80af3be1d003aa5235d3edaa9", dict(image=1)),
     # ("https://www.awesomescreenshot.com/video/11862930?key=b021c372bb96716fdbb2316d0eb37c69", dict(video=1))
 ])
