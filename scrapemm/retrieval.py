@@ -15,17 +15,9 @@ logger = logging.getLogger("scrapeMM")
 METHODS = ["integrations", "firecrawl", "decodo"]
 
 UNSUPPORTED_DOMAINS = [
-    "archive.today",
-    "archive.is",
-    "archive.ph",
-    "archive.vn",
-    "archive.li",
-    "archive.fo",
-    "archive.md",
     "ghostarchive.org",
     "archive.org",
     "mvau.lt",
-    "archive.st",
 ]
 
 
