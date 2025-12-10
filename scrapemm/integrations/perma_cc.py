@@ -1,13 +1,12 @@
 import logging
-import asyncio
 from typing import Optional
 
 import aiohttp
 from ezmm import MultimodalSequence
-from playwright.async_api import BrowserContext, Error, TimeoutError, async_playwright
+from playwright.async_api import Error, TimeoutError, async_playwright
 
 from scrapemm.integrations.base import RetrievalIntegration
-from scrapemm.util import run_with_semaphore, to_multimodal_sequence, get_domain_root
+from scrapemm.util import to_multimodal_sequence, get_domain_root
 
 logger = logging.getLogger("scrapeMM")
 
