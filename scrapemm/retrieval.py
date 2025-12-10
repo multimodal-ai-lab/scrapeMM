@@ -22,7 +22,6 @@ UNSUPPORTED_DOMAINS = [
     "archive.li",
     "archive.fo",
     "archive.md",
-    "perma.cc",
     "ghostarchive.org",
     "archive.org",
     "mvau.lt",

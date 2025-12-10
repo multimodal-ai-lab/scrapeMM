@@ -8,7 +8,7 @@ from scrapemm.common import ScrapingResponse
 def assert_expectations(response: ScrapingResponse, expected: dict[str, int]):
     """Assert that the content has the expected number of images and videos."""
     content = response.content
-    print(content)
+    print(content or response.errors)
     assert isinstance(content, MultimodalSequence)
     for medium, count in expected.items():
         match medium:

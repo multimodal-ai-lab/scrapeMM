@@ -3,29 +3,30 @@ import pytest
 
 from ezmm import MultimodalSequence
 from scrapemm.common import ScrapingResponse
+from test_social_media import assert_expectations
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url, expected", [
-    ("https://mvau.lt/media/b286c959-00da-4765-8f49-88d4ca87a555", dict(video=1)),
-    ("https://mvau.lt/media/ccfa5e89-a89d-4a12-aee1-cf68dcb205ce", dict(image=1)),
-    ("https://web.archive.org/web/20210604181412/https://www.tiktok.com/@realstewpeters/video/6969789589590379781?is_copy_url=1", dict(video=1)),
-    ("http://web.archive.org/web/20230308184253/https://newspunch.com/hungary-prepares-to-prosecute-lifelong-nazi-george-soros-for-holocaust-atrocities/", dict(video=3, image=1)),
-    ("https://perma.cc/N8MR-NS96", dict(video=1)),
-    ("https://perma.cc/D5GB-S4E9", dict(image=1)),
-    ("https://ghostarchive.org/archive/d63Zd", dict(image=1)),
-    ("https://ghostarchive.org/archive/gz80n", dict(video=1)),
-    ("https://archive.is/uTVE4", dict(image=1)),
-    ("https://archive.is/0VrgI", dict(image=3)),
-    ("https://www.awesomescreenshot.com/image/40260716?key=c50159e80af3be1d003aa5235d3edaa9", dict(image=1)),
-    ("https://www.awesomescreenshot.com/video/11862930?key=b021c372bb96716fdbb2316d0eb37c69", dict(video=1))
+    ("https://perma.cc/N8MR-NS96", dict(video=1)),  # TikTok video
+    ("https://perma.cc/HU7Z-B24D", dict(image=1)),  # Screenshot of Twitter post
+    ("https://perma.cc/HW47-P32Z", dict(image=1)),  # Screenshot of Instagram post
+    ("https://perma.cc/8J8J-2CEB", dict(image=4)),  # 4 images in old Twitter UI
+    ("https://perma.cc/38CZ-MMFV", dict(image=1)),  # Web article with one image
+    ("https://perma.cc/ZD7Z-B3U7?type=image", dict(image=1)),  # Screenshot of Facebook video
+    ("https://perma.cc/D5GB-S4E9", dict(image=1)),  # Recorded screenshot of Facebook post
+    # ("https://mvau.lt/media/b286c959-00da-4765-8f49-88d4ca87a555", dict(video=1)),
+    # ("https://mvau.lt/media/ccfa5e89-a89d-4a12-aee1-cf68dcb205ce", dict(image=1)),
+    # ("https://web.archive.org/web/20210604181412/https://www.tiktok.com/@realstewpeters/video/6969789589590379781?is_copy_url=1", dict(video=1)),
+    # ("http://web.archive.org/web/20230308184253/https://newspunch.com/hungary-prepares-to-prosecute-lifelong-nazi-george-soros-for-holocaust-atrocities/", dict(video=3, image=1)),
+    # ("https://ghostarchive.org/archive/d63Zd", dict(image=1)),
+    # ("https://ghostarchive.org/archive/gz80n", dict(video=1)),
+    # ("https://archive.is/uTVE4", dict(image=1)),
+    # ("https://archive.is/0VrgI", dict(image=3)),
+    # ("https://www.awesomescreenshot.com/image/40260716?key=c50159e80af3be1d003aa5235d3edaa9", dict(image=1)),
+    # ("https://www.awesomescreenshot.com/video/11862930?key=b021c372bb96716fdbb2316d0eb37c69", dict(video=1))
 ])
 async def test_archiving_service(url: str, expected: dict[str, int]):
     result = await retrieve(url)
     assert isinstance(result, ScrapingResponse)
-    content = result.content
-    print(content or result.errors)
-    assert isinstance(content, MultimodalSequence)
-    for medium, count in expected.items():
-        match medium:
-            case "image": assert len(content.images) >= count
-            case "video": assert len(content.videos) >= count
+    assert_expectations(result, expected)

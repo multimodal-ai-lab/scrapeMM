@@ -14,3 +14,4 @@ twitter.com
 x.com
 t.co
 snopes.com
+perma.cc

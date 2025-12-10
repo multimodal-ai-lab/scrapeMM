@@ -12,8 +12,9 @@ from .telegram import Telegram
 from .tiktok import TikTok
 from .x import X
 from .youtube import YouTube
+from .perma_cc import PermaCC
 
-RETRIEVAL_INTEGRATIONS = [X(), Telegram(), Bluesky(), TikTok(), Instagram(), Facebook(), YouTube()]
+RETRIEVAL_INTEGRATIONS = [X(), Telegram(), Bluesky(), TikTok(), Instagram(), Facebook(), YouTube(), PermaCC()]
 DOMAIN_TO_INTEGRATION = {domain: integration
                          for integration in RETRIEVAL_INTEGRATIONS
                          for domain in integration.domains}
