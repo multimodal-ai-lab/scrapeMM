@@ -30,13 +30,13 @@ UNSUPPORTED_DOMAINS = [
 
 
 async def retrieve(
-        urls: str | Collection[str],
-        remove_urls: bool = False,
-        show_progress: bool = True,
-        actions: list[dict] | None  = None,
-        methods: list[str] | list[list[str]] | None = None,
-        format: str = "multimodal_sequence",
-        max_video_size: int | None = None,
+    urls: str | Collection[str],
+    remove_urls: bool = False,
+    show_progress: bool = True,
+    actions: list[dict] | None  = None,
+    methods: list[str] | list[list[str]] | None = None,
+    format: str = "multimodal_sequence",
+    max_video_size: int | None = None,
 ) -> ScrapingResponse | list[ScrapingResponse]:
     """Main function of this repository. Downloads the contents present at the given URL(s).
     For each URL, returns a ScrapingResponse containing the retrieved content, error, and method.
@@ -107,13 +107,13 @@ async def retrieve(
 
 
 async def _retrieve_single(
-        url: str,
-        remove_urls: bool,
-        session: aiohttp.ClientSession,
-        methods: list[str] | None = None,
-        actions: list[dict] | None = None,
-        format: str = "multimodal_sequence",
-        max_video_size: int | None = None,
+    url: str,
+    remove_urls: bool,
+    session: aiohttp.ClientSession,
+    methods: list[str] | None = None,
+    actions: list[dict] | None = None,
+    format: str = "multimodal_sequence",
+    max_video_size: int | None = None,
 ) -> ScrapingResponse:
     logger.debug(f"Retrieving {url}")
 
