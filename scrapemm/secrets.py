@@ -151,6 +151,12 @@ def override_secret(key_name: str):
         set_secret(key_name, user_input)
 
 
+def remove_secret(key_name: str):
+    data = _load_secrets()
+    data.pop(key_name, None)
+    _save_secrets(data)
+
+
 def configure_secrets(all_keys: bool = False):
     """Gets the secrets from the user by running a CLI dialogue.
     Saves them in an encrypted file. Only overrides an existing secret on non-empty input."""
