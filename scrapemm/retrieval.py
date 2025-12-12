@@ -1,13 +1,15 @@
 import logging
 import sqlite3
 from traceback import format_exc
-from typing import Collection
+from typing import Collection, Literal
 
 import aiohttp
-from ezmm import MultimodalSequence, download_item
+from ezmm import MultimodalSequence
 
 from scrapemm.common import ScrapingResponse
 from scrapemm.common.exceptions import IPBannedError, UnsupportedDomainError
+from scrapemm.download import download_medium
+from scrapemm.download.common import HEADERS
 from scrapemm.integrations import retrieve_via_integration, fire, decodo
 from scrapemm.util import run_with_semaphore, get_domain
 
@@ -20,13 +22,36 @@ UNSUPPORTED_DOMAINS = [
     "mvau.lt",
 ]
 
+BEST_METHODS = {
+    "instagram.com": ["integrations", "decodo"],
+    "facebook.com": ["integrations"],
+    "fb.watch": ["integrations"],
+    "x.com": ["integrations"],
+    "twitter.com": ["integrations"],
+    "t.co": ["integrations"],
+    "t.me": ["integrations"],
+    "telegram.me": ["integrations"],
+    "truthsocial.com": ["firecrawl"],
+    "reddit.com": ["integrations"],
+    "awesomescreenshot.com": ["firecrawl"],
+    "snopes.com": ["decodo"],
+    # Archive.today:
+    "archive.today": ["decodo"],
+    "archive.is": ["decodo"],
+    "archive.ph": ["decodo"],
+    "archive.vn": ["decodo"],
+    "archive.li": ["decodo"],
+    "archive.fo": ["decodo"],
+    "archive.md": ["decodo"],
+}
+
 
 async def retrieve(
     urls: str | Collection[str],
     remove_urls: bool = False,
     show_progress: bool = True,
     actions: list[dict] | None  = None,
-    methods: list[str] | list[list[str]] | None = None,
+    methods: Literal["auto"] | list[str] | list[Literal["auto"] | list[str]] | None = "auto",
     format: str = "multimodal_sequence",
     max_video_size: int | None = None,
 ) -> ScrapingResponse | list[ScrapingResponse]:
@@ -47,20 +72,16 @@ async def retrieve(
         - "decodo" (Decodo Web Scraping API)
         You can specify any subset in any order, e.g., ["decodo", "firecrawl"] or ["integrations"]. If provided
         a list of strings, that order of methods will be applied to all submitted URLs. In contrast, if provided
-        a list of lists, each list will be applied to the corresponding URL in the batch.
+        a list of lists, each list will be applied to the corresponding URL in the batch. If provided "auto",
+        will determine the best method based on the URL's domain. If None, will use the default order.
     :param format: The format of the output. Available formats:
         - "multimodal_sequence" (MultimodalSequence containing parsed and downloaded media from the page)
         - "html" (string containing the raw HTML code of the page, not compatible with 'integrations' method)
     :param max_video_size: Maximum size of videos to download, in MB. If None, no limit is applied.
     """
-    if methods is None:
-        methods = METHODS.copy()  # Use copy to avoid modifying the original list
-    else:
-        assert isinstance(methods, list) and len(methods) >= 1, "'methods' must be a non-empty list."
-
+    # Ensure URLs are string or list
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
 
-    # Ensure URLs are string or list
     single_url = isinstance(urls, str)
     urls_to_retrieve: list[str] = [urls] if single_url else urls
 
@@ -70,19 +91,26 @@ async def retrieve(
     if actions:
         raise NotImplementedError("Actions are not supported yet.")
 
+    if methods == "auto":
+        methods = len(urls_to_retrieve) * ["auto"]
+    elif methods is None:
+        methods = len(urls_to_retrieve) * [METHODS.copy()]  # Use copy to avoid modifying the original list
+    elif isinstance(methods, list):
+        assert len(methods) >= 1, "'methods' cannot be an empty list."
+
     # Build per-URL method dict according to the provided 'methods'
-    if isinstance(methods[0], str):
+    if isinstance(methods[0], str) and methods[0] != "auto":
         # methods: list[str] → apply same order to all URLs
         url_to_methods = {url: methods[:] for url in urls_to_retrieve}
-    elif isinstance(methods[0], list):
-        # methods: list[list[str]] → each inner list corresponds to the URL at the same index
+    elif isinstance(methods[0], list) or methods[0] == "auto":
+        # methods: list[list[str] | "auto"] → each inner list corresponds to the URL at the same index
         url_to_methods = dict(zip(urls_to_retrieve, methods))
     else:
-        raise AssertionError("'methods' must be either a list[str] or a list[list[str]]")
+        raise AssertionError("'methods' must be either None, 'auto', list[str] or a list[list[str] | 'auto'].")
 
     urls_unique = set(urls_to_retrieve)
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
         # Retrieve URLs concurrently
         tasks = [_retrieve_single(url, remove_urls, session, url_to_methods[url], actions,
                                   format, max_video_size) for url in
@@ -102,7 +130,7 @@ async def _retrieve_single(
     url: str,
     remove_urls: bool,
     session: aiohttp.ClientSession,
-    methods: list[str] | None = None,
+    methods: Literal["auto"] | list[str] | None = "auto",
     actions: list[dict] | None = None,
     format: str = "multimodal_sequence",
     max_video_size: int | None = None,
@@ -115,6 +143,8 @@ async def _retrieve_single(
 
     if methods is None:
         methods = METHODS.copy()
+    elif methods == "auto":
+        methods = get_optimal_methods(url)
 
     try:
         # Ensure URL is a string
@@ -130,7 +160,7 @@ async def _retrieve_single(
 
         # Try to download as medium
         if format != "html":
-            if medium := await download_item(url, session=session):
+            if medium := await download_medium(url, session=session):
                 return ScrapingResponse(url=url, content=MultimodalSequence(medium), method="ezmm")
 
         # Find available integrations TODO: Propagate name of actual integration to ScrapingResponse
@@ -189,3 +219,9 @@ async def _retrieve_single(
     # All methods failed
     logger.warning(f"All retrieval methods failed for URL: {url}")
     return ScrapingResponse(url=url, content=None, errors=errors)
+
+
+def get_optimal_methods(url: str) -> list[str]:
+    """Returns the best retrieval methods for the given URL."""
+    domain = get_domain(url)
+    return BEST_METHODS.get(domain, METHODS)

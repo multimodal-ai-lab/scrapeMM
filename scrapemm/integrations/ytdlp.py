@@ -6,10 +6,11 @@ from datetime import datetime
 from typing import Any, Optional
 
 import aiohttp
-from ezmm import MultimodalSequence, download_image, Video, Image
+from ezmm import MultimodalSequence, Video, Image
 from yt_dlp import YoutubeDL
 
 from scrapemm.common.exceptions import ContentNotFoundError
+from scrapemm.download import download_image
 
 logger = logging.getLogger("scrapeMM")
 
@@ -23,7 +24,7 @@ async def download_video_with_ytdlp(
         url: str,
         session: aiohttp.ClientSession,
         max_video_size: int | None = None,
-        cookie_file: str | None = None
+        **kwargs
 ) -> tuple[Optional[Video], Optional[Image], Optional[dict[str, Any]]]:
     """Downloads a video and (if not available or exceeds max. duration) its thumbnail, and the metadata using yt-dlp.
     @param max_video_size: Maximum video size in bytes. If the video is larger, the download will be aborted."""
@@ -39,7 +40,7 @@ async def download_video_with_ytdlp(
             logger=logger_yt_dlp,  # Reroute logs to dedicated logger
             noplaylist=True,  # Disable playlist downloading
             retries=3,
-            cookiefile=cookie_file,  # Use cookie to bypass sign-in requirements
+            **kwargs
         )
 
         if "youtube" in url or "youtu.be" in url:

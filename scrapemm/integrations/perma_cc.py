@@ -5,8 +5,9 @@ import aiohttp
 from ezmm import MultimodalSequence
 from playwright.async_api import Error, TimeoutError, async_playwright
 
+from scrapemm.download.common import HEADERS
 from scrapemm.integrations.base import RetrievalIntegration
-from scrapemm.util import to_multimodal_sequence, get_domain_root
+from scrapemm.util import to_multimodal_sequence
 
 logger = logging.getLogger("scrapeMM")
 
@@ -28,10 +29,9 @@ class PermaCC(RetrievalIntegration):
     async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
         html = await get_record_html(url)
         if html:
-            domain_root = get_domain_root(url)
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(headers=HEADERS) as session:
                 return await to_multimodal_sequence(
-                    html, remove_urls=False, session=session, domain_root=domain_root
+                    html, remove_urls=False, session=session, url=url
                 )
         else:
             raise RuntimeError("Failed to retrieve Perma.cc record HTML.")

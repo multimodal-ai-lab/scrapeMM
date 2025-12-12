@@ -9,6 +9,7 @@ from requests import ConnectionError, ReadTimeout
 from requests.exceptions import RetryError
 
 from scrapemm.common import get_config_var, update_config
+from scrapemm.download.common import HEADERS
 from scrapemm.util import read_urls_from_file, get_domain, get_domain_root, to_multimodal_sequence
 
 logger = logging.getLogger("scrapeMM")
@@ -103,9 +104,8 @@ class Firecrawl:
             if format == "html":
                 return html
             else:
-                domain_root = get_domain_root(url)
                 return await to_multimodal_sequence(html, remove_urls=remove_urls,
-                                                    session=session, domain_root=domain_root)
+                                                    session=session, url=url)
         return None
 
 
@@ -132,7 +132,7 @@ async def firecrawl_is_running(url: str) -> bool:
     if not url.startswith("http"):
         url = "https://" + url
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
         # Retrieve the head of the homepage
         try:
             async with session.head(url, timeout=1) as response:

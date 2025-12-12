@@ -89,6 +89,13 @@ async def test_max_video_size(url, max_video_size, download_expected):
      ],
      None
     ),
+    ([
+         "https://factuel.afp.com/doc.afp.com.43ZN7NP",
+         "https://x.com/realDonaldTrump",
+         "https://www.facebook.com/reel/1089214926521000",
+     ],
+     "auto"
+    ),
 ])
 async def test_methods(urls: list[str], methods: list[str] | list[list[str]] | None):
     results = await retrieve(urls, methods=methods)

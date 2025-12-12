@@ -2,15 +2,16 @@ import asyncio
 import logging
 import re
 from typing import Optional
-from urllib.parse import urlparse, unquote, urljoin, parse_qs
+from urllib.parse import urlparse, parse_qs
 
 import aiohttp
-from ezmm import MultimodalSequence, download_video, download_image
+from ezmm import MultimodalSequence
 from tweepy import Tweet, User, TooManyRequests
 from tweepy.asynchronous import AsyncClient
 
 import scrapemm.common
 from scrapemm.common.exceptions import RateLimitError
+from scrapemm.download import download_image, download_video
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.secrets import get_secret
 

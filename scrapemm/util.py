@@ -9,16 +9,12 @@ from typing import Optional, Awaitable, Iterable
 import aiohttp
 import tqdm
 from PIL import UnidentifiedImageError
-from ezmm import MultimodalSequence, download_item, Item, Image, Video
+from ezmm import MultimodalSequence, Item, Image, Video
 from markdownify import markdownify as md
 
-logger = logging.getLogger("scrapeMM")
+from scrapemm.download import download_medium
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/123.0.0.0 Safari/537.36",
-}
+logger = logging.getLogger("scrapeMM")
 
 DOMAIN_REGEX = r"(?:https?:\/\/)?(?:www\.)?([-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6})/?"
 
@@ -103,15 +99,18 @@ def postprocess_scraped(text: str) -> str:
 
 async def resolve_media_hyperlinks(
         text: str, session: aiohttp.ClientSession,
-        domain_root: str | None = None,
+        url: str | None = None,
         remove_urls: bool = False,
 ) -> Optional[MultimodalSequence]:
+    # TODO: Consider moving from Markdown to HTML parsing (might improve efficiency significantly and is more reliable for videos)
     """Downloads all media that are hyperlinked in the provided Markdown text.
     Only considers images with substantial size (larger than 256 x 256) and replaces the
     respective Markdown hyperlinks with their proper image reference."""
 
     if text is None:
         return None
+
+    domain_root = get_domain_root(url) if url else None
 
     # Extract URLs and base64-encoded data from the text
     hyperlinks = get_markdown_hyperlinks(text)
@@ -126,7 +125,7 @@ async def resolve_media_hyperlinks(
             data_uris.add(href)
 
     # Try to download media for each URL
-    tasks = [download_item(url, session=session) for url in hrefs_urls.values()]
+    tasks = [download_medium(u, session=session, headers={"Referer": url}) for u in hrefs_urls.values()]
     media: list[Item | None] = await run_with_semaphore(tasks, limit=100, show_progress=False)
 
     href_media = dict(zip(hrefs_urls.keys(), media))

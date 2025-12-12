@@ -2,8 +2,9 @@ import logging
 from typing import Optional
 
 import aiohttp
-from ezmm import MultimodalSequence, download_image, download_video
+from ezmm import MultimodalSequence
 
+from scrapemm.download import download_video, download_image
 from scrapemm.secrets import get_secret
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.util import get_domain

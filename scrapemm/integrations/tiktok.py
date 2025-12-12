@@ -5,11 +5,12 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 import aiohttp
-from ezmm import MultimodalSequence, download_image
+from ezmm import MultimodalSequence
 from ezmm.common.items import Video, Image
 from tiktok_research_api import TikTokResearchAPI, QueryVideoRequest, QueryUserInfoRequest, Criteria, Query
 
-from scrapemm.common.exceptions import RateLimitError, ContentBlockedError
+from scrapemm.common.exceptions import ContentBlockedError
+from scrapemm.download import download_image
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.integrations.ytdlp import download_video_with_ytdlp
 from scrapemm.secrets import get_secret

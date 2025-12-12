@@ -2,7 +2,7 @@ pytest~=8.4.1
 aiohttp~=3.12.13
 numpy~=1.26.4
 requests~=2.32.4
-ezMM~=0.3.10
+ezMM~=0.4.0
 Telethon~=1.40.0
 PyYAML~=6.0.1
 tweepy~=4.16.0
@@ -15,5 +15,7 @@ platformdirs~=4.3.8
 atproto
 TikTokResearchApi
 yt-dlp
+yt-dlp[default,curl-cffi]
 cryptography
 firecrawl-py~=4.6.0
+brotli

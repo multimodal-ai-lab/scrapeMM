@@ -84,6 +84,7 @@ class Facebook(RetrievalIntegration):
             return await get_content_with_ytdlp(url,
                                                 platform="Facebook",
                                                 cookie_file=self.cookie_file.as_posix(),
+                                                # impersonate=ImpersonateTarget("Chrome", "136"),
                                                 **kwargs)
 
     async def _get_photo(self, url: str, **kwargs) -> MultimodalSequence | None:
@@ -112,7 +113,8 @@ class Facebook(RetrievalIntegration):
         return ("facebook.com/watch" in url
                 or "facebook.com/reel" in url
                 or bool(re.search(VIDEO_URL_REGEX, url))
-                or "fb.watch" in url)
+                or "fb.watch" in url
+                or "/videos/" in url)
 
     def _extract_video_id(self, url: str) -> str:
         """Extracts the video ID from a Facebook video URL."""

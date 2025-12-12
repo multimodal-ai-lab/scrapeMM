@@ -79,16 +79,15 @@ class Decodo:
             if format == "html":
                 return html
             else:
-                domain_root = get_domain_root(url)
-                return await to_multimodal_sequence(html, remove_urls=remove_urls, session=session, domain_root=domain_root)
+                return await to_multimodal_sequence(html, remove_urls=remove_urls, session=session, url=url)
         return None
 
     async def _call_decodo(
         self, url: str,
         session: aiohttp.ClientSession,
         enable_js: bool = True,
-        timeout: int = 30,
-        max_retries: int = 2
+        timeout: int = 10,
+        max_retries: int = 5
     ) -> Optional[str]:
         """Calls the Decodo API to scrape the given URL with exponential backoff retry logic.
 
@@ -137,11 +136,15 @@ class Decodo:
 
                         if response.status == 429:  # Rate limit
                             if attempt >= max_retries:
-                                logger.warning(f"Error {response.status}: Rate limit hit and maximum retries reached.")
+                                logger.warning(f"Error 429: Rate limit hit and maximum retries reached.")
                                 raise RateLimitError(f"Decodo rate limit reached.")
                         elif response.status == 613:
                             if attempt >= max_retries:
                                 raise RuntimeError("Decodo API error 613.")
+                        elif response.status == 502:  # Bad gateway
+                            if attempt >= max_retries:
+                                logger.warning(f"Error 502: Bad gateway and maximum retries reached.")
+                                raise RuntimeError("Decodo API error 502: Bad gateway.")
 
                         else:  # Other errors that don't go away on retry
                             match response.status:
@@ -205,8 +208,10 @@ class Decodo:
                 logger.error(f"Network error while scraping with Decodo.")
                 raise
             except asyncio.TimeoutError:
-                logger.warning(f"Timeout while scraping with Decodo. Skipping...")
-                raise
+                if attempt >= max_retries:
+                    raise
+                else:
+                    logger.debug(f"Timeout while scraping with Decodo. Retrying...")
             except RateLimitError:
                 raise
             except Exception as e:
