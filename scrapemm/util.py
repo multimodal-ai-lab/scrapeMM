@@ -1,9 +1,12 @@
 import asyncio
 import base64
 import binascii
+import json
 import logging
 import re
+import subprocess
 import sys
+from pathlib import Path
 from typing import Optional, Awaitable, Iterable
 
 import aiohttp
@@ -230,3 +233,88 @@ def from_base64(b64_data: str, mime_type: str = "image/jpeg") -> Optional[Item]:
         return None
     except Exception as e:
         logger.debug(f"Error decoding {mime_type} base64 data. \n {type(e).__name__}: {e}")
+
+
+def normalize_video(video: Video):
+    """Transcodes the video for browser playback."""
+    input_path = video.file_path
+    output_path = input_path.with_suffix(".normalized.mp4")
+
+    meta = probe_video(input_path)
+
+    # Case 1: fully browser-safe → only ensure faststart
+    if is_browser_safe(meta):
+        run_command([
+            "ffmpeg",
+            "-y",
+            "-i", str(input_path),
+            "-c", "copy",
+            "-movflags", "+faststart",
+            str(output_path),
+        ])
+        return output_path
+
+    # Case 2: re-encode to canonical browser format
+    run_command([
+        "ffmpeg",
+        "-y",
+        "-i", str(input_path),
+        "-map", "0:v:0",
+        "-map", "0:a?",
+        "-c:v", "libx264",
+        "-profile:v", "main",
+        "-level", "4.1",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+        str(output_path),
+    ])
+
+    return output_path
+
+
+def probe_video(path: Path) -> dict:
+    """Return ffprobe JSON metadata."""
+    result = run_command([
+        "ffprobe",
+        "-v", "error",
+        "-print_format", "json",
+        "-show_streams",
+        "-show_format",
+        str(path),
+    ])
+    return json.loads(result.stdout)
+
+
+def is_browser_safe(meta: dict) -> bool:
+    """Check whether the video is safely playable in browsers."""
+    video_ok = False
+    audio_ok = False
+
+    for stream in meta.get("streams", []):
+        if stream["codec_type"] == "video":
+            codec = stream.get("codec_name")
+            pix_fmt = stream.get("pix_fmt", "")
+            profile = stream.get("profile", "")
+
+            video_ok = (
+                    codec == "h264"
+                    and pix_fmt == "yuv420p"
+                    and "High 10" not in profile
+            )
+
+        if stream["codec_type"] == "audio":
+            audio_ok = stream.get("codec_name") in {"aac", "mp3"}
+
+    return video_ok and audio_ok
+
+
+def run_command(cmd: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=True,
+    )

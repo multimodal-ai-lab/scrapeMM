@@ -11,7 +11,7 @@ from scrapemm.common.exceptions import IPBannedError, UnsupportedDomainError
 from scrapemm.download import download_medium
 from scrapemm.download.common import HEADERS
 from scrapemm.integrations import retrieve_via_integration, fire, decodo
-from scrapemm.util import run_with_semaphore, get_domain
+from scrapemm.util import run_with_semaphore, get_domain, normalize_video
 
 logger = logging.getLogger("scrapeMM")
 METHODS = ["integrations", "firecrawl", "decodo"]
@@ -47,13 +47,13 @@ BEST_METHODS = {
 
 
 async def retrieve(
-    urls: str | Collection[str],
-    remove_urls: bool = False,
-    show_progress: bool = True,
-    actions: list[dict] | None  = None,
-    methods: Literal["auto"] | list[str] | list[Literal["auto"] | list[str]] | None = "auto",
-    format: str = "multimodal_sequence",
-    max_video_size: int | None = None,
+        urls: str | Collection[str],
+        remove_urls: bool = False,
+        show_progress: bool = True,
+        actions: list[dict] | None = None,
+        methods: Literal["auto"] | list[str] | list[Literal["auto"] | list[str]] | None = "auto",
+        format: str = "multimodal_sequence",
+        max_video_size: int | None = None,
 ) -> ScrapingResponse | list[ScrapingResponse]:
     """Main function of this repository. Downloads the contents present at the given URL(s).
     For each URL, returns a ScrapingResponse containing the retrieved content, error, and method.
@@ -127,13 +127,13 @@ async def retrieve(
 
 
 async def _retrieve_single(
-    url: str,
-    remove_urls: bool,
-    session: aiohttp.ClientSession,
-    methods: Literal["auto"] | list[str] | None = "auto",
-    actions: list[dict] | None = None,
-    format: str = "multimodal_sequence",
-    max_video_size: int | None = None,
+        url: str,
+        remove_urls: bool,
+        session: aiohttp.ClientSession,
+        methods: Literal["auto"] | list[str] | None = "auto",
+        actions: list[dict] | None = None,
+        format: str = "multimodal_sequence",
+        max_video_size: int | None = None,
 ) -> ScrapingResponse:
     logger.debug(f"Retrieving {url}")
 
@@ -214,11 +214,24 @@ async def _retrieve_single(
 
         if result is not None:
             logger.debug(f"Successfully retrieved with method: {method_name}")
+            if isinstance(result, MultimodalSequence):
+                postprocess_media(result)
             return ScrapingResponse(url=url, content=result, method=method_name)
 
     # All methods failed
     logger.warning(f"All retrieval methods failed for URL: {url}")
     return ScrapingResponse(url=url, content=None, errors=errors)
+
+
+def postprocess_media(result: MultimodalSequence):
+    """Ensure all media are located in the default ezmm directory (no temp files)
+    and transcode all videos into a format suitable for browser playback."""
+    for item in result.unique_items():
+        item.relocate(move_not_copy=True)
+    from scrapemm import ffmpeg_available
+    if ffmpeg_available:
+        for video in result.videos:
+            normalize_video(video)
 
 
 def get_optimal_methods(url: str) -> list[str]:

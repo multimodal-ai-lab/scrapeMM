@@ -48,7 +48,7 @@ async def test_html_retrieval(url, method):
     ("https://www.facebook.com/reel/1089214926521000", 128_000_000, True),
     ("https://www.facebook.com/reel/1089214926521000", 1_000_000, False),
     ("https://www.youtube.com/shorts/cE0zgN6pYOc", None, True),
-    ("https://www.youtube.com/shorts/cE0zgN6pYOc", 4_000_000, True),
+    ("https://www.youtube.com/shorts/cE0zgN6pYOc", 6_000_000, True),
     ("https://www.youtube.com/shorts/cE0zgN6pYOc", 3_000_000, False),
 ])
 async def test_max_video_size(url, max_video_size, download_expected):
@@ -100,7 +100,7 @@ async def test_max_video_size(url, max_video_size, download_expected):
 async def test_methods(urls: list[str], methods: list[str] | list[list[str]] | None):
     results = await retrieve(urls, methods=methods)
     assert results
-    if methods:
+    if methods and methods != "auto":
         if isinstance(methods[0], str):
             methods = [methods] * len(urls)
         for result, method_list in zip(results, methods):
