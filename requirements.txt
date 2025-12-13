@@ -17,5 +17,5 @@ TikTokResearchApi
 yt-dlp
 yt-dlp[default,curl-cffi]
 cryptography
-firecrawl-py~=4.6.0
+firecrawl-py~=4.10.4
 brotli

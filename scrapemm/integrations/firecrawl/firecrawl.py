@@ -1,16 +1,16 @@
+import asyncio
 import logging
 from pathlib import Path
 from typing import Optional
 
 import aiohttp
-import requests
 from ezmm import MultimodalSequence
 from requests import ConnectionError, ReadTimeout
 from requests.exceptions import RetryError
 
 from scrapemm.common import get_config_var, update_config
 from scrapemm.download.common import HEADERS
-from scrapemm.util import read_urls_from_file, get_domain, get_domain_root, to_multimodal_sequence
+from scrapemm.util import read_urls_from_file, get_domain, to_multimodal_sequence
 
 logger = logging.getLogger("scrapeMM")
 
@@ -87,6 +87,7 @@ class Firecrawl:
                 exclude_tags=["script", "style", "noscript", "footer", "aside"],
                 timeout=30_000,
                 wait_for=1_000,
+                store_in_cache=False,
                 **kwargs
             )
         except Exception as e:
@@ -136,6 +137,6 @@ async def firecrawl_is_running(url: str) -> bool:
         # Retrieve the head of the homepage
         try:
             async with session.head(url, timeout=1) as response:
-                return response.status == 200
-        except (aiohttp.ClientError, ConnectionError, ReadTimeout, RetryError, TimeoutError):
+                return 200 <= response.status < 400
+        except (aiohttp.ClientError, ConnectionError, ReadTimeout, RetryError, asyncio.TimeoutError):
             return False

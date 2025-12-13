@@ -242,36 +242,37 @@ def normalize_video(video: Video):
 
     meta = probe_video(input_path)
 
-    # Case 1: fully browser-safe → only ensure faststart
-    if is_browser_safe(meta):
+    try:
+        # Case 1: fully browser-safe → only ensure faststart
+        if is_browser_safe(meta):
+            run_command([
+                "ffmpeg",
+                "-y",
+                "-i", str(input_path),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(output_path),
+            ])
+            return output_path
+
+        # Case 2: re-encode to canonical browser format
         run_command([
             "ffmpeg",
             "-y",
             "-i", str(input_path),
-            "-c", "copy",
+            "-map", "0:v:0",
+            "-map", "0:a?",
+            "-c:v", "libx264",
+            "-profile:v", "main",
+            "-level", "4.1",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", "128k",
             "-movflags", "+faststart",
             str(output_path),
         ])
-        return output_path
-
-    # Case 2: re-encode to canonical browser format
-    run_command([
-        "ffmpeg",
-        "-y",
-        "-i", str(input_path),
-        "-map", "0:v:0",
-        "-map", "0:a?",
-        "-c:v", "libx264",
-        "-profile:v", "main",
-        "-level", "4.1",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-movflags", "+faststart",
-        str(output_path),
-    ])
-
-    return output_path
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"Error normalizing video {input_path}: {e}")
 
 
 def probe_video(path: Path) -> dict:
