@@ -28,7 +28,7 @@ class TikTok(RetrievalIntegration):
     """
 
     name = "TikTok"
-    domains = ["tiktok.com", "vm.tiktok.com"]
+    domains = ["tiktok.com"]
 
     async def _connect(self):
         # Try to initialize TikTok Research API
