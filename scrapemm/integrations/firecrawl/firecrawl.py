@@ -71,6 +71,7 @@ class Firecrawl:
                      remove_urls: bool,
                      session: aiohttp.ClientSession,
                      format: str,
+                     max_attempts: int = 3,
                      **kwargs) -> Optional[MultimodalSequence | str]:
         if is_no_bot_site(url):
             raise ValueError(f"Firecrawl cannot scrape sites from {get_domain(url)}")
@@ -78,25 +79,35 @@ class Firecrawl:
         if not self._firecrawl:
             await self.connect()
 
-        try:
-            document = await self._firecrawl.scrape(
-                url,
-                formats=["html"],
-                only_main_content=False,
-                remove_base64_images=False,
-                exclude_tags=["script", "style", "noscript", "footer", "aside"],
-                timeout=30_000,
-                wait_for=1_000,
-                store_in_cache=False,
-                **kwargs
-            )
-        except Exception as e:
-            # Ensure firecrawl is still running
-            if not await firecrawl_is_running(self.firecrawl_url):
-                logger.error(f"❌ Firecrawl stopped running at {self.firecrawl_url}.")
-                raise RuntimeError("Firecrawl stopped running.")
-            else:
-                raise e
+        document = None
+        for attempt in range(max_attempts):
+            try:
+                document = await self._firecrawl.scrape(
+                    url,
+                    formats=["html"],
+                    only_main_content=False,
+                    remove_base64_images=False,
+                    exclude_tags=["script", "style", "noscript", "footer", "aside"],
+                    timeout=30_000,
+                    wait_for=1_000,
+                    store_in_cache=False,
+                    **kwargs
+                )
+                break
+            except Exception as e:
+                # Ensure firecrawl is still running
+                state = await get_firecrawl_state(self.firecrawl_url)
+                if state == "unavailable":
+                    logger.error(f"❌ Firecrawl stopped running at {self.firecrawl_url}.")
+                    raise RuntimeError("Firecrawl stopped running.")
+                elif state == "busy":
+                    if attempt < max_attempts - 1:
+                        logger.warning(f"⚠️ Firecrawl seems busy. Retrying in 10 seconds...")
+                        await asyncio.sleep(10)
+                    else:
+                        raise e
+                else:
+                    raise e
 
         self.n_scrapes += 1
         html = document.html
@@ -128,15 +139,23 @@ async def find_firecrawl(urls):
 
 async def firecrawl_is_running(url: str) -> bool:
     """Returns True iff Firecrawl can be successfully pinged at the specified URL."""
+    return await get_firecrawl_state(url) == "running"
+
+
+async def get_firecrawl_state(url: str) -> str | None:
+    """Returns the state of Firecrawl at the specified URL."""
     if not url:
-        return False
+        return None
     if not url.startswith("http"):
         url = "https://" + url
 
     async with aiohttp.ClientSession(headers=HEADERS) as session:
         # Retrieve the head of the homepage
         try:
-            async with session.head(url, timeout=1) as response:
-                return 200 <= response.status < 400
-        except (aiohttp.ClientError, ConnectionError, ReadTimeout, RetryError, asyncio.TimeoutError):
-            return False
+            async with session.head(url, timeout=2) as response:
+                if 200 <= response.status < 400:
+                    return "running"
+        except (ReadTimeout, asyncio.TimeoutError):
+            return "busy"
+        except (aiohttp.ClientError, ConnectionError, RetryError):
+            return "unavailable"

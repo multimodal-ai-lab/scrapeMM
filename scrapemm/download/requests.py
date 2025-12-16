@@ -55,6 +55,8 @@ async def request_static(url: str,
             pass  # Page not readable
         except (aiohttp.ClientOSError, aiohttp.ClientConnectorError):
             pass  # Page not available anymore
+        except aiohttp.ServerDisconnectedError:
+            pass  # Server aborted the connection
         except aiohttp.ClientResponseError as e:
             if e.status in [403, 404, 429, 500, 502, 503]:
                 # 403: Forbidden access

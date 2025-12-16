@@ -137,14 +137,14 @@ class Decodo:
                         if response.status == 429:  # Rate limit
                             if attempt >= max_retries:
                                 logger.warning(f"Error 429: Rate limit hit and maximum retries reached.")
-                                raise RateLimitError(f"Decodo rate limit reached.")
+                                raise RateLimitError(f"Decodo rate limit hit (despite {max_retries} retries).")
                         elif response.status == 613:
                             if attempt >= max_retries:
-                                raise RuntimeError("Decodo API error 613.")
+                                raise RuntimeError(f"Decodo API error 613 (despite {max_retries} retries).")
                         elif response.status == 502:  # Bad gateway
                             if attempt >= max_retries:
                                 logger.warning(f"Error 502: Bad gateway and maximum retries reached.")
-                                raise RuntimeError("Decodo API error 502: Bad gateway.")
+                                raise RuntimeError(f"Decodo API error 502: Bad gateway (despite {max_retries} retries).")
 
                         else:  # Other errors that don't go away on retry
                             match response.status:

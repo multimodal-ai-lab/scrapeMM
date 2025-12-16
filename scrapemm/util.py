@@ -240,9 +240,9 @@ def normalize_video(video: Video):
     input_path = video.file_path
     output_path = input_path.with_suffix(".normalized.mp4")
 
-    meta = probe_video(input_path)
-
     try:
+        meta = probe_video(input_path)
+
         # Case 1: fully browser-safe → only ensure faststart
         if is_browser_safe(meta):
             run_command([
