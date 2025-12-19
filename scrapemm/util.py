@@ -136,7 +136,7 @@ async def resolve_media_hyperlinks(
     # Convert each base64-encoded data to the respective medium
     for data_uri in data_uris:
         mime_type, base64_encoding = decompose_data_uri(data_uri)
-        href_media[data_uri] = from_base64(base64_encoding, mime_type=mime_type)
+        href_media[data_uri] = from_base64(base64_encoding, mime_type=mime_type, url=url)
 
     # Replace hyperlinks with their respective media reference
     media_count = 0
@@ -216,15 +216,15 @@ def sanitize(text: str) -> str:
     return text.replace("\u0000", "")
 
 
-def from_base64(b64_data: str, mime_type: str = "image/jpeg") -> Optional[Item]:
+def from_base64(b64_data: str, mime_type: str = "image/jpeg", url: str | None = None) -> Optional[Item]:
     """Converts a base64-encoded image to an Item object."""
     try:
         binary_data = base64.b64decode(b64_data, validate=True)
         if binary_data:
             if mime_type.startswith("image/"):
-                return Image(binary_data=binary_data)
+                return Image(binary_data=binary_data, source_url=url)
             elif mime_type.startswith("video/"):
-                return Video(binary_data=binary_data)
+                return Video(binary_data=binary_data, source_url=url)
             else:
                 raise ValueError(f"Unsupported media type: {mime_type}")
     except binascii.Error:  # base64 validation failed
@@ -242,6 +242,8 @@ def normalize_video(video: Video):
 
     try:
         meta = probe_video(input_path)
+        if not meta:
+            return
 
         # Case 1: fully browser-safe → only ensure faststart
         if is_browser_safe(meta):
@@ -275,7 +277,7 @@ def normalize_video(video: Video):
         logger.warning(f"Error normalizing video {input_path}: {e}")
 
 
-def probe_video(path: Path) -> dict:
+def probe_video(path: Path) -> dict | None:
     """Return ffprobe JSON metadata."""
     result = run_command([
         "ffprobe",
@@ -285,7 +287,8 @@ def probe_video(path: Path) -> dict:
         "-show_format",
         str(path),
     ])
-    return json.loads(result.stdout)
+    if result:
+        return json.loads(result.stdout)
 
 
 def is_browser_safe(meta: dict) -> bool:
@@ -311,11 +314,15 @@ def is_browser_safe(meta: dict) -> bool:
     return video_ok and audio_ok
 
 
-def run_command(cmd: list[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=True,
-    )
+def run_command(cmd: list[str]) -> subprocess.CompletedProcess | None:
+    try:
+        return subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+    except UnicodeDecodeError:
+        logger.debug(f"Error running command {cmd}: Unicode decoding failed")
+        return None

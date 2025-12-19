@@ -19,3 +19,4 @@ yt-dlp[default,curl-cffi]
 cryptography
 firecrawl-py~=4.10.4
 brotli
+playwright

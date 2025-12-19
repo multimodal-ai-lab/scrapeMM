@@ -4,8 +4,9 @@ Simple web scraper to asynchronously retrieve webpages and access social media c
 This library aims to help developers and researchers to easily access multimodal data from the web and use it for LLM processing.
 
 ## Setup
-If you want to download videos, the installation of [ffmpeg](https://ffmpeg.org/) is highly recommended.
+* **If you want to download videos**: Then, the installation of [ffmpeg](https://ffmpeg.org/) is highly recommended.
 In Conda, you can install it with `conda install -c conda-forge ffmpeg`.
+* **If you want to scrape Perma.cc archive records**, you'll need to install playwright with `pip install playwright` and running `playwright install`.
 
 ## Usage
 ```python

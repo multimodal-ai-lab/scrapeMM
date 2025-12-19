@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 import aiohttp
+from aiohttp import ClientResponseError
 from ezmm import MultimodalSequence
 from requests import ConnectionError, ReadTimeout
 from requests.exceptions import RetryError
@@ -79,6 +80,10 @@ class Firecrawl:
         if not self._firecrawl:
             await self.connect()
 
+        if (await self._is_available(url, session)) == False:
+            # Skip unavailable URLs which would otherwise cause Firecrawl to get stuck in an infinite loop.
+            return None
+
         document = None
         for attempt in range(max_attempts):
             try:
@@ -119,6 +124,18 @@ class Firecrawl:
                 return await to_multimodal_sequence(html, remove_urls=remove_urls,
                                                     session=session, url=url)
         return None
+
+    async def _is_available(self, url: str, session: aiohttp.ClientSession) -> bool | None:
+        """Probe if the URL is reachable. If an HTTP error >= 400 occurs, return False."""
+        try:
+            async with session.head(url, timeout=2) as response:
+                response.raise_for_status()
+                return True
+        except (ReadTimeout, asyncio.TimeoutError):
+            return None  # We don't know yet'
+        except ClientResponseError as e:
+            logger.debug(f"Firecrawl skipping URL {url} due to unavailability: {e}")
+            return False
 
 
 fire = Firecrawl()
