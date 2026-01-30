@@ -14,14 +14,14 @@ logger = logging.getLogger("scrapeMM")
 class ArchiveToday(RetrievalIntegration):
     name = "Archive.today"
     domains = [
-    "archive.today",
-    "archive.is",
-    "archive.ph",
-    "archive.vn",
-    "archive.li",
-    "archive.fo",
-    "archive.md",
-]
+        "archive.today",
+        "archive.is",
+        "archive.ph",
+        "archive.vn",
+        "archive.li",
+        "archive.fo",
+        "archive.md",
+    ]
 
     async def _connect(self):
         self.connected = True
@@ -60,7 +60,6 @@ class ArchiveToday(RetrievalIntegration):
                 logger.warning(
                     f"\rUnable to find content on page at URL '{url}'.\n\tReason: {type(e).__name__} {e}"
                 )
-                await page.screenshot(path="debug_error.png")
 
             finally:
                 await browser.close()
