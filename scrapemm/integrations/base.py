@@ -20,7 +20,7 @@ class RetrievalIntegration(ABC):
     @abstractmethod
     async def _connect(self):
         """Establish a connection to the external service. Invoked upon the first get() call.
-        Must set self.connet = True if connection was successful, else False."""
+        Must set self.connect = True if connection was successful, else False."""
         raise NotImplementedError
 
     async def get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
