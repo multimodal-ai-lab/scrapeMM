@@ -64,12 +64,3 @@ class ArchiveToday(RetrievalIntegration):
 
             finally:
                 await browser.close()
-
-
-if __name__ == "__main__":
-    import asyncio
-    from scrapemm import retrieve
-
-    url = "https://archive.is/uTVE4"  # Example archived page
-    result = asyncio.run(retrieve(url))
-    print(result.content)
