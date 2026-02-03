@@ -41,13 +41,13 @@ BEST_METHODS = {
     "youtu.be": ["integrations"],
     "perma.cc": ["integrations"],
     # Archive.today:
-    "archive.today": ["decodo"],
-    "archive.is": ["decodo"],
-    "archive.ph": ["decodo"],
-    "archive.vn": ["decodo"],
-    "archive.li": ["decodo"],
-    "archive.fo": ["decodo"],
-    "archive.md": ["decodo"],
+    "archive.today": ["integrations", "decodo"],
+    "archive.is": ["integrations", "decodo"],
+    "archive.ph": ["integrations", "decodo"],
+    "archive.vn": ["integrations", "decodo"],
+    "archive.li": ["integrations", "decodo"],
+    "archive.fo": ["integrations", "decodo"],
+    "archive.md": ["integrations", "decodo"],
 }
 
 

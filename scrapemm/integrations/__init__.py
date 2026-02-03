@@ -13,11 +13,24 @@ from .tiktok import TikTok
 from .x import X
 from .youtube import YouTube
 from .perma_cc import PermaCC
+from .archive_today import ArchiveToday
 
-RETRIEVAL_INTEGRATIONS = [X(), Telegram(), Bluesky(), TikTok(), Instagram(), Facebook(), YouTube(), PermaCC()]
-DOMAIN_TO_INTEGRATION = {domain: integration
-                         for integration in RETRIEVAL_INTEGRATIONS
-                         for domain in integration.domains}
+RETRIEVAL_INTEGRATIONS = [
+    X(),
+    Telegram(),
+    Bluesky(),
+    TikTok(),
+    Instagram(),
+    Facebook(),
+    YouTube(),
+    PermaCC(),
+    ArchiveToday(),
+]
+DOMAIN_TO_INTEGRATION = {
+    domain: integration
+    for integration in RETRIEVAL_INTEGRATIONS
+    for domain in integration.domains
+}
 
 
 async def retrieve_via_integration(url: str, **kwargs) -> Optional[MultimodalSequence]:
