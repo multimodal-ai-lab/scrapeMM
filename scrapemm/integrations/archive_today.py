@@ -1,11 +1,14 @@
-import aiohttp
-from scrapemm.download.common import HEADERS
-from scrapemm.integrations.base import RetrievalIntegration
-from playwright.async_api import TimeoutError, async_playwright
-from playwright_stealth import Stealth
-from ezmm import MultimodalSequence
+"""Integration for Archive.today retrieval."""
+
 import logging
 
+import aiohttp
+from ezmm import MultimodalSequence
+from playwright.async_api import TimeoutError, async_playwright
+from playwright_stealth import Stealth
+
+from scrapemm.download.common import HEADERS
+from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.util import to_multimodal_sequence
 
 logger = logging.getLogger("scrapeMM")
@@ -37,7 +40,15 @@ class ArchiveToday(RetrievalIntegration):
             raise RuntimeError("Failed to retrieve Archive.today record HTML.")
 
     async def get_record_html(self, url: str) -> str | None:
-        """Retrieve the HTML content of the archived page at the given URL."""
+        """
+        Retrieves the HTML content of the archieved web page. Archive.today uses anti-bot measures such as captchas.
+        To bypass these, we use Playwright with stealth settings (provided by playwright-stealth).
+
+        Args:
+            url (str): The URL of the archived page on Archive.today.
+        Returns:
+            str | None: The HTML content of the archived page, or None if retrieval fails.
+        """
         async with Stealth().use_async(async_playwright()) as p:
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context(
@@ -52,14 +63,18 @@ class ArchiveToday(RetrievalIntegration):
                 logger.warning(
                     f"\rUnable to load page at URL '{url}'.\n\tReason: {type(e).__name__} {e}"
                 )
+                return None
 
             try:
                 await page.wait_for_selector("#CONTENT", timeout=5000)
                 return await page.inner_html("#CONTENT")
-            except TimeoutError as e:
+            except TimeoutError:
                 logger.warning(
-                    f"\rUnable to find content on page at URL '{url}'.\n\tReason: {type(e).__name__} {e}"
+                    f"Trying to retrieve archived content from '{url}' timed out.\n(A Captcha might block access)"
                 )
+                return None
 
             finally:
                 await browser.close()
+
+        return None
