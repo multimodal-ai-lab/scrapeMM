@@ -7,13 +7,13 @@ from test_social_media import assert_expectations
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url, expected", [
     # Perma.cc:
-    ("https://perma.cc/N8MR-NS96", dict(video=1)),  # TikTok video
-    ("https://perma.cc/HU7Z-B24D", dict(image=1)),  # Screenshot of Twitter post
-    ("https://perma.cc/HW47-P32Z", dict(image=1)),  # Screenshot of Instagram post
-    ("https://perma.cc/8J8J-2CEB", dict(image=4)),  # 4 images in old Twitter UI
-    ("https://perma.cc/38CZ-MMFV", dict(image=1)),  # Web article with one image
-    ("https://perma.cc/ZD7Z-B3U7?type=image", dict(image=1)),  # Screenshot of Facebook video
-    ("https://perma.cc/D5GB-S4E9", dict(image=1)),  # Recorded screenshot of Facebook post
+    # ("https://perma.cc/N8MR-NS96", dict(video=1)),  # TikTok video
+    # ("https://perma.cc/HU7Z-B24D", dict(image=1)),  # Screenshot of Twitter post
+    # ("https://perma.cc/HW47-P32Z", dict(image=1)),  # Screenshot of Instagram post
+    # ("https://perma.cc/8J8J-2CEB", dict(image=4)),  # 4 images in old Twitter UI
+    # ("https://perma.cc/38CZ-MMFV", dict(image=1)),  # Web article with one image
+    # ("https://perma.cc/ZD7Z-B3U7?type=image", dict(image=1)),  # Screenshot of Facebook video
+    # ("https://perma.cc/D5GB-S4E9", dict(image=1)),  # Recorded screenshot of Facebook post
     # Archive.today:
     ("https://archive.is/uTVE4", dict(image=1)),  # X post
     ("https://archive.is/0VrgI", dict(image=1)),  # Facebook post

@@ -30,7 +30,7 @@ class ArchiveToday(RetrievalIntegration):
         self.connected = True
 
     async def _get(self, url: str, **kwargs) -> MultimodalSequence | None:
-        archived_content_html = await self.get_record_html(url)
+        archived_content_html = await self._get_record_html(url)
         if archived_content_html is not None:
             async with aiohttp.ClientSession(headers=HEADERS) as session:
                 return await to_multimodal_sequence(
@@ -39,7 +39,7 @@ class ArchiveToday(RetrievalIntegration):
         else:
             raise RuntimeError("Failed to retrieve Archive.today record HTML.")
 
-    async def get_record_html(self, url: str) -> str | None:
+    async def _get_record_html(self, url: str) -> str | None:
         """
         Retrieves the HTML content of the archieved web page. Archive.today uses anti-bot measures such as captchas.
         To bypass these, we use Playwright with stealth settings (provided by playwright-stealth).

@@ -52,7 +52,7 @@ async def download_video_file(
 ) -> Optional[Video]:
     """Download a single video file from a URL and return it as a Video object."""
     try:
-        async with session.get(video_url, ssl=ssl_context) as response:
+        async with session.get(video_url, allow_redirects=True, ssl=ssl_context) as response:
             if response.status == 200:
                 content = await response.read()
                 video = Video(binary_data=content, source_url=video_url)
@@ -72,7 +72,7 @@ async def download_hls_video(
     """Download an HTTP Live Streaming (HLS) video from a playlist URL and return it as a Video object."""
     try:
         # Download the m3u8 playlist file
-        async with session.get(playlist_url, ssl=ssl_context) as response:
+        async with session.get(playlist_url, allow_redirects=True, ssl=ssl_context) as response:
             if response.status != 200:
                 logger.debug(f"Failed to download playlist: {response.status}")
                 return None

@@ -19,13 +19,13 @@ async def fetch_headers(url, session: aiohttp.ClientSession, **kwargs) -> dict:
 
     ssl = None if get_domain(str(url)) in RELAXED_SSL_DOMAINS else ssl_context
     try:
-        async with session.head(url, ssl=ssl, **kwargs) as response:
+        async with session.head(url, allow_redirects=True, ssl=ssl, **kwargs) as response:
             response.raise_for_status()
             return dict(response.headers)
     except aiohttp.ClientResponseError as e:
         if e.status in (405, 501):
             # Fall back to GET if HEAD is not allowed/implemented
-            async with session.get(url, ssl=ssl, **kwargs) as response:
+            async with session.get(url, allow_redirects=True, ssl=ssl, **kwargs) as response:
                 response.raise_for_status()
                 return dict(response.headers)
         raise

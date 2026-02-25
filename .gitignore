@@ -8,3 +8,6 @@ __pycache__/
 build/
 .pytest_cache/
 .claude/
+venv/
+dev/
+.vscode/
