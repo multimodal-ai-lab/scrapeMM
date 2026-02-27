@@ -18,9 +18,9 @@ from test_social_media import assert_expectations
     ("https://archive.is/uTVE4", dict(image=1)),  # X post
     ("https://archive.is/0VrgI", dict(image=1)),  # Facebook post
     ("http://archive.today/6OttS", dict(image=2)),  # Facebook post
-    ("http://archive.today/2022.05.05-091515/https:/twitter.com/SamvanRooy1/status/1521438261130014721", dict(image=2)),  # Twitter post
+    ("http://archive.today/2022.05.05-091515/https:/twitter.com/SamvanRooy1/status/1521438261130014721", dict(image=2)),  # Twitter post (fails)
     ("https://archive.ph/movd4", dict(image=1)),  # Online article
-    ("https://archive.vn/Edqcv", dict(image=1)),  # Online article
+    ("https://archive.vn/Edqcv", dict(image=1)),  # Online article (fails)
     ("https://archive.fo/jnN0O", dict(image=1)),  # Older Facebook post
     # ("https://mvau.lt/media/b286c959-00da-4765-8f49-88d4ca87a555", dict(video=1)),
     # ("https://mvau.lt/media/ccfa5e89-a89d-4a12-aee1-cf68dcb205ce", dict(image=1)),

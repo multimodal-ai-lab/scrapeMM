@@ -1,0 +1,1 @@
+from .decodo import Decodo, decodo
