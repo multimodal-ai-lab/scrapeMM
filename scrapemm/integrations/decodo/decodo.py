@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from http.client import responses
 from typing import Optional
 
 import aiohttp
@@ -9,7 +8,8 @@ from ezmm import MultimodalSequence
 
 from scrapemm import RateLimitError
 from scrapemm.secrets import get_secret
-from scrapemm.util import get_domain_root, to_multimodal_sequence
+from scrapemm.util import get_domain, to_multimodal_sequence
+from scrapemm.integrations.decodo.html_postprocessor import domain_to_postprocessor
 
 logger = logging.getLogger("scrapeMM")
 
@@ -76,6 +76,12 @@ class Decodo:
             html = await self._call_decodo(url, session, enable_js=False, timeout=timeout)
 
         if html:
+            
+            # Apply domain-specific post-processing if available (e.g. for Archive.today)
+            if domain := get_domain(url):
+                post_processor = domain_to_postprocessor.get(domain, None)
+                html = post_processor.process(html) if post_processor else html
+
             if format == "html":
                 return html
             else:
