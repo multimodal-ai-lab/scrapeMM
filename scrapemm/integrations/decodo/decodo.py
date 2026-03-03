@@ -78,9 +78,9 @@ class Decodo:
         if html:
             
             # Apply domain-specific post-processing if available (e.g. for Archive.today)
-            post_processor = domain_to_postprocessor.get(get_domain(url) or "", None)
-            if post_processor is not None:
-                html = post_processor.process(html)
+            if domain := get_domain(url):
+                post_processor = domain_to_postprocessor.get(domain, None)
+                html = post_processor.process(html) if post_processor else html
 
             if format == "html":
                 return html

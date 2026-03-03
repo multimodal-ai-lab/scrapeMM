@@ -30,9 +30,13 @@ class ArchiveTodayPostProcessor(HtmlPostProcessor):
 
     @staticmethod
     def process(html: str) -> str:
+        """
+        Try to extract the record content from the HTML retrieved from Archive.today. 
+        If the expected div is not found, return the original HTML.
+        """
         soup = BeautifulSoup(html, "html.parser")
         content_div = soup.find("div", id=ARCHIVE_TODAY_CONTENT_DIV_ID)
-        return content_div.decode_contents() if content_div else ""
+        return content_div.decode_contents() if content_div else html
 
 
 domain_to_postprocessor = {
