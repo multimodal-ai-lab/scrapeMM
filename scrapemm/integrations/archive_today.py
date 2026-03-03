@@ -41,7 +41,7 @@ class ArchiveToday(RetrievalIntegration):
         else:
             raise RuntimeError("Failed to retrieve Archive.today record HTML.")
 
-    async def get_record_html(self, url: str, **kwargs) -> str | None:
+    async def get_record_html(self, url: str) -> str | None:
         """
         Retrieves the HTML content of the archived web page.
         Archive.today occasionally requires solving captchas. To bypass these,
