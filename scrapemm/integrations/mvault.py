@@ -159,8 +159,7 @@ class MediaVault(RetrievalIntegration):
                 posted_medium_url = _as_string(video_tag.get("src"))
                 if posted_medium_url is None:
                     source_tag = video_tag.find("source", src=True)
-                    if source_tag:
-                        posted_medium_url = _as_string(source_tag.get("src"))
+                    posted_medium_url = _as_string(source_tag.get("src")) if source_tag else None
 
         # Download image/video
         posted_medium = None
