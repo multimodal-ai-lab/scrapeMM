@@ -19,7 +19,6 @@ METHODS = ["integrations", "firecrawl", "decodo"]
 UNSUPPORTED_DOMAINS = [
     "ghostarchive.org",
     "archive.org",
-    "mvau.lt",
 ]
 
 BEST_METHODS = {
@@ -40,6 +39,7 @@ BEST_METHODS = {
     "youtube.com": ["integrations"],
     "youtu.be": ["integrations"],
     "perma.cc": ["integrations"],
+    "mvau.lt": ["integrations"],
     # Archive.today:
     "archive.today": ["integrations", "decodo"],
     "archive.is": ["integrations", "decodo"],

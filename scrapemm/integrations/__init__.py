@@ -2,6 +2,7 @@ from typing import Optional
 
 from ezmm import MultimodalSequence
 
+from scrapemm.integrations.mvault import MediaVault
 from scrapemm.util import get_domain
 from .bluesky import Bluesky
 from .decodo import Decodo, decodo
@@ -25,6 +26,7 @@ RETRIEVAL_INTEGRATIONS = [
     YouTube(),
     PermaCC(),
     ArchiveToday(),
+    MediaVault()
 ]
 DOMAIN_TO_INTEGRATION = {
     domain: integration
