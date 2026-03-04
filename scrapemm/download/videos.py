@@ -1,5 +1,5 @@
 from typing import Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 import logging
 import os
 import shutil
@@ -15,6 +15,18 @@ from scrapemm.download.common import HEADERS, ssl_context
 
 logger = logging.getLogger("scrapeMM")
 
+VIDEO_FILE_EXTENSIONS = (
+    ".mp4", ".webm", ".mov", ".m4v", ".mkv", ".avi", ".flv", ".wmv", ".ts"
+)
+
+
+def _looks_like_hls_url(url: str) -> bool:
+    return urlparse(url).path.lower().endswith(".m3u8")
+
+
+def _looks_like_video_file_url(url: str) -> bool:
+    return urlparse(url).path.lower().endswith(VIDEO_FILE_EXTENSIONS)
+
 
 async def download_video(
         video_url: str,
@@ -27,15 +39,22 @@ async def download_video(
         content_type = headers.get('Content-Type') or headers.get('content-type') or ''
         # Normalize for robust detection
         normalized_ct = content_type.split(';', 1)[0].strip().lower()
-        # TODO: Handle binary/octet-stream
         if normalized_ct.startswith("video/"):
             return await download_video_file(video_url, session)
         elif (
             normalized_ct in ("application/vnd.apple.mpegurl", "application/x-mpegurl")
             or "mpegurl" in normalized_ct
-            or video_url.lower().endswith(".m3u8")
+            or _looks_like_hls_url(video_url)
         ):
             return await download_hls_video(video_url, session)
+        elif normalized_ct == "binary/octet-stream":
+            if _looks_like_hls_url(video_url):
+                return await download_hls_video(video_url, session)
+            if _looks_like_video_file_url(video_url):
+                return await download_video_file(video_url, session)
+            logger.warning(
+                f"Cannot download video from {video_url}. Content type is binary/octet-stream and URL has no known video extension."
+            )
         else:
             logger.warning(
                 f"Cannot download video from {video_url}. Unable to handle content type: {content_type}."
@@ -71,6 +90,8 @@ async def download_hls_video(
 ) -> Optional[Video]:
     """Download an HTTP Live Streaming (HLS) video from a playlist URL and return it as a Video object."""
     try:
+        variant_content = ""
+
         # Download the m3u8 playlist file
         async with session.get(playlist_url, allow_redirects=True, ssl=ssl_context) as response:
             if response.status != 200:
@@ -170,14 +191,15 @@ async def is_maybe_video_url(url: str, session: aiohttp.ClientSession) -> bool:
     """Returns True iff the URL points at an accessible video file/stream."""
     try:
         headers = await fetch_headers(url, session, timeout=3)
-        content_type = headers.get('Content-Type') or headers.get('content-type')
+        content_type = headers.get('Content-Type') or headers.get('content-type') or ''
         if content_type.startswith("video/") or content_type == "application/vnd.apple.mpegurl":
             # Surely a video
             return True
         else:
-            # If the content is a binary download stream, it may encode a video
-            # but also something else. This is a case of "maybe a video"
-            return content_type == "binary/octet-stream"
+            # If the content is a binary download stream, use URL suffix heuristics.
+            return content_type == "binary/octet-stream" and (
+                _looks_like_video_file_url(url) or _looks_like_hls_url(url)
+            )
 
     except Exception:
         return False

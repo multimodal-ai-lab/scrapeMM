@@ -22,8 +22,12 @@ async def download_medium(
         session = aiohttp.ClientSession(headers=HEADERS)
 
     try:
+        # If content type is octet-stream, we don't know if it's an image or a video.
+        # So we first attempt to downlaod it as an image, and if that fails, we attempt to download it as a video. 
         if await is_maybe_image_url(url, session):
-            return await download_image(url, ignore_small_images=ignore_small_images, session=session, **kwargs)
+            image = await download_image(url, ignore_small_images=ignore_small_images, session=session, **kwargs)
+            if image is not None:
+                return image
         if await is_maybe_video_url(url, session):
             return await download_video(url, session)
         # TODO: Handle audios

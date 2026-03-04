@@ -5,6 +5,7 @@ from ezmm import Image, Item, Video
 from scrapemm.download import download_medium, download_image, download_video
 from scrapemm.download.common import HEADERS
 from scrapemm.download.images import is_maybe_image_url
+from scrapemm.download.videos import is_maybe_video_url
 
 
 @pytest.mark.parametrize("url,expected", [
@@ -64,6 +65,36 @@ async def test_download_item(url):
 
 
 @pytest.mark.asyncio
+async def test_download_medium_falls_back_to_video_when_image_download_fails(monkeypatch):
+    class DummySession:
+        async def close(self):
+            return None
+
+    expected_video = object()
+
+    async def fake_is_maybe_image_url(url, session):
+        return True
+
+    async def fake_download_image(url, ignore_small_images, session, **kwargs):
+        return None
+
+    async def fake_is_maybe_video_url(url, session):
+        return True
+
+    async def fake_download_video(url, session):
+        return expected_video
+
+    monkeypatch.setattr("scrapemm.download.media.aiohttp.ClientSession", lambda headers: DummySession())
+    monkeypatch.setattr("scrapemm.download.media.is_maybe_image_url", fake_is_maybe_image_url)
+    monkeypatch.setattr("scrapemm.download.media.download_image", fake_download_image)
+    monkeypatch.setattr("scrapemm.download.media.is_maybe_video_url", fake_is_maybe_video_url)
+    monkeypatch.setattr("scrapemm.download.media.download_video", fake_download_video)
+
+    item = await download_medium("https://example.test/signed-media")
+    assert item is expected_video
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("url", [
     "https://demo.unified-streaming.com/k8s/features/stable/video/tears-of-steel/tears-of-steel.ism/.m3u8",
     "https://devstreaming-cdn.apple.com/videos/streaming/examples/adv_dv_atmos/main.m3u8",
@@ -84,3 +115,33 @@ async def test_download_mp4_webm(url):
     async with aiohttp.ClientSession(headers=HEADERS) as session:
         vid = await download_video(url, session)
         assert isinstance(vid, Video)
+
+
+@pytest.mark.asyncio
+async def test_is_maybe_video_url_octet_stream_with_mp4_suffix(monkeypatch):
+    async def fake_fetch_headers(url, session, timeout=3):
+        return {"Content-Type": "binary/octet-stream"}
+
+    monkeypatch.setattr("scrapemm.download.videos.fetch_headers", fake_fetch_headers)
+
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
+        result = await is_maybe_video_url("https://storage.googleapis.com/x/y/video.mp4?sig=abc", session)
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_download_video_octet_stream_with_mp4_suffix_downloads_file(monkeypatch):
+    expected_video = object()
+
+    async def fake_fetch_headers(url, session, timeout=3):
+        return {"Content-Type": "binary/octet-stream"}
+
+    async def fake_download_video_file(video_url, session):
+        return expected_video
+
+    monkeypatch.setattr("scrapemm.download.videos.fetch_headers", fake_fetch_headers)
+    monkeypatch.setattr("scrapemm.download.videos.download_video_file", fake_download_video_file)
+
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
+        result = await download_video("https://storage.googleapis.com/x/y/video.mp4?sig=abc", session)
+    assert result is expected_video
