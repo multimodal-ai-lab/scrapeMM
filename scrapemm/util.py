@@ -120,9 +120,7 @@ async def resolve_media_hyperlinks(
     hrefs_urls = dict()
     data_uris = set()
     for _, _, href in hyperlinks:
-        print(href)
         if is_url(href):
-            print(href)
             hrefs_urls[href] = href
         elif domain_root and is_root_relative_url(href):
             hrefs_urls[href] = f"{domain_root}{href}"

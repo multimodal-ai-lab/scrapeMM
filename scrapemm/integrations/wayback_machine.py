@@ -1,6 +1,5 @@
 import logging
 import re
-import time
 from typing import Self
 import aiohttp
 from ezmm import MultimodalSequence
@@ -9,6 +8,7 @@ from playwright.async_api import async_playwright, TimeoutError as PlaywrightTim
 
 from attr import dataclass
 
+from scrapemm.download.common import HEADERS
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.util import to_multimodal_sequence
 
@@ -65,19 +65,16 @@ class WaybackMachine(RetrievalIntegration):
 
         async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True)
-                context = await browser.new_context()
+                context = await browser.new_context(user_agent=HEADERS["User-Agent"])
                 page = await context.new_page()
 
                 try:
-                    await page.goto(wayback_url_str, timeout=60000)
-                    print(1)
-                    await page.wait_for_load_state("networkidle", timeout=60000)
-                    print(2)
+                    await page.goto(wayback_url_str, timeout=60000*3)
+                    await page.wait_for_load_state("domcontentloaded", timeout=60000*3)
                     html = await page.content()
 
                     if html:
-                        print(3)
-                        async with aiohttp.ClientSession() as session:
+                        async with aiohttp.ClientSession(headers=HEADERS) as session:
                             return await to_multimodal_sequence(
                                 html, remove_urls=False, session=session, url=wayback_url_str
                             )                    
@@ -93,22 +90,8 @@ class WaybackMachine(RetrievalIntegration):
         """
         Appends the 'if_' modifier to the Wayback URL if not already present.
         This modifier ensures that the archived content is served without
-        any additional overlays but hyperlinks still point to the Wayback Machine itself.
+        any additional overlays.
         """
-        if wayback_url.modifier == "if_":
-            return wayback_url
-
         wayback_url.modifier = "if_"
         return wayback_url
-
-if __name__ == "__main__":
-    import asyncio
-
-    async def main() -> None:
-        wayback_integration = WaybackMachine()
-        await wayback_integration._connect()
-        url = "https://web.archive.org/web/20210604181412/https://www.tiktok.com/@realstewpeters/video/6969789589590379781?is_copy_url=1"
-        mms = await wayback_integration.get(url)
-        print(mms)
-
-    asyncio.run(main())
+    

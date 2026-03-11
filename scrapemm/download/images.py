@@ -40,7 +40,7 @@ async def is_maybe_image_url(url: str, session: aiohttp.ClientSession) -> bool:
     """Returns True iff the URL points at an accessible _pixel_ image file
     or if the content type is a binary download stream."""
     try:
-        headers = await fetch_headers(url, session, timeout=3, allow_redirects=True)
+        headers = await fetch_headers(url, session, timeout=3)
         content_type = headers.get('Content-Type') or headers.get('content-type')
         if content_type.startswith("image/"):
             # Surely an image

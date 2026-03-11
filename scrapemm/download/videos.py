@@ -1,3 +1,4 @@
+import asyncio
 from typing import Optional
 from urllib.parse import urljoin, urlparse
 import logging
@@ -28,6 +29,19 @@ def _looks_like_video_file_url(url: str) -> bool:
     return urlparse(url).path.lower().endswith(VIDEO_FILE_EXTENSIONS)
 
 
+def _looks_like_video_resource_url(url: str) -> bool:
+    parsed = urlparse(url)
+    path = parsed.path.lower()
+    query = parsed.query.lower()
+    return (
+        _looks_like_video_file_url(url)
+        or _looks_like_hls_url(url)
+        or "/video/" in path
+        or "mime_type=video" in query
+        or "mime=video" in query
+    )
+
+
 async def download_video(
         video_url: str,
         session: aiohttp.ClientSession
@@ -35,7 +49,7 @@ async def download_video(
     """Downloads the linked video (stream) and returns it as a Video object."""
 
     try:
-        headers = await fetch_headers(video_url, session, timeout=3)
+        headers = await fetch_headers(video_url, session, timeout=8)
         content_type = headers.get('Content-Type') or headers.get('content-type') or ''
         # Normalize for robust detection
         normalized_ct = content_type.split(';', 1)[0].strip().lower()
@@ -50,17 +64,21 @@ async def download_video(
         elif normalized_ct == "binary/octet-stream":
             if _looks_like_hls_url(video_url):
                 return await download_hls_video(video_url, session)
-            if _looks_like_video_file_url(video_url):
+            if _looks_like_video_resource_url(video_url):
                 return await download_video_file(video_url, session)
             logger.warning(
                 f"Cannot download video from {video_url}. Content type is binary/octet-stream and URL has no known video extension."
             )
         else:
+            if _looks_like_video_resource_url(video_url):
+                return await download_video_file(video_url, session)
             logger.warning(
                 f"Cannot download video from {video_url}. Unable to handle content type: {content_type}."
             )
 
     except Exception as e:
+        if _looks_like_video_resource_url(video_url):
+            return await download_video_file(video_url, session)
         logger.debug(f"Error downloading video from {video_url}"
                      f"\n{type(e).__name__}: {e}")
 
@@ -70,18 +88,28 @@ async def download_video_file(
         session: aiohttp.ClientSession
 ) -> Optional[Video]:
     """Download a single video file from a URL and return it as a Video object."""
-    try:
-        async with session.get(video_url, allow_redirects=True, ssl=ssl_context) as response:
-            if response.status == 200:
-                content = await response.read()
-                video = Video(binary_data=content, source_url=video_url)
-                video.relocate(move_not_copy=True)
-                return video
-            else:
-                logger.debug(f"Failed to download video. {response.status}: {response.reason}")
-    except Exception as e:
-        logger.debug(f"Error downloading video file from {video_url}"
-                     f"\n{type(e).__name__}: {e}")
+    for retry in range(3):  # Retry twice on connection failures
+        try:
+            async with session.get(video_url, allow_redirects=True, ssl=ssl_context) as response:
+                # 200: success
+                # 206: partial content (e.g. due to range requests)
+                if response.status == 200 or response.status == 206:  
+                    content = await response.read()
+                    video = Video(binary_data=content, source_url=video_url)
+                    video.relocate(move_not_copy=True)
+                    return video
+                else:
+                    logger.debug(f"Failed to download video. {response.status}: {response.reason}")
+        # Retry if connection fails, some servers may have transient issues.
+        except aiohttp.ClientConnectorError:
+            if retry < 2:
+                await asyncio.sleep(2 ** retry)
+            continue
+        except Exception as e:
+            logger.debug(f"Error downloading video file from {video_url}"
+                        f"\n{type(e).__name__}: {e}")
+            break
+        
 
 
 async def download_hls_video(
@@ -190,7 +218,7 @@ async def download_hls_video(
 async def is_maybe_video_url(url: str, session: aiohttp.ClientSession) -> bool:
     """Returns True iff the URL points at an accessible video file/stream."""
     try:
-        headers = await fetch_headers(url, session, timeout=3)
+        headers = await fetch_headers(url, session, timeout=8)
         content_type = headers.get('Content-Type') or headers.get('content-type') or ''
         if content_type.startswith("video/") or content_type == "application/vnd.apple.mpegurl":
             # Surely a video
@@ -202,7 +230,7 @@ async def is_maybe_video_url(url: str, session: aiohttp.ClientSession) -> bool:
             )
 
     except Exception:
-        return False
+        return _looks_like_video_resource_url(url)
 
 
 async def _ffmpeg_remux_hls_to_mp4(playlist_url: str) -> Optional[bytes]:
