@@ -20,6 +20,29 @@ logger_yt_dlp.setLevel(logging.WARNING)
 logger_yt_dlp.addHandler(logging.StreamHandler(sys.stdout))
 
 
+def _run_ytdlp_sync(
+        url: str,
+        temp_path: str,
+        ydl_opts: dict[str, Any],
+) -> tuple[Optional[Video], Optional[dict[str, Any]]]:
+    """Synchronous yt-dlp extraction. Runs blocking I/O and must be called
+    via asyncio.to_thread so it does not stall the event loop."""
+    with YoutubeDL(ydl_opts) as ydl:
+        metadata = ydl.extract_info(url, download=True)
+
+    video = None
+    if ext := metadata.get("ext"):
+        try:
+            video = Video(file_path=temp_path + f".{ext}", source_url=url)
+            video.relocate(move_not_copy=True)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.warning(f"Could not load downloaded video: {e}")
+
+    return video, metadata
+
+
 async def download_video_with_ytdlp(
         url: str,
         session: aiohttp.ClientSession,
@@ -49,18 +72,8 @@ async def download_video_with_ytdlp(
             ydl_opts['format'] = 'best[height<=720]'
             ydl_opts['extractor_args'] = dict(youtube=dict(player_client=["default"]))
 
-        with YoutubeDL(ydl_opts) as ydl:
-            metadata = ydl.extract_info(url, download=True)
-
-        video = None
-        if ext := metadata.get("ext"):
-            try:
-                video = Video(file_path=temp_path + f".{ext}", source_url=url)
-                video.relocate(move_not_copy=True)
-            except FileNotFoundError:
-                pass
-            except Exception as e:
-                logger.warning(f"Could not load downloaded video: {e}")
+        # Run blocking yt-dlp work in a thread pool to avoid stalling the event loop.
+        video, metadata = await asyncio.to_thread(_run_ytdlp_sync, url, temp_path, ydl_opts)
 
         if video and max_video_size and video.size > max_video_size:
             logger.info(f"Removing video {video.reference} because it exceeds the maximum size "
@@ -137,9 +150,7 @@ async def get_content_with_ytdlp(
         **kwargs
 ) -> MultimodalSequence | None:
     """Retrieves video, thumbnail, and metadata using the powerful yt-dlp package."""
-    # Run the download in a separate thread to avoid blocking the event loop
-    coroutine = await asyncio.to_thread(download_video_with_ytdlp, url, session, **kwargs)
-    video, thumbnail, metadata = await coroutine
+    video, thumbnail, metadata = await download_video_with_ytdlp(url, session, **kwargs)
     if metadata:
         return await compose_data_to_sequence(metadata, video, thumbnail, platform)
     return None
