@@ -57,8 +57,6 @@ async def run_with_semaphore(tasks: Iterable[Awaitable],
         async with semaphore:
             return await t
 
-    print(progress_description, end="\r")
-
     tasks = [asyncio.create_task(limited_coroutine(task)) for task in tasks]
 
     # Report completion status of tasks (if more than one task)
