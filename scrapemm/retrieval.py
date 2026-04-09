@@ -40,6 +40,7 @@ BEST_METHODS = {
     "youtu.be": ["integrations"],
     "perma.cc": ["integrations"],
     "mvau.lt": ["integrations"],
+    "archive.org": ["integrations"],
     # Archive.today:
     "archive.today": ["integrations", "decodo"],
     "archive.is": ["integrations", "decodo"],

@@ -9,5 +9,6 @@ try:
     run_command(["ffmpeg", "-version"])
     ffmpeg_available = True
 except FileNotFoundError:
-    logger.warning("FFmpeg not found. Skipping video normalization.")
+    logger.warning("⚠️ FFmpeg not found. Won't normalize videos. If you want to enable it, please install FFmpeg "
+                   "via `conda install -c conda-forge ffmpeg`.")
     ffmpeg_available = False

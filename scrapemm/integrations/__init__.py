@@ -4,6 +4,7 @@ from ezmm import MultimodalSequence
 
 from scrapemm.integrations.mvault import MediaVault
 from scrapemm.util import get_domain
+from .archive_org import ArchiveOrg
 from .bluesky import Bluesky
 from .decodo import Decodo, decodo
 from .fb import Facebook
@@ -26,7 +27,8 @@ RETRIEVAL_INTEGRATIONS = [
     YouTube(),
     PermaCC(),
     ArchiveToday(),
-    MediaVault()
+    MediaVault(),
+    ArchiveOrg()
 ]
 DOMAIN_TO_INTEGRATION = {
     domain: integration

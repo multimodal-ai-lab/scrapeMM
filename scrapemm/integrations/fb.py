@@ -89,11 +89,11 @@ class Facebook(RetrievalIntegration):
 
     async def _get_photo(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from a Facebook photo URL."""
-        raise NotImplementedError("No available method to retrieve Facebook photos.")
+        raise NotImplementedError("No method available to retrieve Facebook photos.")
 
     async def _get_user_profile(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from a Facebook user profile URL."""
-        raise NotImplementedError("No available method to retrieve Facebook profiles.")
+        raise NotImplementedError("No method available to retrieve Facebook profiles.")
 
     def _normalize_url(self, url: str) -> str:
         """If the URL is a login Facebook URL, i.e., of the form https://www.facebook.com/login/?next=...

@@ -2,12 +2,13 @@ import logging
 from typing import Optional
 
 import aiohttp
+from atproto_client.exceptions import RequestErrorBase
 from ezmm import MultimodalSequence
 
+from scrapemm import ContentNotFoundError
 from scrapemm.download import download_video, download_image
-from scrapemm.secrets import get_secret
 from scrapemm.integrations.base import RetrievalIntegration
-from scrapemm.util import get_domain
+from scrapemm.secrets import get_secret
 
 logger = logging.getLogger("scrapeMM")
 
@@ -25,15 +26,11 @@ class Bluesky(RetrievalIntegration):
             self.connected = False
             return
 
-        from atproto import Client
-        self.client = Client()
-        self._authenticate()
+        from atproto import AsyncClient
+        self.client = AsyncClient()
+        await self._authenticate()
 
     async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
-        if get_domain(url) not in self.domains:
-            logger.error(f"❌ Invalid domain for Bluesky: {get_domain(url)}")
-            return None
-
         session = kwargs.get("session")
         max_video_size = kwargs.get("max_video_size")
         if "post" in url:
@@ -50,13 +47,13 @@ class Bluesky(RetrievalIntegration):
         max_video_size: int | None = None
     ) -> Optional[MultimodalSequence]:
         """Retrieve a post from the given Bluesky URL."""
-        uri = self._construct_uri(url)
+        uri = await self._construct_uri(url)
         if not uri:
-            logger.error(f"❌ Could not construct URI for Bluesky post: {url}")
+            logger.warning(f"Could not construct URI for Bluesky post: {url}")
             return None
 
         try:
-            thread_response = self.client.get_post_thread(uri=uri, depth=0, parent_height=0)
+            thread_response = await self.client.get_post_thread(uri=uri, depth=0, parent_height=0)
             thread = thread_response.thread
 
             if hasattr(thread, 'py_type'):
@@ -131,7 +128,7 @@ class Bluesky(RetrievalIntegration):
                 if hasattr(record.reply, 'parent') and hasattr(record.reply.parent, 'uri'):
                     parent_uri = record.reply.parent.uri
                     post_id = parent_uri.split('/')[-1]
-                    reply_to_post = self.client.get_posts([parent_uri]).posts[0]
+                    reply_to_post = (await self.client.get_posts([parent_uri])).posts[0]
                     reply_to_author = reply_to_post.author
                     reply_to = f"https://bsky.app/profile/{reply_to_author.handle}/post/{post_id}"
 
@@ -143,14 +140,17 @@ Likes: {like_count} - Comments: {comment_count} - Shares: {share_count}
 {post_text}"""
             return MultimodalSequence([text, *media])
 
-        except Exception as e:
-            err_msg = error_to_string(e)
-            logger.error(f"❌ Error retrieving Bluesky post: {err_msg}")
-            return None
+        except RequestErrorBase as e:
+            response = e.response
+            code = response.status_code
+            if code in [400, 404]:
+                raise ContentNotFoundError("Post is unavailable.")
+            else:
+                raise
 
     async def _retrieve_profile(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
         """Retrieve a profile from the given Bluesky URL."""
-        profile = self.client.get_profile(url.split('/')[-1])
+        profile = await self.client.get_profile(url.split('/')[-1])
 
         avatar = await download_image(profile.avatar, session) if profile.avatar else None
         banner = await download_image(profile.banner, session) if profile.banner else None
@@ -171,10 +171,10 @@ Metrics:
             """
         return MultimodalSequence(text)
 
-    def _authenticate(self) -> bool:
+    async def _authenticate(self) -> bool:
         """Authenticate with Bluesky using provided credentials."""
         try:
-            self.client.login(self.username, self.password)
+            await self.client.login(self.username, self.password)
             self.connected = True
             logger.info(f"✅ Successfully authenticated with Bluesky as {self.username}")
             return True
@@ -182,7 +182,7 @@ Metrics:
             logger.error(f"❌ Error authenticating with Bluesky: {str(e)}")
             return False
 
-    def _construct_uri(self, url: str) -> str:
+    async def _construct_uri(self, url: str) -> str | None:
         # Extract post URI from the URL - Bluesky URLs typically look like:
         # https://bsky.app/profile/username.bsky.social/post/abcdef123
         try:
@@ -205,7 +205,7 @@ Metrics:
             post_id = parts[profile_idx + 3]
 
             # Resolve the handle to a DID
-            did = self._resolve_handle(handle)
+            did = await self._resolve_handle(handle)
 
             # Construct the AT URI
             uri = f"at://{did}/app.bsky.feed.post/{post_id}"
@@ -216,10 +216,10 @@ Metrics:
             err_msg = error_to_string(e)
             logger.error(f"Error retrieving Bluesky post: {err_msg}")
 
-    def _resolve_handle(self, handle: str) -> str:
+    async def _resolve_handle(self, handle: str) -> str:
         """Resolve a handle to a DID."""
         try:
-            response = self.client.resolve_handle(handle)
+            response = await self.client.resolve_handle(handle)
             return response.did
         except Exception as e:
             err_msg = error_to_string(e)

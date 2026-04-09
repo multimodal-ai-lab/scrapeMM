@@ -108,8 +108,8 @@ async def test_download_m3u8(url):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url", [
-    "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4",
-    "https://commons.wikimedia.org/wiki/File:%22AFRTS_Professional_Recognition_1332%22,_Armed_Forces_Network.webm",
+    "https://samplelib.com/preview/mp4/sample-5s.mp4",
+    "https://upload.wikimedia.org/wikipedia/commons/e/ed/%22AFRTS_Professional_Recognition_1332%22%2C_Armed_Forces_Network.webm",
 ])
 async def test_download_mp4_webm(url):
     async with aiohttp.ClientSession(headers=HEADERS) as session:
