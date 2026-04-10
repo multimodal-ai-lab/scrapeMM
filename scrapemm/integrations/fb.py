@@ -126,14 +126,14 @@ class Facebook(RetrievalIntegration):
         cookies = parse_netscape_cookies(self.cookie_file)
 
         if self._is_post_permalink(url):
-            photos = await self._get_mm_sequences_from_post_permalink(
+            photos = await self._get_photos_from_post_permalink(
                 url, cookies, **kwargs
             )
             return MultimodalSequence(photos)
 
-        return await self._get_mm_sequence_from_regular_post(url, cookies)
+        return await self._get_photo_from_regular_post(url, cookies)
 
-    async def _get_mm_sequence_from_regular_post(
+    async def _get_photo_from_regular_post(
         self, url, cookies: list[dict[str, str]]
     ) -> MultimodalSequence | None:
         image_url = None
@@ -177,7 +177,7 @@ class Facebook(RetrievalIntegration):
 
         return MultimodalSequence([image, postprocessed_text])
 
-    async def _get_mm_sequences_from_post_permalink(
+    async def _get_photos_from_post_permalink(
         self, url: str, cookies: list[dict[str, str]], **kwargs
     ) -> list[Image]:
         """Retrieves all photos from a Facebook post permalink URL."""
@@ -203,7 +203,7 @@ class Facebook(RetrievalIntegration):
                 await browser.close()
 
             photos = [
-                await self._get_mm_sequence_from_regular_post(href, cookies)
+                await self._get_photo_from_regular_post(href, cookies)
                 for href in photo_hrefs
             ]
 
