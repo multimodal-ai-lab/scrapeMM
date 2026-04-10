@@ -38,5 +38,5 @@ class YouTube(RetrievalIntegration):
         """Downloads YouTube video or short using yt-dlp."""
         return await get_content_with_ytdlp(url,
                                             platform="YouTube",
-                                            cookie_file=self.cookie_file.as_posix(),
+                                            cookiefile=self.cookie_file.as_posix(),
                                             **kwargs)
