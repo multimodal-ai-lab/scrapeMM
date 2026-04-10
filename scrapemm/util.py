@@ -196,6 +196,7 @@ def decompose_data_uri(href: str) -> Optional[tuple[str, str]]:
 
 async def to_multimodal_sequence(
         html: str | None,
+        session: aiohttp.ClientSession,
         **kwargs
 ) -> Optional[MultimodalSequence]:
     """Turns a scraped output into the corresponding MultimodalSequences
@@ -206,7 +207,7 @@ async def to_multimodal_sequence(
         return None
 
     text = postprocess_scraped(text)
-    return await resolve_media_hyperlinks(text, **kwargs)
+    return await resolve_media_hyperlinks(text, session=session, **kwargs)
 
 
 def sanitize(text: str) -> str:
@@ -324,3 +325,37 @@ def run_command(cmd: list[str]) -> subprocess.CompletedProcess | None:
     except UnicodeDecodeError:
         logger.debug(f"Error running command {cmd}: Unicode decoding failed")
         return None
+
+def parse_netscape_cookies(cookie_file: Path) -> list[dict]:
+    """Parse the Netscape-format cookie file and return cookie dicts.
+
+    Netscape format fields (tab-separated):
+        domain  include_subdomains  path  is_secure  expiry  name  value
+    """
+    if not cookie_file.exists():
+        return []
+
+    cookies = []
+    with open(cookie_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 7:
+                continue
+            domain, _include_subdomains, path, is_secure, expiry, name, value = parts[:7]
+            try:
+                cookies.append({
+                    "name": name,
+                    "value": value,
+                    "domain": domain,
+                    "path": path,
+                    "expires": int(expiry),
+                    "httpOnly": False,
+                    "secure": is_secure.upper() == "TRUE",
+                    "sameSite": "None",
+                })
+            except ValueError:
+                continue
+    return cookies
