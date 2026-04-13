@@ -1,6 +1,5 @@
 pytest~=8.4.1
-aiohttp~=3.12.13
-numpy~=1.26.4
+aiohttp~=3.13.5
 requests~=2.32.4
 ezMM~=0.5.1
 Telethon~=1.40.0
@@ -13,12 +12,12 @@ async_lru
 oauthlib
 platformdirs~=4.3.8
 atproto
-TikTokResearchApi
-yt-dlp
+TikTokResearchApi~=1.0.4
 yt-dlp[default,curl-cffi]
+curl_cffi~=0.14.0b5  # yt-dlp doesn't support 0.15+ yet
 cryptography
 firecrawl-py~=4.10.4
-brotli
+brotli  # Required to read brotli-encoded media
 playwright
 playwright-stealth
 beautifulsoup4

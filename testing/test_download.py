@@ -27,7 +27,8 @@ from scrapemm.download.videos import is_maybe_video_url
     ("https://platform.vox.com/wp-content/uploads/sites/2/2025/04/jack-black-wink-minecraft.avif?quality=90&strip=all&crop=12.5%2C0%2C75%2C100&w=2400",
      True),
     ("https://media.cnn.com/api/v1/images/stellar/prod/02-overview-of-kursk-training-area-15april2025-wv2.jpg?q=w_1110,c_fill",
-     True)
+     True),
+    ("https://mediaproxy.snopes.com/width/1200/https://media.snopes.com/2024/01/origin_of_gauze.jpg", True)
 ])
 @pytest.mark.asyncio
 async def test_is_image_url(url, expected):
@@ -47,6 +48,7 @@ async def download_img(url):
     "https://www.washingtonpost.com/wp-apps/imrs.php?src=https://arc-anglerfish-washpost-prod-washpost.s3.amazonaws.com/public/MBWA4LJ5XLVC6CJLZG2OQFMGWE.JPG&w=1440&impolicy=high_res",
     "https://factuel.afp.com/sites/default/files/styles/header_article/public/medias/factchecking/g2/2025-07/c1452a5562cfe3e178b0d5c6681c940e-fr.jpeg?itok=a9Wc3hEY",
     "https://archive.is/uTVE4/da2c6541801809f1b665e8992f7d214621ec9443/scr.png",
+    "https://mediaproxy.snopes.com/width/1200/https://media.snopes.com/2024/01/origin_of_gauze.jpg",
 ])
 async def test_download_image(url):
     img = await download_img(url)

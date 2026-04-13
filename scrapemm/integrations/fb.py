@@ -8,6 +8,7 @@ from ezmm.common.items import Image
 from markdownify import markdownify as md
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
+from yt_dlp.networking.impersonate import ImpersonateTarget
 
 from scrapemm import RateLimitError
 from scrapemm.common import CONFIG_DIR
@@ -116,8 +117,8 @@ class Facebook(RetrievalIntegration):
             return await get_content_with_ytdlp(
                 url,
                 platform="Facebook",
-                cookiefile=self.cookie_file.as_posix(),
-                # impersonate=ImpersonateTarget("Chrome", "136"),
+                # cookiefile=self.cookie_file.as_posix(),
+                impersonate=ImpersonateTarget("chrome", "133"),
                 **kwargs,
             )
 
