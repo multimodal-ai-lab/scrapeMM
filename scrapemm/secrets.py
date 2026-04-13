@@ -155,6 +155,7 @@ def remove_secret(key_name: str):
     data = _load_secrets()
     data.pop(key_name, None)
     _save_secrets(data)
+    logger.info(f"Removed secret {key_name}.")
 
 
 def configure_secrets(all_keys: bool = False):

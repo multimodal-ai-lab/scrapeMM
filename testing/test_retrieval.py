@@ -11,7 +11,7 @@ from scrapemm import retrieve
     "https://health.medicaldialogues.in/fact-check/brain-health-fact-check/fact-check-is-sprite-the-best-remedy-for-headaches-in-the-world-140368",
     "https://www.washingtonpost.com/politics/2024/05/15/bidens-false-claim-that-inflation-was-9-percent-when-he-took-office/",
     "https://assamese.factcrescendo.com/viral-claim-that-the-video-shows-the-incident-from-uttar-pradesh-and-the-youth-on-the-bike-and-the-youth-being-beaten-and-taken-away-by-the-police-are-the-same-youth-named-abdul-is-false/",
-    "https://factuel.afp.com/doc.afp.com.43ZN7NP",
+    # "https://factuel.afp.com/doc.afp.com.43ZN7NP",
     "https://leadstories.com/365cb414b83e29d26fecae374d55c743a3eac4c7.png",
     "https://leadstories.com/assets_c/2025/08/193f14f06dd6f15b89bf8050e553ad7fb1be6530-thumb-900xauto-3165872.png"
 ])

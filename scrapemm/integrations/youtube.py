@@ -36,7 +36,9 @@ class YouTube(RetrievalIntegration):
 
     async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
         """Downloads YouTube video or short using yt-dlp."""
+        cookie = get_secret("youtube_cookie")
+        cookie_file_path = self.cookie_file.as_posix() if cookie else None
         return await get_content_with_ytdlp(url,
                                             platform="YouTube",
-                                            cookie_file=self.cookie_file.as_posix(),
+                                            cookiefile=cookie_file_path,
                                             **kwargs)

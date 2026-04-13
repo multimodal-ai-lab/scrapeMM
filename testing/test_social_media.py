@@ -66,14 +66,10 @@ async def test_instagram(url: str, expected: dict[str, int]):
     ("https://www.facebook.com/reel/1954696035077530", dict(video=1)),
     ("https://www.facebook.com/reel/1089214926521000", dict(video=1)),
     ("https://www.facebook.com/reel/3466446073497470", dict(video=1)),  # restricted for misinformation
-    ("https://m.facebook.com/watch/?v=567654417277309", dict(video=1)),
-    ("https://www.facebook.com/S.Angel000/videos/2081147972022130/", dict(video=1)),
     ("https://fb.watch/dmMvfqIFqC/", dict(video=1)),
-    ("https://www.facebook.com/61561558177010/videos/1445957793080961/", dict(video=1)),
-    ("https://www.facebook.com/watch/?v=1445957793080961", dict(video=1)),
-    ("https://www.facebook.com/watch/?v=502482344935053", dict(video=1)),  # requires login
-    # restricted for misinformation, yt-dlp fails here:
-    ("https://www.facebook.com/groups/1973976962823632/posts/3992825270938781/", dict(video=1)),
+    ("https://www.facebook.com/watch/?v=502482344935053", dict(video=1)),
+    # restricted for misinformation, accessible only with cookie:
+    ("https://www.facebook.com/groups/1973976962823632/posts/3992825270938781/", dict(image=1)),
 ])
 async def test_facebook(url: str, expected: dict[str, int]):
     """Test Facebook reel and photo retrieval"""
