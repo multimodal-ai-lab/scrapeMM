@@ -173,7 +173,7 @@ def configure_secrets(all_keys: bool = False):
 
     logger.info("API keys configured successfully! If you want to change them, go to "
                 f"{CONFIG_PATH.as_posix()} and set 'api_keys_configured' to 'false' or "
-                f"run scrapemm.api_keys.configure_api_keys().")
+                f"run scrapemm.secrets.configure_secrets().")
 
 
 # Ensure secrets file exists
