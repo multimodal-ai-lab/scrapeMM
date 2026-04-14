@@ -13,5 +13,6 @@ telegram.me
 twitter.com
 x.com
 t.co
-snopes.com
 perma.cc
+washingtonpost.com
+indiatoday.in

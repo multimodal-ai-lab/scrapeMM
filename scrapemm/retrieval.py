@@ -1,5 +1,6 @@
 import logging
 import sqlite3
+import time
 from traceback import format_exc
 from typing import Collection, Literal
 
@@ -35,7 +36,6 @@ BEST_METHODS = {
     "truthsocial.com": ["firecrawl"],
     "reddit.com": ["integrations"],
     "awesomescreenshot.com": ["firecrawl"],
-    "snopes.com": ["decodo"],
     "youtube.com": ["integrations"],
     "youtu.be": ["integrations"],
     "perma.cc": ["integrations"],
@@ -60,6 +60,7 @@ async def retrieve(
         methods: Literal["auto"] | list[str] | list[Literal["auto"] | list[str]] | None = "auto",
         format: str = "multimodal_sequence",
         max_video_size: int | None = None,
+        prioritize: Literal["completeness", "speed"] = "completeness"
 ) -> ScrapingResponse | list[ScrapingResponse]:
     """Main function of this repository. Downloads the contents present at the given URL(s).
     For each URL, returns a ScrapingResponse containing the retrieved content, error, and method.
@@ -84,6 +85,9 @@ async def retrieve(
         - "multimodal_sequence" (MultimodalSequence containing parsed and downloaded media from the page)
         - "html" (string containing the raw HTML code of the page, not compatible with 'integrations' method)
     :param max_video_size: Maximum size of videos to download, in MB. If None, no limit is applied.
+    :param prioritize: Prioritization strategy for retrieval. Available options:
+        - "completeness": Higher timeout limits and more retries.
+        - "speed": Lower timeout limits and fewer retries.
     """
     # Ensure URLs are string or list
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
@@ -119,9 +123,9 @@ async def retrieve(
     async with aiohttp.ClientSession(headers=HEADERS) as session:
         # Retrieve URLs concurrently
         tasks = [_retrieve_single(url, remove_urls, session, url_to_methods[url], actions,
-                                  format, max_video_size) for url in
+                                  format, max_video_size, prioritize) for url in
                  urls_unique]
-        results = await run_with_semaphore(tasks, limit=20, show_progress=show_progress and len(urls_unique) > 1,
+        results = await run_with_semaphore(tasks, limit=40, show_progress=show_progress and len(urls_unique) > 1,
                                            progress_description="Retrieving URLs...")
 
         # Reconstruct output list
@@ -140,12 +144,15 @@ async def _retrieve_single(
         actions: list[dict] | None = None,
         format: str = "multimodal_sequence",
         max_video_size: int | None = None,
+        prioritize: Literal["completeness", "speed"] = "completeness"
 ) -> ScrapingResponse:
     logger.debug(f"Retrieving {url}")
+    start_time = time.time()
 
     if get_domain(url) in UNSUPPORTED_DOMAINS:
         return ScrapingResponse(url=url, content=None,
-                                errors=dict(scrapemm=UnsupportedDomainError("Unsupported domain.")))
+                                errors=dict(scrapemm=UnsupportedDomainError("Unsupported domain.")),
+                                retrieval_time=time.time() - start_time)
 
     if methods is None:
         methods = METHODS.copy()
@@ -167,14 +174,18 @@ async def _retrieve_single(
         # Try to download as medium
         if format != "html":
             if medium := await download_medium(url, session=session):
-                return ScrapingResponse(url=url, content=MultimodalSequence(medium), method="ezmm")
+                return ScrapingResponse(url=url, content=MultimodalSequence(medium), method="ezmm",
+                                        retrieval_time=time.time() - start_time)
 
         # Find available integrations TODO: Propagate name of actual integration to ScrapingResponse
         method_map = {
             "integrations": lambda: retrieve_via_integration(url, session=session, max_video_size=max_video_size),
             "firecrawl": lambda: fire.scrape(url, remove_urls=remove_urls,
                                              session=session, format=format, actions=actions),
-            "decodo": lambda: decodo.scrape(url, remove_urls, session, format=format),
+            "decodo": lambda: decodo.scrape(url, remove_urls, session,
+                                            format=format,
+                                            timeout=10 if prioritize == "speed" else 30,
+                                            max_retries=1 if prioritize == "speed" else 5),
         }
 
         result = None
@@ -182,7 +193,7 @@ async def _retrieve_single(
 
     except Exception as e:
         logger.error(f"Error while preparing retrieval for '{url}'.\n" + format_exc())
-        return ScrapingResponse(url=url, content=None, errors=dict(all=e))
+        return ScrapingResponse(url=url, content=None, errors=dict(all=e), retrieval_time=time.time() - start_time)
 
     # Try each method in the specified order until one succeeds
     for method_name in methods:
@@ -222,11 +233,12 @@ async def _retrieve_single(
             logger.debug(f"Successfully retrieved with method: {method_name}")
             if isinstance(result, MultimodalSequence):
                 postprocess_media(result)
-            return ScrapingResponse(url=url, content=result, method=method_name)
+            return ScrapingResponse(url=url, content=result, method=method_name,
+                                    retrieval_time=time.time() - start_time)
 
     # All methods failed
     logger.warning(f"All retrieval methods failed for URL: {url}")
-    return ScrapingResponse(url=url, content=None, errors=errors)
+    return ScrapingResponse(url=url, content=None, errors=errors, retrieval_time=time.time() - start_time)
 
 
 def postprocess_media(result: MultimodalSequence):

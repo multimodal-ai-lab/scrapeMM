@@ -13,6 +13,11 @@ from scrapemm.integrations.decodo.html_postprocessor import domain_to_postproces
 
 logger = logging.getLogger("scrapeMM")
 
+# Domains which require more advanced scraping
+PREMIUM_PROXY_DOMAINS = {
+    "snopes.com"
+}
+
 
 class Decodo:
     """Scrapes web content using Decodo's Web Scraping API with proxy support
@@ -40,12 +45,13 @@ class Decodo:
         return bool(self.username and self.password)
 
     async def scrape(
-        self, url: str,
-        remove_urls: bool,
-        session: aiohttp.ClientSession,
-        format: str,
-        enable_js: bool = True,
-        timeout: int = 30,
+            self, url: str,
+            remove_urls: bool,
+            session: aiohttp.ClientSession,
+            format: str,
+            enable_js: bool = True,
+            timeout: int = 30,
+            max_retries: int = 5
     ) -> Optional[MultimodalSequence | str]:
         """Downloads the contents of the specified webpage using Decodo's API.
 
@@ -55,6 +61,7 @@ class Decodo:
             session: The aiohttp ClientSession to use
             enable_js: Whether to enable JavaScript rendering (default: True)
             timeout: Request timeout in seconds (default: 30)
+            max_retries: Maximum number of retries for failed requests (default: 5)
 
         Returns:
             MultimodalSequence containing the scraped content, or None if scraping failed
@@ -66,17 +73,22 @@ class Decodo:
             logger.warning("Cannot scrape with Decodo: credentials not configured.")
             return None
 
+        domain = get_domain(url)
+        use_premium_proxy = domain in PREMIUM_PROXY_DOMAINS
+
         # Try with JS rendering first if enabled
-        html = await self._call_decodo(url, session, enable_js, timeout)
+        html = await self._call_decodo(url, session, enable_js, timeout=timeout, max_retries=max_retries,
+                                       use_premium_proxy=use_premium_proxy)
 
         # If it failed with JS and we got a 400 error, try without JS
         # (400 might mean the plan doesn't support headless rendering)
-        if html is None and enable_js:
-            logger.debug("Retrying without JavaScript rendering...")
-            html = await self._call_decodo(url, session, enable_js=False, timeout=timeout)
+        # if html is None and enable_js:
+        #     logger.debug("Retrying without JavaScript rendering...")
+        #     html = await self._call_decodo(url, session, enable_js=False, timeout=timeout, max_retries=max_retries,
+        #                                    use_premium_proxy=use_premium_proxy)
 
         if html:
-            
+
             # Apply domain-specific post-processing if available (e.g. for Archive.today)
             if domain := get_domain(url):
                 post_processor = domain_to_postprocessor.get(domain, None)
@@ -89,11 +101,12 @@ class Decodo:
         return None
 
     async def _call_decodo(
-        self, url: str,
-        session: aiohttp.ClientSession,
-        enable_js: bool = True,
-        timeout: int = 10,
-        max_retries: int = 5
+            self, url: str,
+            session: aiohttp.ClientSession,
+            enable_js: bool = True,
+            timeout: int = 10,
+            max_retries: int = 5,
+            use_premium_proxy: bool = False
     ) -> Optional[str]:
         """Calls the Decodo API to scrape the given URL with exponential backoff retry logic.
 
@@ -103,6 +116,8 @@ class Decodo:
             enable_js: Whether to enable JavaScript rendering
             timeout: Request timeout in seconds
             max_retries: Maximum number of retry attempts for rate limits (default: 5)
+            use_premium_proxy: Whether to use premium proxies for scraping (default: False). Increases
+                success rate but also increases cost (by a factor of 2 or more)
 
         Returns:
             HTML content as a string, or None if scraping failed
@@ -123,6 +138,9 @@ class Decodo:
         if enable_js:
             payload["headless"] = "html"
 
+        if use_premium_proxy:
+            payload["proxy_pool"] = "premium"
+
         # Create basic auth
         auth = aiohttp.BasicAuth(self.username, self.password)
 
@@ -130,11 +148,11 @@ class Decodo:
         for attempt in range(max_retries + 1):
             try:
                 async with session.post(
-                    self.DECODO_API_URL,
-                    json=payload,
-                    headers=headers,
-                    auth=auth,
-                    timeout=aiohttp.ClientTimeout(total=timeout)
+                        self.DECODO_API_URL,
+                        json=payload,
+                        headers=headers,
+                        auth=auth,
+                        timeout=aiohttp.ClientTimeout(total=timeout)
                 ) as response:
                     # Validate response health
                     if response.status != 200:
@@ -150,13 +168,15 @@ class Decodo:
                         elif response.status == 502:  # Bad gateway
                             if attempt >= max_retries:
                                 logger.warning(f"Error 502: Bad gateway and maximum retries reached.")
-                                raise RuntimeError(f"Decodo API error 502: Bad gateway (despite {max_retries} retries).")
+                                raise RuntimeError(
+                                    f"Decodo API error 502: Bad gateway (despite {max_retries} retries).")
 
                         else:  # Other errors that don't go away on retry
                             match response.status:
                                 case 400:
-                                    logger.debug("Error 400: Bad request. If you use JavaScript, make sure you have the "
-                                                 "Advanced plan subscription.")
+                                    logger.debug(
+                                        "Error 400: Bad request. If you use JavaScript, make sure you have the "
+                                        "Advanced plan subscription.")
                                 case 401:
                                     logger.error("Error 401: Unauthorized. Check your Decodo credentials.")
                                 case 402:

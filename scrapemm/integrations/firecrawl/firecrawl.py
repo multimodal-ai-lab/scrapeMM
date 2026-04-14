@@ -26,6 +26,9 @@ if config_url := get_config_var("firecrawl_url"):
 NO_BOT_DOMAINS_FILE_PATH = Path(__file__).parent / "no_bot_domains.txt"
 NO_BOT_DOMAINS = read_urls_from_file(NO_BOT_DOMAINS_FILE_PATH)
 
+NO_AD_BLOCKING_DOMAINS = {
+    "snopes.com"
+}
 
 async def locate_firecrawl() -> str:
     """Scans a list of URLs (included the user-specified one) to find a
@@ -74,8 +77,10 @@ class Firecrawl:
                      format: str,
                      max_attempts: int = 3,
                      **kwargs) -> Optional[MultimodalSequence | str]:
-        if is_no_bot_site(url):
-            raise ValueError(f"Firecrawl cannot scrape sites from {get_domain(url)}")
+
+        domain = get_domain(url)
+        if domain in NO_BOT_DOMAINS:
+            raise ValueError(f"Firecrawl cannot scrape sites from {domain}")
 
         if not self._firecrawl:
             await self.connect()
@@ -96,6 +101,7 @@ class Firecrawl:
                     timeout=30_000,
                     wait_for=1_000,
                     store_in_cache=False,
+                    block_ads=not domain in NO_AD_BLOCKING_DOMAINS,
                     **kwargs
                 )
                 break
@@ -139,12 +145,6 @@ class Firecrawl:
 
 
 fire = Firecrawl()
-
-
-def is_no_bot_site(url: str) -> bool:
-    """Checks if the URL belongs to a known unsupported website."""
-    domain = get_domain(url)
-    return domain is None or domain.endswith(".gov") or domain in NO_BOT_DOMAINS
 
 
 async def find_firecrawl(urls):

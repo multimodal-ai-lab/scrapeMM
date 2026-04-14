@@ -10,6 +10,7 @@ class ScrapingResponse:
     content: Optional[MultimodalSequence | str]  # The retrieved content. None if retrieval failed.
     errors: dict[str, Optional[Exception]] | None = None  # The exceptions raised during retrieval for each method
     method: Optional[str] = None  # The successful method used to retrieve the content
+    retrieval_time: Optional[float] = None  # Time in seconds for retrieving this URL
 
     @property
     def successful(self):
