@@ -9,8 +9,8 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-from scrapemm.common import get_config_var, update_config, CONFIG_PATH, CONFIG_DIR
-from scrapemm.util import get_multiline_user_input
+from scrapemm.common import get_config_var, update_config, CONFIG_DIR
+from scrapemm.util import get_user_input
 
 logger = logging.getLogger("scrapeMM")
 
@@ -23,8 +23,7 @@ SECRETS = {
     "bluesky_password": "Bluesky password",
     "tiktok_client_key": "TikTok client key",
     "tiktok_client_secret": "TikTok client secret",
-    "decodo_username": "Decodo Web Scraping API username",
-    "decodo_password": "Decodo Web Scraping API password",
+    "decodo_token": "Decodo Web Scraping API basic authentication token",
     "youtube_cookie": "YouTube cookie string",
     "facebook_cookie": "Facebook cookie string",
 }
@@ -144,9 +143,9 @@ def override_secret(key_name: str):
     when nothing entered."""
     description = SECRETS[key_name]
     if key_name in ["youtube_cookie", "facebook_cookie"]:
-        user_input = get_multiline_user_input(f"Please enter the {description}. Hit Ctrl-D or Ctrl-Z to save it.")
+        user_input = get_user_input(f"Please enter the {description} (Alt+Enter to submit):", multiline=True)
     else:
-        user_input = getpass(f"Please enter the {description} (leave empty to skip): ", stream=sys.stdout)
+        user_input = get_user_input(f"Please enter the {description} (leave empty to skip):")
     if user_input:
         set_secret(key_name, user_input)
 
@@ -171,8 +170,7 @@ def configure_secrets(all_keys: bool = False):
 
     update_config(api_keys_configured=True)
 
-    logger.info("API keys configured successfully! If you want to change them, go to "
-                f"{CONFIG_PATH.as_posix()} and set 'api_keys_configured' to 'false' or "
+    logger.info("API keys configured successfully! If you want to change them, "
                 f"run scrapemm.secrets.configure_secrets().")
 
 

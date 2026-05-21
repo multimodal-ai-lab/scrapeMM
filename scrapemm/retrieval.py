@@ -41,6 +41,8 @@ BEST_METHODS = {
     "perma.cc": ["integrations"],
     "mvau.lt": ["integrations"],
     "archive.org": ["integrations"],
+    "verafiles.org": ["decodo", "firecrawl"],
+    "youturn.in": ["decodo"],
     # Archive.today:
     "archive.today": ["integrations", "decodo"],
     "archive.is": ["integrations", "decodo"],
@@ -184,7 +186,7 @@ async def _retrieve_single(
                                              session=session, format=format, actions=actions),
             "decodo": lambda: decodo.scrape(url, remove_urls, session,
                                             format=format,
-                                            timeout=10 if prioritize == "speed" else 30,
+                                            timeout=15 if prioritize == "speed" else 30,
                                             max_retries=1 if prioritize == "speed" else 5),
         }
 
@@ -226,7 +228,7 @@ async def _retrieve_single(
 
         except Exception as e:
             logger.warning(f"Error while retrieving with method '{method_name}': {e}")
-            errors[method_name] = e
+            errors[method_name] = f"{type(e).__name__}: {e}"
             result = None
 
         if result is not None:

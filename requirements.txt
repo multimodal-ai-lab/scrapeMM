@@ -23,3 +23,4 @@ playwright-stealth
 beautifulsoup4
 pip-system-certs  # For better SSL certificate handling
 backports.zstd  # For better content parsing with Firecrawl
+prompt_toolkit  # For handling user terminal input

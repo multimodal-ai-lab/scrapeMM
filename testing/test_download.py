@@ -28,7 +28,8 @@ from scrapemm.download.videos import is_maybe_video_url
      True),
     ("https://media.cnn.com/api/v1/images/stellar/prod/02-overview-of-kursk-training-area-15april2025-wv2.jpg?q=w_1110,c_fill",
      True),
-    ("https://mediaproxy.snopes.com/width/1200/https://media.snopes.com/2024/01/origin_of_gauze.jpg", True)
+    ("https://mediaproxy.snopes.com/width/1200/https://media.snopes.com/2024/01/origin_of_gauze.jpg", True),
+    ("https://s4.tvp.pl/images2/4/2/1/uid_421d015507a14c7b8298fa848b9d59ec_width_900_play_0_pos_0_gs_0_height_506.png", True)
 ])
 @pytest.mark.asyncio
 async def test_is_image_url(url, expected):

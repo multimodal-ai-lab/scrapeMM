@@ -26,23 +26,21 @@ class Decodo:
     DECODO_API_URL = "https://scraper-api.decodo.com/v2/scrape"
 
     def __init__(self):
-        self.username = None
-        self.password = None
+        self.basic_auth_token = None
         self.n_scrapes = 0
 
-    def _load_credentials(self):
+    def _load_token(self):
         """Loads Decodo credentials from the secrets manager."""
-        self.username = get_secret("decodo_username")
-        self.password = get_secret("decodo_password")
+        self.basic_auth_token = get_secret("decodo_token")
 
-        if self.username and self.password:
-            logger.info("✅ Decodo credentials loaded successfully.")
+        if self.basic_auth_token:
+            logger.info("✅ Decodo token set.")
         else:
-            logger.warning("⚠️ Decodo credentials not found. Please configure them in secrets.")
+            logger.warning("⚠️ Decodo auth token not found. Please configure it in secrets.")
 
-    def _has_credentials(self) -> bool:
+    def _has_token(self) -> bool:
         """Checks if Decodo credentials are available."""
-        return bool(self.username and self.password)
+        return bool(self.basic_auth_token)
 
     async def scrape(
             self, url: str,
@@ -66,10 +64,10 @@ class Decodo:
         Returns:
             MultimodalSequence containing the scraped content, or None if scraping failed
         """
-        if not self._has_credentials():
-            self._load_credentials()
+        if not self._has_token():
+            self._load_token()
 
-        if not self._has_credentials():
+        if not self._has_token():
             logger.warning("Cannot scrape with Decodo: credentials not configured.")
             return None
 
@@ -124,6 +122,7 @@ class Decodo:
         """
         headers = {
             'Content-Type': 'application/json',
+            'Authorization': f'Basic {self.basic_auth_token}',
         }
 
         # Build request payload
@@ -141,9 +140,6 @@ class Decodo:
         if use_premium_proxy:
             payload["proxy_pool"] = "premium"
 
-        # Create basic auth
-        auth = aiohttp.BasicAuth(self.username, self.password)
-
         # Retry loop with exponential backoff
         for attempt in range(max_retries + 1):
             try:
@@ -151,12 +147,11 @@ class Decodo:
                         self.DECODO_API_URL,
                         json=payload,
                         headers=headers,
-                        auth=auth,
                         timeout=aiohttp.ClientTimeout(total=timeout)
                 ) as response:
                     # Validate response health
                     if response.status != 200:
-                        logger.debug("Communication with Decodo API failed.")
+                        logger.debug(f"Communication with Decodo API failed. Status code: {response.status}")
 
                         if response.status == 429:  # Rate limit
                             if attempt >= max_retries:

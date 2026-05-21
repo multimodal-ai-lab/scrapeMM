@@ -38,7 +38,7 @@ def get_domain(url: str, keep_subdomain: bool = False) -> Optional[str]:
 async def run_with_semaphore(tasks: Iterable[Awaitable],
                              limit: int,
                              show_progress: bool = True,
-                             progress_description: str | None = None) -> list:
+                             progress_description: str | None = None) -> tuple:
     """
     Runs asynchronous tasks with a concurrency limit.
 
@@ -76,10 +76,32 @@ def read_urls_from_file(file_path):
         return f.read().splitlines()
 
 
-def get_multiline_user_input(prompt: str) -> str:
-    print(prompt)
-    lines = sys.stdin.readlines()
-    return "".join(lines)
+def get_user_input(prompt: str, multiline: bool = False) -> str:
+    """Prompts the user for input.
+    - Single-line: uses standard input(); Enter submits, empty input skips.
+    - Multiline: uses prompt_toolkit; Enter adds newline, Alt+Enter submits.
+    """
+    if multiline:
+        from prompt_toolkit import prompt as pt_prompt
+        from prompt_toolkit.key_binding import KeyBindings
+
+        print(prompt)
+
+        bindings = KeyBindings()
+
+        @bindings.add('escape', 'enter')
+        def _submit(event):
+            event.current_buffer.validate_and_handle()
+
+        result = pt_prompt(
+            ">>> ",
+            multiline=True,
+            key_bindings=bindings,
+            prompt_continuation="... ",
+        )
+        return result
+    else:
+        return input(f"{prompt} ")
 
 
 MAX_MEDIA_PER_PAGE = 32
@@ -127,7 +149,7 @@ async def resolve_media_hyperlinks(
 
     # Try to download media for each URL
     tasks = [download_medium(u, session=session, headers={"Referer": url}) for u in hrefs_urls.values()]
-    media: list[Item | None] = await run_with_semaphore(tasks, limit=100, show_progress=False)
+    media: tuple[Item | None] = await run_with_semaphore(tasks, limit=100, show_progress=False)
 
     href_media = dict(zip(hrefs_urls.keys(), media))
 
