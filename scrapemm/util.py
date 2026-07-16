@@ -54,8 +54,13 @@ async def run_with_semaphore(tasks: Iterable[Awaitable],
     semaphore = asyncio.Semaphore(limit)  # Limit concurrent executions
 
     async def limited_coroutine(t: Awaitable):
-        async with semaphore:
-            return await t
+        try:
+            async with semaphore:
+                return await t
+        except asyncio.CancelledError:
+            if hasattr(t, "close"):
+                t.close()
+            raise
 
     tasks = [asyncio.create_task(limited_coroutine(task)) for task in tasks]
 
