@@ -1,7 +1,7 @@
 import logging
-import re
+import os
+import sys
 from typing import Optional
-from urllib.parse import urlparse, parse_qs
 
 import aiohttp
 from ezmm import MultimodalSequence
@@ -10,8 +10,6 @@ from playwright_stealth import Stealth
 
 from scrapemm.download.common import HEADERS
 from scrapemm.integrations.base import RetrievalIntegration
-from scrapemm.integrations.decodo import decodo
-from scrapemm.secrets import get_secret
 from scrapemm.util import to_multimodal_sequence
 
 logger = logging.getLogger("scrapeMM")
@@ -23,75 +21,6 @@ INLINE_CONCURRENCY = 6
 
 PERMA_CC_API_BASE = "https://api.perma.cc/v1/public/archives"
 
-
-def _extract_guid(url: str) -> Optional[str]:
-    """Extract the Perma.cc GUID (e.g. 'N8MR-NS96') from a perma.cc URL."""
-    match = re.search(r"perma\.cc/([A-Za-z0-9]+-[A-Za-z0-9]+)", url)
-    return match.group(1) if match else None
-
-
-def _is_screenshot_request(url: str) -> bool:
-    """Check if the URL explicitly requests the screenshot view (?type=image)."""
-    parsed = urlparse(url)
-    params = parse_qs(parsed.query)
-    return params.get("type", [None])[0] == "image"
-
-
-async def _get_archive_metadata(guid: str, session: aiohttp.ClientSession) -> Optional[dict]:
-    """Fetch archive metadata from Perma.cc's public API."""
-    api_url = f"{PERMA_CC_API_BASE}/{guid}/"
-    try:
-        async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            if resp.status == 200:
-                return await resp.json()
-            else:
-                logger.debug(f"Perma.cc API returned status {resp.status} for GUID {guid}")
-    except Exception as e:
-        logger.debug(f"Failed to fetch Perma.cc API metadata: {e}")
-    return None
-
-
-def _extract_iframe_src(html: str) -> Optional[str]:
-    """Extract the rejouer.perma.cc iframe src URL from the Perma.cc wrapper HTML."""
-    # Match iframe with class "archive-iframe" or src containing rejouer.perma.cc
-    patterns = [
-        re.compile(r'<iframe[^>]+class=["\'][^"\']*archive-iframe[^"\']*["\'][^>]+src=["\']([^"\']+)["\']', re.IGNORECASE),
-        re.compile(r'<iframe[^>]+src=["\']([^"\']*rejouer\.perma\.cc[^"\']+)["\']', re.IGNORECASE),
-    ]
-    for pattern in patterns:
-        match = pattern.search(html)
-        if match:
-            url = match.group(1)
-            # Unescape HTML entities
-            url = url.replace("&amp;", "&")
-            return url
-    return None
-
-
-def _extract_screenshot_img_url(html: str, guid: str) -> Optional[str]:
-    """Extract the actual screenshot image URL from the Perma.cc screenshot page HTML.
-
-    The page embeds the screenshot in an <img> tag whose src points to
-    something like: https://rejouer.perma.cc/replay-web-page/w/.../mp_/file:///GUID/cap.png
-    """
-    # Look for img src containing the GUID or cap.png
-    patterns = [
-        # Match src with the GUID in the path
-        re.compile(r'<img[^>]+src=["\']([^"\']*' + re.escape(guid) + r'[^"\']*cap\.png[^"\']*)["\']', re.IGNORECASE),
-        # Match any src on rejouer.perma.cc
-        re.compile(r'<img[^>]+src=["\']([^"\']*rejouer\.perma\.cc[^"\']*)["\']', re.IGNORECASE),
-        # Match any src containing cap.png
-        re.compile(r'<img[^>]+src=["\']([^"\']*cap\.png[^"\']*)["\']', re.IGNORECASE),
-        # Fallback: any img src that looks like a full URL
-        re.compile(r'<img[^>]+src=["\'](https?://[^"\']+)["\']', re.IGNORECASE),
-    ]
-    for pattern in patterns:
-        match = pattern.search(html)
-        if match:
-            return match.group(1)
-    return None
-
-
 class PermaCC(RetrievalIntegration):
     name = "Perma.cc"
     domains = ["perma.cc"]
@@ -101,95 +30,13 @@ class PermaCC(RetrievalIntegration):
         self.connected = True
 
     async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
-        guid = _extract_guid(url)
-        if not guid:
-            raise RuntimeError(f"Could not extract Perma.cc GUID from URL: {url}")
-
         async with aiohttp.ClientSession(headers=HEADERS) as session:
-            # Fetch archive metadata to get the original URL
-            metadata = await _get_archive_metadata(guid, session)
-            original_url = None
-            if metadata:
-                # Top-level "url" field
-                original_url = metadata.get("url")
-                # Fallback: extract from captures array (role=primary)
-                if not original_url:
-                    for capture in metadata.get("captures", []):
-                        if capture.get("role") == "primary" and capture.get("url"):
-                            original_url = capture["url"]
-                            break
-                logger.debug(f"Perma.cc metadata keys: {list(metadata.keys())}, original_url={original_url}")
-
-            # Strategy 1: Scrape the ORIGINAL URL via Decodo (media URLs will be normal)
-            if original_url:
-                logger.debug(f"Perma.cc archive of: {original_url}")
-                result = await _scrape_original_via_decodo(original_url, session)
-                if result and _has_media(result):
-                    return result
-
-            # Strategy 2: Scrape the Perma.cc page itself via Decodo and download media
-            html = await _get_html_via_decodo(url, session)
-            if html:
-                result = await to_multimodal_sequence(html, remove_urls=False, session=session, url=url)
-                if result and _has_media(result):
-                    return result
-
-            # Strategy 3: Use Playwright with media inlining (handles session-bound URLs)
+            # Use Playwright with media inlining (handles session-bound URLs)
             html = await get_record_html(url)
             if html:
                 return await to_multimodal_sequence(html, remove_urls=False, session=session, url=url)
 
-            # Strategy 4: Return Decodo text-only result if we got one earlier
-            if original_url:
-                result = await _scrape_original_via_decodo(original_url, session)
-                if result:
-                    return result
-
             raise RuntimeError("Failed to retrieve Perma.cc record.")
-
-
-def _has_media(seq: MultimodalSequence) -> bool:
-    """Check if a MultimodalSequence contains any images or videos."""
-    return bool(seq.images or seq.videos)
-
-
-async def _scrape_original_via_decodo(
-        original_url: str, session: aiohttp.ClientSession
-) -> Optional[MultimodalSequence]:
-    """Scrape the original archived URL via Decodo. Media URLs on the original
-    site are normal HTTP URLs that can be downloaded directly."""
-    try:
-        result = await decodo.scrape(
-            original_url,
-            remove_urls=False,
-            session=session,
-            format="multimodal_sequence",
-            enable_js=True,
-            timeout=30,
-        )
-        if isinstance(result, MultimodalSequence):
-            return result
-    except Exception as e:
-        logger.debug(f"Decodo scrape of original URL failed: {e}")
-    return None
-
-
-async def _get_html_via_decodo(url: str, session: aiohttp.ClientSession) -> Optional[str]:
-    """Fetch Perma.cc page HTML using Decodo proxy service to bypass Cloudflare."""
-    try:
-        result = await decodo.scrape(
-            url,
-            remove_urls=False,
-            session=session,
-            format="html",
-            enable_js=True,
-            timeout=30,
-        )
-        if isinstance(result, str) and result.strip():
-            return result
-    except Exception as e:
-        logger.debug(f"Decodo scrape failed for Perma.cc: {e}")
-    return None
 
 
 async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video_limit: int = MAX_VIDEO_BYTES,
@@ -424,8 +271,20 @@ async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, vide
 
 
 async def get_record_html(url: str) -> str | None:
-    """Fallback: Retrieves the HTML of the record saved by Perma.cc using Playwright.
+    """Retrieves the HTML of the record saved by Perma.cc using Playwright.
     Loads the contents dynamically and returns any contained media as data URIs (base64-encoded)."""
+    display = None
+    if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+        try:
+            from pyvirtualdisplay import Display
+            display = Display(visible=False, size=(1280, 720))
+            display.start()
+        except ImportError:
+            logger.warning(
+                "\rRunning on headless Linux without XServer. "
+                "Please install 'pyvirtualdisplay' and 'xvfb' to use Perma.cc integration in headed mode."
+            )
+
     async with Stealth().use_async(async_playwright()) as p:
         browser = await p.chromium.launch(
             headless=False,
@@ -521,4 +380,8 @@ async def get_record_html(url: str) -> str | None:
 
             await page.close()
             await browser.close()
+
+            if display:
+                display.stop()
+
             return iframe_html

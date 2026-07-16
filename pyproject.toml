@@ -1,6 +1,6 @@
 [project]
 name = "scrapeMM"
-version = "0.6.4"
+version = "0.6.5"
 description = "Multimodal scraper for social media, internet archives, and the open web."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -23,6 +23,7 @@ dependencies = [
     "platformdirs~=4.10.0",
     "playwright",
     "playwright-stealth",
+    "pyvirtualdisplay",
     "prompt_toolkit",  # For handling user terminal input
     "PyYAML~=6.0.1",
     "requests~=2.34.2",
