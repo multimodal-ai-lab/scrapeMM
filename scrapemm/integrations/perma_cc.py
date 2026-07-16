@@ -6,7 +6,7 @@ from typing import Optional
 import aiohttp
 from ezmm import MultimodalSequence
 from playwright.async_api import Error, TimeoutError, async_playwright
-from playwright_stealth import Stealth
+from seleniumbase import cdp_driver
 
 from scrapemm.download.common import HEADERS
 from scrapemm.integrations.base import RetrievalIntegration
@@ -32,7 +32,12 @@ class PermaCC(RetrievalIntegration):
     async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
         async with aiohttp.ClientSession(headers=HEADERS) as session:
             # Use Playwright with media inlining (handles session-bound URLs)
-            html = await get_record_html(url)
+            try:
+                html = await get_record_html(url)
+            except Exception as e:
+                logger.error(f"Error in get_record_html: {e}", exc_info=True)
+                html = None
+
             if html:
                 return await to_multimodal_sequence(html, remove_urls=False, session=session, url=url)
 
@@ -277,31 +282,108 @@ async def get_record_html(url: str) -> str | None:
     if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
         try:
             from pyvirtualdisplay import Display
-            display = Display(visible=False, size=(1280, 720))
+            # Use a higher color depth and standard resolution
+            display = Display(visible=False, size=(1920, 1080), color_depth=24)
             display.start()
+            # Set DISPLAY environment variable for cdp_driver to pick it up correctly
+            os.environ["DISPLAY"] = display.new_display_var
         except ImportError:
             logger.warning(
                 "\rRunning on headless Linux without XServer. "
                 "Please install 'pyvirtualdisplay' and 'xvfb' to use Perma.cc integration in headed mode."
             )
 
-    async with Stealth().use_async(async_playwright()) as p:
-        browser = await p.chromium.launch(
+    # Use SeleniumBase cdp_driver for UC Mode support
+    # We launch the browser first via SB, then attach Playwright
+    try:
+        # Pass xvfb_metrics if on Linux to ensure alignment
+        xvfb_metrics = "1920,1080" if sys.platform.startswith("linux") else None
+        # Use a random user data dir for better bypass persistence
+        import tempfile
+        user_data_dir = tempfile.mkdtemp(prefix="perma_uc_")
+        
+        driver = await cdp_driver.start_async(
             headless=False,
-            args=["--window-position=-10000,-10000"],
+            uc=True,
+            no_sandbox=True,
+            disable_setuid_sandbox=True,
+            start_maximized=True,
+            xvfb_metrics=xvfb_metrics,
+            user_data_dir=user_data_dir,
         )
-        context = await browser.new_context(
-            accept_downloads=False,
-            user_agent=HEADERS["User-Agent"],
-        )
-        page = await context.new_page()
+    except Exception as e:
+        logger.error(f"Failed to start cdp_driver: {e}", exc_info=True)
+        if display:
+            display.stop()
+        # Clean up user data dir if we created one
+        try:
+            import shutil
+            if 'user_data_dir' in locals() and os.path.exists(user_data_dir):
+                shutil.rmtree(user_data_dir, ignore_errors=True)
+        except Exception:
+            pass
+        return None
+
+    if driver is None:
+        logger.error("cdp_driver.start_async returned None")
+        if display:
+            display.stop()
+        # Clean up user data dir if we created one
+        try:
+            import shutil
+            if 'user_data_dir' in locals() and os.path.exists(user_data_dir):
+                shutil.rmtree(user_data_dir, ignore_errors=True)
+        except Exception:
+            pass
+        return None
+
+    endpoint_url = driver.get_endpoint_url()
+
+    async with async_playwright() as p:
+        browser = await p.chromium.connect_over_cdp(endpoint_url)
+        context = browser.contexts[0]
+        page = context.pages[0]
+
+        # Ensure the viewport is set correctly
+        await page.set_viewport_size({"width": 1920, "height": 1080})
 
         try:
-            # Give a bit more time for Perma.cc to bootstrap and attach the iframe
-            await page.goto(url, timeout=30000)
-            await page.wait_for_load_state("domcontentloaded")  # 'domcontentloaded'
+            # UC mode often handles Cloudflare automatically, but we still navigate and wait
+            await page.goto(url, timeout=60000)
+            await page.wait_for_load_state("domcontentloaded")
+            # Extra wait for stability after navigation
+            await page.wait_for_timeout(2000)
+
+            # Check for Cloudflare challenge (passive check)
+            body_text = await page.content()
+            if "Just a moment" in body_text or "Performing security verification" in body_text:
+                logger.info("\rCloudflare challenge detected. Waiting for UC mode to handle it...")
+                try:
+                    # Move mouse slightly to simulate interaction if stuck
+                    await page.mouse.move(500, 500)
+                    await page.wait_for_function(
+                        '() => !document.body.innerText.includes("Just a moment") && '
+                        '!document.body.innerText.includes("Performing security verification")',
+                        timeout=45000
+                    )
+                    logger.info("\rCloudflare challenge resolved.")
+                    await page.wait_for_timeout(2000) # Wait for page to settle
+                except TimeoutError:
+                    logger.warning("\rCloudflare challenge did not resolve in time.")
+                    # Take a screenshot or dump more info if we could (omitted for brevity)
         except (TimeoutError, Error) as e:
             logger.warning(f"\rUnable to load page at URL '{url}'.\n\tReason: {type(e).__name__} {e}")
+            await browser.close()
+            driver.quit()
+            if display:
+                display.stop()
+            # Clean up user data dir if we created one
+            try:
+                import shutil
+                if 'user_data_dir' in locals() and os.path.exists(user_data_dir):
+                    shutil.rmtree(user_data_dir, ignore_errors=True)
+            except Exception:
+                pass
             return
 
         # Prefer the content of the Perma.cc archive iframe specifically
@@ -378,10 +460,19 @@ async def get_record_html(url: str) -> str | None:
             if not iframe_html:
                 iframe_html = await page.content()
 
-            await page.close()
+            # We don't close 'page' or 'context' explicitly as they belong to the CDP connection
             await browser.close()
+            driver.quit()
 
             if display:
                 display.stop()
+            
+            # Clean up user data dir if we created one
+            try:
+                import shutil
+                if 'user_data_dir' in locals() and os.path.exists(user_data_dir):
+                    shutil.rmtree(user_data_dir, ignore_errors=True)
+            except Exception:
+                pass
 
             return iframe_html
