@@ -1,5 +1,4 @@
 import logging
-import os
 import sys
 from typing import Optional
 
@@ -14,6 +13,7 @@ from scrapemm.util import to_multimodal_sequence
 
 logger = logging.getLogger("scrapeMM")
 
+
 # Limits for inlining media as data URIs to avoid excessive memory usage
 MAX_IMAGE_BYTES = 15 * 1024 * 1024  # 15 MB
 MAX_VIDEO_BYTES = 25 * 1024 * 1024  # 25 MB
@@ -21,19 +21,52 @@ INLINE_CONCURRENCY = 6
 
 PERMA_CC_API_BASE = "https://api.perma.cc/v1/public/archives"
 
+
 class PermaCC(RetrievalIntegration):
     name = "Perma.cc"
     domains = ["perma.cc"]
 
+    def __init__(self):
+        super().__init__()
+        self._driver = None
+        self._endpoint_url = None
+        self._user_data_dir = None
+
     async def _connect(self):
-        # No dedicated connection to establish
+        """Persistent connection is managed within the class instance."""
+        if self._driver:
+            self._cleanup_resources()
+
+        try:
+            xvfb_metrics = "1920,1080" if sys.platform.startswith("linux") else None
+
+            logger.debug(f"Starting cdp_driver (UC Mode)...")
+            # We use a try-except block here because cdp_driver.start_async
+            # can raise Exception if it fails to connect to the browser.
+            self._driver = await cdp_driver.start_async(
+                headless=False,
+                uc=True,
+                no_sandbox=True,
+                disable_setuid_sandbox=True,
+                start_maximized=True,
+                xvfb_metrics=xvfb_metrics,
+                timeout=30,  # Extension for startup if supported, or just for our logic
+            )
+            if self._driver:
+                logger.debug("cdp_driver started successfully.")
+        except Exception as e:
+            logger.error(f"Failed to start cdp_driver for Perma.CC integration: {e}", exc_info=True)
+            self._cleanup_resources()
+
+        self._endpoint_url = self._driver.get_endpoint_url()
+
         self.connected = True
 
     async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
         async with aiohttp.ClientSession(headers=HEADERS) as session:
             # Use Playwright with media inlining (handles session-bound URLs)
             try:
-                html = await get_record_html(url)
+                html = await self.get_record_html(url)
             except Exception as e:
                 logger.error(f"Error in get_record_html: {e}", exc_info=True)
                 html = None
@@ -42,6 +75,141 @@ class PermaCC(RetrievalIntegration):
                 return await to_multimodal_sequence(html, remove_urls=False, session=session, url=url)
 
             raise RuntimeError("Failed to retrieve Perma.cc record.")
+
+    def _cleanup_resources(self):
+        """Cleanup resources for PermaCC."""
+        if self._driver:
+            try:
+                self._driver.quit()
+            except Exception:
+                pass
+            self._driver = None
+
+    async def get_record_html(self, url: str) -> str | None:
+        """Retrieves the HTML of the record saved by Perma.cc using Playwright.
+        Loads the contents dynamically and returns any contained media as data URIs (base64-encoded)."""
+
+        async with async_playwright() as p:
+            browser = await p.chromium.connect_over_cdp(self._endpoint_url)
+            context = browser.contexts[0]
+            # Always use a new page to avoid interference between calls
+            page = await context.new_page()
+
+            # Ensure the viewport is set correctly
+            await page.set_viewport_size({"width": 1920, "height": 1080})
+
+            try:
+                # UC mode often handles Cloudflare automatically, but we still navigate and wait
+                await page.goto(url, timeout=60000)
+                await page.wait_for_load_state("domcontentloaded")
+                # Extra wait for stability after navigation
+                await page.wait_for_timeout(2000)
+
+                # Check for Cloudflare challenge (passive check)
+                body_text = await page.content()
+                if "Just a moment" in body_text or "Performing security verification" in body_text:
+                    logger.info("\rCloudflare challenge detected. Waiting for UC mode to handle it...")
+                    try:
+                        # Move mouse slightly to simulate interaction if stuck
+                        await page.mouse.move(500, 500)
+                        await page.wait_for_function(
+                            '() => !document.body.innerText.includes("Just a moment") && '
+                            '!document.body.innerText.includes("Performing security verification")',
+                            timeout=45000
+                        )
+                        logger.info("\rCloudflare challenge resolved.")
+                        await page.wait_for_timeout(2000)  # Wait for page to settle
+                    except TimeoutError:
+                        logger.warning("\rCloudflare challenge did not resolve in time.")
+
+                # Prefer the content of the Perma.cc archive iframe specifically
+                iframe_html: str | None = None
+                try:
+                    try:
+                        iframe_el = await page.wait_for_selector("iframe.archive-iframe", timeout=5000)
+                    except TimeoutError:
+                        iframe_el = None
+
+                    if iframe_el is not None:
+                        outer_frame = await iframe_el.content_frame()
+                        if outer_frame is not None:
+                            # Ensure the outer iframe document is ready
+                            try:
+                                await outer_frame.wait_for_load_state("domcontentloaded", timeout=15000)
+                            except TimeoutError:
+                                pass
+
+                            # Inside the outer iframe there's a direct child
+                            # custom element <replay-web-page> which hosts the inner iframe.
+                            # We target that inner iframe and return its document HTML.
+                            try:
+                                inner_iframe_el = await outer_frame.wait_for_selector(
+                                    "replay-web-page iframe", timeout=15000
+                                )
+                            except TimeoutError:
+                                inner_iframe_el = None
+
+                            if inner_iframe_el is not None:
+                                inner_frame = await inner_iframe_el.content_frame()
+                                if inner_frame is not None:
+                                    try:
+                                        await inner_frame.wait_for_load_state("domcontentloaded", timeout=15000)
+                                    except TimeoutError:
+                                        pass
+
+                                    # There is a third nested iframe somewhere under a
+                                    # <replay-app-main> element (not necessarily a direct child).
+                                    # Prefer that deepest iframe if present.
+                                    try:
+                                        deepest_iframe_el = await inner_frame.wait_for_selector(
+                                            "replay-app-main iframe", timeout=15000
+                                        )
+                                    except TimeoutError:
+                                        deepest_iframe_el = None
+
+                                    if deepest_iframe_el is not None:
+                                        deepest_frame = await deepest_iframe_el.content_frame()
+                                        if deepest_frame is not None:
+                                            try:
+                                                await deepest_frame.wait_for_load_state(
+                                                    "domcontentloaded", timeout=15000
+                                                )
+                                            except TimeoutError:
+                                                pass
+                                            # Inline media in the deepest frame before exporting HTML
+                                            await _inline_media_in_frame(deepest_frame)
+                                            iframe_html = await deepest_frame.content()
+
+                                    # Fallback to the middle (inner) iframe content if deepest not found
+                                    if not iframe_html:
+                                        # Inline media in the middle frame before exporting HTML
+                                        await _inline_media_in_frame(inner_frame)
+                                        iframe_html = await inner_frame.content()
+
+                            # Fallback: if inner iframe not found, use the outer iframe content
+                            if not iframe_html:
+                                # Inline media in the outer frame before exporting HTML
+                                await _inline_media_in_frame(outer_frame)
+                                iframe_html = await outer_frame.content()
+                finally:
+                    # If the target iframe isn't available, fall back to the full page HTML
+                    if not iframe_html:
+                        iframe_html = await page.content()
+
+                return iframe_html
+
+            except (TimeoutError, Error) as e:
+                logger.warning(f"\rUnable to load page at URL '{url}'.\n\tReason: {type(e).__name__} {e}")
+                return None
+            finally:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
 
 
 async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video_limit: int = MAX_VIDEO_BYTES,
@@ -275,204 +443,3 @@ async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, vide
         pass
 
 
-async def get_record_html(url: str) -> str | None:
-    """Retrieves the HTML of the record saved by Perma.cc using Playwright.
-    Loads the contents dynamically and returns any contained media as data URIs (base64-encoded)."""
-    display = None
-    if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
-        try:
-            from pyvirtualdisplay import Display
-            # Use a higher color depth and standard resolution
-            display = Display(visible=False, size=(1920, 1080), color_depth=24)
-            display.start()
-            # Set DISPLAY environment variable for cdp_driver to pick it up correctly
-            os.environ["DISPLAY"] = display.new_display_var
-        except ImportError:
-            logger.warning(
-                "\rRunning on headless Linux without XServer. "
-                "Please install 'pyvirtualdisplay' and 'xvfb' to use Perma.cc integration in headed mode."
-            )
-
-    # Use SeleniumBase cdp_driver for UC Mode support
-    # We launch the browser first via SB, then attach Playwright
-    try:
-        # Pass xvfb_metrics if on Linux to ensure alignment
-        xvfb_metrics = "1920,1080" if sys.platform.startswith("linux") else None
-        # Use a random user data dir for better bypass persistence
-        import tempfile
-        user_data_dir = tempfile.mkdtemp(prefix="perma_uc_")
-        
-        driver = await cdp_driver.start_async(
-            headless=False,
-            uc=True,
-            no_sandbox=True,
-            disable_setuid_sandbox=True,
-            start_maximized=True,
-            xvfb_metrics=xvfb_metrics,
-            user_data_dir=user_data_dir,
-        )
-    except Exception as e:
-        logger.error(f"Failed to start cdp_driver: {e}", exc_info=True)
-        if display:
-            display.stop()
-        # Clean up user data dir if we created one
-        try:
-            import shutil
-            if 'user_data_dir' in locals() and os.path.exists(user_data_dir):
-                shutil.rmtree(user_data_dir, ignore_errors=True)
-        except Exception:
-            pass
-        return None
-
-    if driver is None:
-        logger.error("cdp_driver.start_async returned None")
-        if display:
-            display.stop()
-        # Clean up user data dir if we created one
-        try:
-            import shutil
-            if 'user_data_dir' in locals() and os.path.exists(user_data_dir):
-                shutil.rmtree(user_data_dir, ignore_errors=True)
-        except Exception:
-            pass
-        return None
-
-    endpoint_url = driver.get_endpoint_url()
-
-    async with async_playwright() as p:
-        browser = await p.chromium.connect_over_cdp(endpoint_url)
-        context = browser.contexts[0]
-        page = context.pages[0]
-
-        # Ensure the viewport is set correctly
-        await page.set_viewport_size({"width": 1920, "height": 1080})
-
-        try:
-            # UC mode often handles Cloudflare automatically, but we still navigate and wait
-            await page.goto(url, timeout=60000)
-            await page.wait_for_load_state("domcontentloaded")
-            # Extra wait for stability after navigation
-            await page.wait_for_timeout(2000)
-
-            # Check for Cloudflare challenge (passive check)
-            body_text = await page.content()
-            if "Just a moment" in body_text or "Performing security verification" in body_text:
-                logger.info("\rCloudflare challenge detected. Waiting for UC mode to handle it...")
-                try:
-                    # Move mouse slightly to simulate interaction if stuck
-                    await page.mouse.move(500, 500)
-                    await page.wait_for_function(
-                        '() => !document.body.innerText.includes("Just a moment") && '
-                        '!document.body.innerText.includes("Performing security verification")',
-                        timeout=45000
-                    )
-                    logger.info("\rCloudflare challenge resolved.")
-                    await page.wait_for_timeout(2000) # Wait for page to settle
-                except TimeoutError:
-                    logger.warning("\rCloudflare challenge did not resolve in time.")
-                    # Take a screenshot or dump more info if we could (omitted for brevity)
-        except (TimeoutError, Error) as e:
-            logger.warning(f"\rUnable to load page at URL '{url}'.\n\tReason: {type(e).__name__} {e}")
-            await browser.close()
-            driver.quit()
-            if display:
-                display.stop()
-            # Clean up user data dir if we created one
-            try:
-                import shutil
-                if 'user_data_dir' in locals() and os.path.exists(user_data_dir):
-                    shutil.rmtree(user_data_dir, ignore_errors=True)
-            except Exception:
-                pass
-            return
-
-        # Prefer the content of the Perma.cc archive iframe specifically
-        iframe_html: str | None = None
-        try:
-            try:
-                iframe_el = await page.wait_for_selector("iframe.archive-iframe", timeout=5000)
-            except TimeoutError:
-                iframe_el = None
-
-            if iframe_el is not None:
-                outer_frame = await iframe_el.content_frame()
-                if outer_frame is not None:
-                    # Ensure the outer iframe document is ready
-                    try:
-                        await outer_frame.wait_for_load_state("domcontentloaded", timeout=15000)
-                    except TimeoutError:
-                        pass
-
-                    # Inside the outer iframe there's a direct child
-                    # custom element <replay-web-page> which hosts the inner iframe.
-                    # We target that inner iframe and return its document HTML.
-                    try:
-                        inner_iframe_el = await outer_frame.wait_for_selector(
-                            "replay-web-page iframe", timeout=15000
-                        )
-                    except TimeoutError:
-                        inner_iframe_el = None
-
-                    if inner_iframe_el is not None:
-                        inner_frame = await inner_iframe_el.content_frame()
-                        if inner_frame is not None:
-                            try:
-                                await inner_frame.wait_for_load_state("domcontentloaded", timeout=15000)
-                            except TimeoutError:
-                                pass
-
-                            # There is a third nested iframe somewhere under a
-                            # <replay-app-main> element (not necessarily a direct child).
-                            # Prefer that deepest iframe if present.
-                            try:
-                                deepest_iframe_el = await inner_frame.wait_for_selector(
-                                    "replay-app-main iframe", timeout=15000
-                                )
-                            except TimeoutError:
-                                deepest_iframe_el = None
-
-                            if deepest_iframe_el is not None:
-                                deepest_frame = await deepest_iframe_el.content_frame()
-                                if deepest_frame is not None:
-                                    try:
-                                        await deepest_frame.wait_for_load_state(
-                                            "domcontentloaded", timeout=15000
-                                        )
-                                    except TimeoutError:
-                                        pass
-                                    # Inline media in the deepest frame before exporting HTML
-                                    await _inline_media_in_frame(deepest_frame)
-                                    iframe_html = await deepest_frame.content()
-
-                            # Fallback to the middle (inner) iframe content if deepest not found
-                            if not iframe_html:
-                                # Inline media in the middle frame before exporting HTML
-                                await _inline_media_in_frame(inner_frame)
-                                iframe_html = await inner_frame.content()
-
-                    # Fallback: if inner iframe not found, use the outer iframe content
-                    if not iframe_html:
-                        # Inline media in the outer frame before exporting HTML
-                        await _inline_media_in_frame(outer_frame)
-                        iframe_html = await outer_frame.content()
-        finally:
-            # If the target iframe isn't available, fall back to the full page HTML
-            if not iframe_html:
-                iframe_html = await page.content()
-
-            # We don't close 'page' or 'context' explicitly as they belong to the CDP connection
-            await browser.close()
-            driver.quit()
-
-            if display:
-                display.stop()
-            
-            # Clean up user data dir if we created one
-            try:
-                import shutil
-                if 'user_data_dir' in locals() and os.path.exists(user_data_dir):
-                    shutil.rmtree(user_data_dir, ignore_errors=True)
-            except Exception:
-                pass
-
-            return iframe_html
