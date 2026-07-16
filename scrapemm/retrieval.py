@@ -51,6 +51,8 @@ BEST_METHODS = {
     "archive.li": ["integrations", "decodo"],
     "archive.fo": ["integrations", "decodo"],
     "archive.md": ["integrations", "decodo"],
+    # More special cases
+    "washingtonpost.com": ["decodo"],
 }
 
 
@@ -186,7 +188,7 @@ async def _retrieve_single(
                                              session=session, format=format, actions=actions),
             "decodo": lambda: decodo.scrape(url, remove_urls, session,
                                             format=format,
-                                            timeout=15 if prioritize == "speed" else 30,
+                                            timeout=15 if prioritize == "speed" else 60,
                                             max_retries=1 if prioritize == "speed" else 5),
         }
 
@@ -220,6 +222,11 @@ async def _retrieve_single(
                 logger.warning(f"Error while retrieving with method '{method_name}': {e}")
                 errors[method_name] = e
                 result = None
+
+        except TimeoutError as e:
+            logger.warning(f"Timeout while retrieving with method '{method_name}': {e}")
+            errors[method_name] = e
+            result = None
 
         except IPBannedError as e:
             logger.error(e)

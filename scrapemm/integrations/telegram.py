@@ -29,14 +29,14 @@ class Telegram(RetrievalIntegration):
         bot_token = get_secret("telegram_bot_token")
 
         if api_id and api_hash and bot_token:
-            self.client = TelegramClient(self.session_path, api_id, api_hash)
             try:
-                await self.client.start(bot_token=bot_token)  # Returns a coroutine b/c event loop exists already
+                self.client = TelegramClient(self.session_path, api_id, api_hash)
             except sqlite3.OperationalError:  # Database is locked from an interrupted previous session
                 # Remove the database file and try again
                 journal_path = Path(self.session_path + ".session-journal")
                 journal_path.unlink(missing_ok=True)
-                await self.client.start(bot_token=bot_token)  # Returns a coroutine b/c event loop exists already
+                self.client = TelegramClient(self.session_path, api_id, api_hash)
+            await self.client.start(bot_token=bot_token)  # Returns a coroutine b/c event loop exists already
             self.connected = True
             logger.info("✅ Successfully connected to Telegram.")
         else:

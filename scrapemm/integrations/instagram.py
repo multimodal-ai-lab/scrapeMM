@@ -7,7 +7,6 @@ from yt_dlp import DownloadError
 from scrapemm.common.exceptions import RateLimitError
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.integrations.ytdlp import get_content_with_ytdlp
-from scrapemm.util import get_domain
 
 logger = logging.getLogger("scrapeMM")
 

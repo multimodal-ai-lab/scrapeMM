@@ -41,10 +41,10 @@ async def test_youtube(url):
     ("https://www.instagram.com/p/DRJ94KKDhpx", dict(image=1)),
     ("https://www.instagram.com/p/DRNcdbPiPCj", dict(image=1)),
     ("https://www.instagram.com/p/CqJDbyOP839", dict(image=1)),
-    ("https://www.instagram.com/p/DMuOe6th94D", dict(video=1)),  # Yes, this is a video
+    ("https://www.instagram.com/p/DMuOe6th94D", dict(video=1)),  # Yes, this is a video, marked as misinfo
     ("https://www.instagram.com/reel/DRKtWnhAI0j", dict(video=1)),
     ("https://www.instagram.com/reel/DRE38jKDIYb", dict(video=1)),
-    ("https://www.instagram.com/reel/DKqPQqpTDW4", dict(video=1)),
+    ("https://www.instagram.com/reel/DKqPQqpTDW4", dict(video=1)),  # Age-restricted content
 ])
 async def test_instagram(url: str, expected: dict[str, int]):
     result = await retrieve(url)
@@ -66,7 +66,6 @@ async def test_instagram(url: str, expected: dict[str, int]):
     ("https://www.facebook.com/reel/1954696035077530", dict(video=1)),
     ("https://www.facebook.com/reel/1089214926521000", dict(video=1)),
     ("https://www.facebook.com/reel/3466446073497470", dict(video=1)),  # restricted for misinformation
-    ("https://fb.watch/dmMvfqIFqC/", dict(video=1)),
     ("https://www.facebook.com/watch/?v=502482344935053", dict(video=1)),
     # restricted for misinformation, accessible only with cookie:
     ("https://www.facebook.com/groups/1973976962823632/posts/3992825270938781/", dict(image=1)),

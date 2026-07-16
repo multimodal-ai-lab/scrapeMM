@@ -1,24 +1,42 @@
 [project]
 name = "scrapeMM"
-version = "0.6.3"
-description = "Flexible multimodal scraper for social media and the open web."
+version = "0.6.4"
+description = "Multimodal scraper for social media, internet archives, and the open web."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 authors = [{name = "Mark Rothermel", email = "mark.rothermel@tu-darmstadt.de"}]
 dependencies = [
-    "ezmm",
-    "telethon",
-    "tweepy",
-    "markdownify",
-    "platformdirs",
-    "PyYAML",
+    "aiohttp~=3.14.1",
+    "async_lru",
     "atproto",
-    "TikTokResearchApi",
-    "yt-dlp",
+    "beautifulsoup4",
+    "backports.zstd",  # For better content parsing with Firecrawl
+    "brotli",  # Required to read brotli-encoded media
     "cryptography",
-    "firecrawl-py",
-    "playwright"
+    "curl_cffi~=0.15.0",  # Provides browser binaries for impersonation
+    "ezmm~=0.5.1",
+    "firecrawl-py~=4.32.0",
+    "markdownify~=1.2.3",
+    "oauthlib",
+    "pip-system-certs",  # For better SSL certificate handling
+    "platformdirs~=4.10.0",
+    "playwright",
+    "playwright-stealth",
+    "prompt_toolkit",  # For handling user terminal input
+    "PyYAML~=6.0.1",
+    "requests~=2.34.2",
+    "telethon~=1.44.0",
+    "TikTokResearchApi~=1.0.4",
+    "tqdm~=4.68.4",
+    "tweepy~=4.17.0",
+    "yt-dlp[default,curl-cffi]",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-asyncio",
 ]
 
 [project.urls]

@@ -228,12 +228,7 @@ class Decodo:
             except aiohttp.ClientError:
                 logger.error(f"Network error while scraping with Decodo.")
                 raise
-            except asyncio.TimeoutError:
-                if attempt >= max_retries:
-                    raise
-                else:
-                    logger.debug(f"Timeout while scraping with Decodo. Retrying...")
-            except RateLimitError:
+            except (RateLimitError, asyncio.TimeoutError):
                 raise
             except Exception as e:
                 logger.error(f"Unexpected error while scraping with Decodo: {e}")

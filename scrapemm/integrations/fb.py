@@ -28,17 +28,42 @@ LIKE_COMMENT_SHARE_SVG_REGEX = (
 )
 FB_PHOTO_HREF_REGEX = r'href="(https://www\.facebook\.com/photo/[^"]*)"'
 
-JS_GET_MEDIA_VC_IMAGE = """
+JS_GET_PHOTO_IMAGE = """
     () => {
-        const img = document.querySelector('img[data-visualcompletion="media-vc-image"]');
-        return img ? img.getAttribute('src') : null;
-    }
-""".strip()
+        // Strategy 1: data-visualcompletion attribute (legacy)
+        let img = document.querySelector('img[data-visualcompletion="media-vc-image"]');
+        if (img) return img.getAttribute('src');
 
-JS_GET_OG_IMAGE = """
-    () => {
+        // Strategy 2: Large image inside the photo theater/spotlight viewer
+        const viewerSelectors = [
+            '[role="dialog"] img[src*="scontent"]',
+            '[data-pagelet="MediaViewerPhoto"] img',
+            '[role="main"] img[src*="scontent"]',
+            'img[alt][src*="fbcdn"]',
+            'img[alt][src*="scontent"]',
+        ];
+        for (const sel of viewerSelectors) {
+            const candidates = document.querySelectorAll(sel);
+            for (const c of candidates) {
+                const src = c.getAttribute('src') || '';
+                const w = c.naturalWidth || c.width || 0;
+                if (src && w > 200) return src;
+            }
+        }
+
+        // Strategy 3: Largest image on the page with a CDN src
+        const allImgs = Array.from(document.querySelectorAll('img[src*="scontent"], img[src*="fbcdn"]'));
+        if (allImgs.length > 0) {
+            allImgs.sort((a, b) => (b.naturalWidth || 0) - (a.naturalWidth || 0));
+            const best = allImgs[0];
+            if (best && (best.naturalWidth || 0) > 100) return best.getAttribute('src');
+        }
+
+        // Strategy 4: og:image meta tag
         const og = document.querySelector('meta[property="og:image"]');
-        return og ? og.getAttribute('content') : null;
+        if (og) return og.getAttribute('content');
+
+        return null;
     }
 """.strip()
 
@@ -118,7 +143,7 @@ class Facebook(RetrievalIntegration):
                 url,
                 platform="Facebook",
                 # cookiefile=self.cookie_file.as_posix(),
-                impersonate=ImpersonateTarget("chrome", "133"),
+                impersonate=ImpersonateTarget("chrome", "146"),
                 **kwargs,
             )
 
@@ -148,13 +173,21 @@ class Facebook(RetrievalIntegration):
                 try:
                     await page.goto(url, timeout=30000)
                     await page.wait_for_load_state("domcontentloaded")
+                    # Wait for network to settle so images are rendered
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                    except PlaywrightTimeoutError:
+                        pass
+                    # Give React/JS a moment to render the photo
+                    await page.wait_for_timeout(2000)
                 except PlaywrightTimeoutError:
-                    raise RuntimeError("Timed out loading Facebook photo page.")
+                    raise TimeoutError("Timed out loading Facebook photo page.")
 
-                image_url = await page.evaluate(JS_GET_MEDIA_VC_IMAGE)
+                image_url = await page.evaluate(JS_GET_PHOTO_IMAGE)
 
-                if not image_url:
-                    image_url = await page.evaluate(JS_GET_OG_IMAGE)
+            except TimeoutError:
+                raise
+
             finally:
                 html = await page.content()
                 await browser.close()

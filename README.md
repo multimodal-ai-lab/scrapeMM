@@ -8,6 +8,19 @@ This library aims to help developers and researchers to easily access multimodal
 In Conda, you can install it with `conda install -c conda-forge ffmpeg`.
 * **If you want to scrape Perma.cc archive records or Facebook photos**, you'll need to install playwright with `pip install playwright` and running `playwright install`.
 
+## Configure
+To set the API secrets, run
+```python
+from scrapemm import configure_secrets
+configure_secrets()
+```
+
+To set the Firecrawl URL, run
+```python
+from scrapemm import update_config
+update_config(firecrawl_url="your_url")
+```
+
 ## Usage
 ```python
 from scrapemm import retrieve

@@ -162,7 +162,7 @@ Likes: {metrics['like_count']} - Retweets: {metrics['retweet_count']} - Replies:
                 properties_text += "\n- Protected"
             if user.withheld:
                 properties_text += "\n- Withheld"
-            if user.parody:
+            if hasattr(user, "parody") and user.parody:
                 properties_text += "\n- Marked as parody"
 
             text = f"""**Profile on X**
