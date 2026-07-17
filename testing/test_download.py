@@ -50,7 +50,8 @@ async def download_img(url):
     "https://factuel.afp.com/sites/default/files/styles/header_article/public/medias/factchecking/g2/2025-07/c1452a5562cfe3e178b0d5c6681c940e-fr.jpeg?itok=a9Wc3hEY",
     "https://archive.is/uTVE4/da2c6541801809f1b665e8992f7d214621ec9443/scr.png",
     "https://mediaproxy.snopes.com/width/1200/https://media.snopes.com/2024/01/origin_of_gauze.jpg",
-    "https://storage.verify-sy.com/images/articles/691f227ff49091ec373a9cdd/68bf2c6fe5df49b4404c038f.png"
+    "https://storage.verify-sy.com/images/articles/691f227ff49091ec373a9cdd/68bf2c6fe5df49b4404c038f.png",
+    "https://storage.verify-sy.com/1784109845089-pn1nam.jpg"
 ])
 async def test_download_image(url):
     img = await download_img(url)

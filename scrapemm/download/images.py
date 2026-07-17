@@ -4,9 +4,13 @@ from typing import Optional
 import PIL
 import aiohttp
 from PIL.Image import Resampling
+from PIL import ImageFile
 from ezmm import Image
 
 from scrapemm.download.requests import request_static, fetch_headers
+
+# Tolerate images that are truncated
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 async def download_image(
