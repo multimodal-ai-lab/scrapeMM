@@ -1,6 +1,6 @@
 [project]
 name = "scrapeMM"
-version = "0.6.7"
+version = "0.6.8"
 description = "Multimodal scraper for social media, internet archives, and the open web."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,13 +18,11 @@ dependencies = [
     "ezmm~=0.5.1",
     "firecrawl-py~=4.32.0",
     "markdownify~=1.2.3",
-    "oauthlib",
     "pip-system-certs",  # For better SSL certificate handling
     "platformdirs~=4.10.0",
     "playwright",
     "playwright-stealth",
-    "pyvirtualdisplay",
-    "seleniumbase",
+    "seleniumbase~=4.51.1",
     "prompt_toolkit",  # For handling user terminal input
     "PyYAML~=6.0.1",
     "requests~=2.34.2",
