@@ -26,9 +26,15 @@ class PermaCC(HeadedBrowser):
             try:
                 # Move mouse slightly to simulate interaction if stuck
                 await page.mouse.move(500, 500)
+                # document.body can be null while the challenge page navigates/replaces the DOM.
                 await page.wait_for_function(
-                    '() => !document.body.innerText.includes("Just a moment") && '
-                    '!document.body.innerText.includes("Performing security verification")',
+                    """() => {
+                        const body = document.body;
+                        if (!body) return false;
+                        const text = body.innerText || '';
+                        return !text.includes('Just a moment')
+                            && !text.includes('Performing security verification');
+                    }""",
                     timeout=45000
                 )
                 logger.info("\rCloudflare challenge resolved.")

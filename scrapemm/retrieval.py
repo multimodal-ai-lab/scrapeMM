@@ -6,6 +6,7 @@ from typing import Collection, Literal
 
 import aiohttp
 from ezmm import MultimodalSequence
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from scrapemm.common import ScrapingResponse
 from scrapemm.common.exceptions import IPBannedError, UnsupportedDomainError
@@ -215,7 +216,7 @@ async def _retrieve_single(
                 errors[method_name] = e
                 result = None
 
-        except TimeoutError as e:
+        except (TimeoutError, PlaywrightTimeoutError) as e:
             logger.warning(f"Timeout while retrieving with method '{method_name}': {e}")
             errors[method_name] = e
             result = None

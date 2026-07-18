@@ -2,18 +2,19 @@
 
 import logging
 from typing import Optional
+from urllib.parse import urlparse
 
-from ezmm import MultimodalSequence
-from playwright.async_api import TimeoutError, async_playwright, BrowserContext, Page
-from playwright_stealth import Stealth
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError, Page
 
-from scrapemm.download.common import HEADERS
-from scrapemm.integrations.base import RetrievalIntegration
+from scrapemm.integrations.headed_browser import HeadedBrowser, ContentTarget
 
 logger = logging.getLogger("scrapeMM")
 
 ARCHIVE_TODAY_CONTENT_DIV_ID = "CONTENT"
 
+# Captured session cookies that help bypass Archive.today's CAPTCHA gate.
+# `expires` is stripped at use-time so Chromium still accepts them as session cookies
+# after the recorded expiry timestamps have passed.
 COOKIES = [
     # --- archive.is ---
     {"name": "qki", "value": "899095247488898009", "domain": ".archive.is", "path": "/",
@@ -125,34 +126,18 @@ COOKIES = [
 ]
 
 
-async def _load_page(context: BrowserContext, url: str) -> Page | None:
-    """Navigate to *url* inside *context*, returning the Page or None on failure."""
-    page = await context.new_page()
-    try:
-        await page.goto(url, timeout=30000)
-        await page.wait_for_load_state("domcontentloaded")
-    except TimeoutError as e:
-        logger.warning(f"\rUnable to load page at URL '{url}'.\n\tReason: {type(e).__name__} {e}")
-        return None
-
-    body_text = (await page.locator("body").inner_text()).lower()
-    if "security check" in body_text or "captcha" in body_text:
-        raise RuntimeError("Archive.today asks to solve a captcha. Cannot access archived content.")
-
-    return page
+def _session_cookies(cookies: list[dict]) -> list[dict]:
+    """Return cookies without expires so Chromium treats them as session cookies."""
+    return [{k: v for k, v in cookie.items() if k != "expires"} for cookie in cookies]
 
 
-async def _extract_content_html(page: Page) -> str | None:
-    """Wait for the content div and return its inner HTML, or None on timeout."""
-    try:
-        await page.wait_for_selector(f"#{ARCHIVE_TODAY_CONTENT_DIV_ID}", timeout=5000)
-        return await page.inner_html(f"#{ARCHIVE_TODAY_CONTENT_DIV_ID}")
-    except TimeoutError:
-        logger.debug(f"Retrieval of archived content from '{page.url}' timed out.")
-        return None
+class ArchiveToday(HeadedBrowser):
+    """Archive.today / archive.is / … via UC headed Chromium.
 
-
-class ArchiveToday(RetrievalIntegration):
+    Headless Playwright + stealth used to work, but recent Playwright builds default
+    to chrome-headless-shell, which Archive.today often blocks on Linux (no #CONTENT).
+    The headed UC stack already works for the other archive integrations on that host.
+    """
     name = "Archive.today"
     domains = [
         "archive.today",
@@ -164,38 +149,44 @@ class ArchiveToday(RetrievalIntegration):
         "archive.md",
     ]
 
-    async def _connect(self):
-        self.connected = True
+    async def _prepare_context(self, context) -> None:
+        cookies = _session_cookies(COOKIES)
+        # Mirror archive.is cookies onto archive.today (tests/users often use that host).
+        for cookie in list(cookies):
+            domain = cookie.get("domain", "")
+            if domain in ("archive.is", ".archive.is"):
+                mirrored = dict(cookie)
+                mirrored["domain"] = domain.replace("archive.is", "archive.today")
+                cookies.append(mirrored)
+        try:
+            await context.add_cookies(cookies)
+        except Exception:
+            logger.warning("Could not add Archive.today cookies to browser context.", exc_info=True)
 
-    async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
-        """Retrieves the archived web page content as a MultimodalSequence.
+    async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
+        try:
+            body_text = (await page.locator("body").inner_text()).lower()
+        except Exception:
+            body_text = ""
 
-        Archive.today has strong anti-bot protection and requests captchas unless
-        the recorded session cookies are present. A headless Playwright browser with
-        stealth patches plus those cookies is enough to bypass the captcha, so there
-        is no performance reason to spin up a full headed browser here.
+        if any(marker in body_text for marker in (
+            "security check", "captcha", "just a moment", "performing security verification",
+        )):
+            raise RuntimeError("Archive.today asks to solve a captcha. Cannot access archived content.")
 
-        Media is resolved with the shared pipeline (``to_multimodal_sequence`` with
-        ``source_element=page``): media bytes are fetched in-page via the browser's
-        authenticated session, so the archive's cookies are reused automatically.
-        """
-        async with Stealth().use_async(async_playwright()) as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(user_agent=HEADERS["User-Agent"])
-            await context.add_cookies(COOKIES)
+        # CAPTCHA gate often redirects to the bare host with no snapshot path.
+        if urlparse(page.url).path in ("", "/"):
+            raise RuntimeError("Archive.today asks to solve a captcha. Cannot access archived content.")
 
-            try:
-                page = await _load_page(context, url)
-                if page is None:
-                    return None
-
-                content_html = await _extract_content_html(page)
-                if content_html is None:
-                    return None
-
-                from scrapemm.util import to_multimodal_sequence
-                return await to_multimodal_sequence(
-                    content_html, session=context.request, url=url, source_element=page
-                )
-            finally:
-                await browser.close()
+        try:
+            element = await page.wait_for_selector(f"#{ARCHIVE_TODAY_CONTENT_DIV_ID}", timeout=20000)
+            if element:
+                return element
+        except (TimeoutError, PlaywrightTimeoutError):
+            # Catch both: builtin TimeoutError and Playwright's (unrelated) TimeoutError class.
+            snippet = body_text[:240].replace("\n", " ")
+            logger.warning(
+                "Archive.today #%s missing at '%s'. Body starts with: %r",
+                ARCHIVE_TODAY_CONTENT_DIV_ID, page.url, snippet,
+            )
+        return None
