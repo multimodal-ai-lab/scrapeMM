@@ -1,6 +1,8 @@
+import aiohttp
 import pytest
+from ezmm import MultimodalSequence
 
-from scrapemm.util import get_markdown_hyperlinks
+from scrapemm.util import get_markdown_hyperlinks, to_multimodal_sequence
 
 
 @pytest.mark.parametrize("input,target",

@@ -7,15 +7,20 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional, Awaitable, Iterable
+from typing import Optional, Awaitable, Iterable, Union
 
 import aiohttp
 import tqdm
 from PIL import UnidentifiedImageError
+from bs4 import BeautifulSoup, Tag
 from ezmm import MultimodalSequence, Item, Image, Video
 from markdownify import markdownify as md
+from playwright.async_api import APIRequestContext, Page, Frame
 
-from scrapemm.download import download_medium
+from scrapemm.download import download_video, download_image
+from scrapemm.download.images import image_from_binary
+from scrapemm.download.util import looks_like_vector_file_url, looks_like_hls_url
+from scrapemm.download.videos import video_from_binary, download_hls_video, is_hls
 
 logger = logging.getLogger("scrapeMM")
 
@@ -115,7 +120,20 @@ DATA_URI_REGEX = r"data:([\w/+.-]+/[\w.+-]+);base64,([A-Za-z0-9+/=]+)"
 MD_HYPERLINK_REGEX = rf'(!?\[([^]^[]*)\]\((.*?)(?: "[^"]*")?\))'
 
 
-def postprocess_scraped(text: str) -> str:
+def preprocess_html(html: str) -> str:
+    # Resolve base64-encoded text sequences
+    data_uris = re.findall(DATA_URI_REGEX, html)
+    for mime_type, base64_encoding in data_uris:
+        if mime_type.startswith("text/"):
+            try:
+                decoded_text = base64.b64decode(base64_encoding).decode('utf-8')
+                html = html.replace(f"data:{mime_type};base64,{base64_encoding}", decoded_text)
+            except (binascii.Error, UnicodeDecodeError):
+                continue
+    return html
+
+
+def postprocess_markdown(text: str) -> str:
     # Remove any excess whitespaces
     text = re.sub(r' {2,}', ' ', text)
 
@@ -125,59 +143,229 @@ def postprocess_scraped(text: str) -> str:
     return sanitize(text.strip())
 
 
-async def resolve_media_hyperlinks(
-        text: str, session: aiohttp.ClientSession,
-        url: str | None = None,
-        remove_urls: bool = False,
-) -> Optional[MultimodalSequence]:
-    # TODO: Consider moving from Markdown to HTML parsing (might improve efficiency significantly and is more reliable for videos)
-    """Downloads all media that are hyperlinked in the provided Markdown text.
-    Only considers images with substantial size (larger than 256 x 256) and replaces the
-    respective Markdown hyperlinks with their proper image reference."""
+def _extract_media_elements(soup: BeautifulSoup) -> list[Tag]:
+    """Identifies all potential media elements and their URIs in the soup."""
+    media_elements = []
 
-    if text is None:
+    for element in soup.find_all("img"):
+        src = str(element.get("src"))
+        # Skip vector graphics
+        if src and looks_like_vector_file_url(src):
+            continue
+        media_elements.append(element)
+
+    # For videos, include either the src attribute (higher precedence) or the first source element
+    for video in soup.find_all("video"):
+        if video.has_attr("src"):
+            media_elements.append(video)
+        elif source := video.find("source"):
+            media_elements.append(source)
+            # In the HTML DOM, replace the video node with the source node to ensure a clean output
+            video.replace_with(source)
+    return media_elements
+
+
+def _resolve_base64_media(
+        media_elements_uris: list[tuple[Tag, Optional[str]]],
+        source_url: str | None = None
+) -> list[Optional[Item]]:
+    """Resolves all base64-encoded media elements.
+    Returns a list of (element, Item) for the resolved media and removes them from media_elements."""
+    resolved = []
+    # Using a while loop or iterating over a copy to safely remove from the original list
+    for element, uri in media_elements_uris:
+        if uri and is_data_uri(uri):
+            data_uri_info = decompose_data_uri(uri)
+            if data_uri_info:
+                mime_type, base64_encoding = data_uri_info
+                medium = from_base64(base64_encoding, mime_type=mime_type, url=source_url)
+                if medium:
+                    resolved.append(medium)
+                    continue
+        resolved.append(None)
+    return resolved
+
+
+async def resolve_media(
+        html: str,
+        session: Union[aiohttp.ClientSession, "APIRequestContext"],
+        url: str | None = None,
+        source_element: Union[Frame, Page, None] = None,
+        **kwargs
+) -> Optional[MultimodalSequence]:
+    """Downloads all media that are contained in the provided HTML.
+    Removes images that are smaller than 256 x 256. Replaces the
+    respective HTML elements with their proper item reference."""
+
+    if html is None:
         return None
 
+    soup = BeautifulSoup(html, "html.parser")
     domain_root = get_domain_root(url) if url else None
 
-    # Extract URLs and base64-encoded data from the text
-    hyperlinks = get_markdown_hyperlinks(text)
-    hrefs_urls = dict()
-    data_uris = set()
-    for _, _, href in hyperlinks:
-        if is_url(href):
-            hrefs_urls[href] = href
-        elif domain_root and is_root_relative_url(href):
-            hrefs_urls[href] = f"{domain_root}{href}"
-        elif is_data_uri(href):
-            data_uris.add(href)
+    # 1. Identify all potential media elements and their URLs
+    media_elements: list[Tag] = _extract_media_elements(soup)
+    if not media_elements:
+        return MultimodalSequence(html)
 
-    # Try to download media for each URL
-    tasks = [download_medium(u, session=session, headers={"Referer": url}) for u in hrefs_urls.values()]
-    media: tuple[Item | None] = await run_with_semaphore(tasks, limit=100, show_progress=False)
+    media_uris: list[Optional[str]] = [str(element.get("src")) if element.get("src") else None
+                                       for element in media_elements]
 
-    href_media = dict(zip(hrefs_urls.keys(), media))
+    # 2. Resolve base64 media
+    resolved_media: list[Optional[Item]] = _resolve_base64_media(list(zip(media_elements, media_uris)), source_url=url)
 
-    # Convert each base64-encoded data to the respective medium
-    for data_uri in data_uris:
-        mime_type, base64_encoding = decompose_data_uri(data_uri)
-        href_media[data_uri] = from_base64(base64_encoding, mime_type=mime_type, url=url)
+    # 3. Normalize URLs and prepare tasks for remaining elements
+    tasks = []
+    unique_urls = []  # We use a list to map normalized URLs to their download result to avoid duplicate downloads
 
-    # Replace hyperlinks with their respective media reference
-    media_count = 0
-    for full_match, hypertext, href in hyperlinks:
-        medium = href_media.get(href)
+    # Normalize URLs in URI list
+    for i, uri in enumerate(media_uris):
+        if uri and domain_root and is_root_relative_url(uri):
+            media_uris[i] = f"{domain_root}{uri}"
+
+    # Create retrieval tasks for URL elements
+    for element, uri in zip(media_elements, media_uris):
+        if uri and is_url(uri) and uri not in unique_urls:
+            if element.name in ["video", "source"]:
+                if source_element:
+                    tasks.append(fetch_video_via_page(source_element, uri))
+                else:
+                    tasks.append(download_video(uri, session=session, headers={"Referer": url} if url else {}, **kwargs))
+            else:  # It's an image
+                if source_element:
+                    tasks.append(fetch_image_via_page(source_element, uri, **kwargs))
+                else:
+                    tasks.append(download_image(uri, session=session, headers={"Referer": url} if url else {}, **kwargs))
+            unique_urls.append(uri)
+
+    # 4. Download media
+    media_results = await run_with_semaphore(tasks, limit=20, show_progress=False)
+    url_to_medium = dict(zip(unique_urls, media_results))
+
+    # 5. Add downloaded media to resolved_media
+    for i, uri in enumerate(media_uris):
+        if medium := url_to_medium.get(uri):
+            resolved_media[i] = medium
+
+    # 6. Replace or remove elements in the SOUP
+    for element, medium in zip(media_elements, resolved_media):
+        # Check if element is still in the tree
+        if element.parent is None:
+            continue
+
         if medium:
-            # Ignore small images
-            to_ignore = isinstance(medium, Image) and (medium.width < 256 or medium.height < 256)
-            reference = "" if to_ignore else medium.reference
-            replacement = f"{hypertext} {reference}" if hypertext else reference
-            text = text.replace(full_match, replacement)
-            media_count += 1 if not to_ignore else 0
-        elif remove_urls:
-            text = text.replace(full_match, hypertext)
+            too_small = isinstance(medium, Image) and (medium.width < 256 or medium.height < 256)
 
-    return MultimodalSequence(text)
+            if not too_small:
+                # Replace the element with its reference
+                # if element.name == "a":
+                #     hypertext = element.get_text().strip()
+                #     replacement = f"{hypertext} {medium.reference}" if hypertext else medium.reference
+                # else:
+                    # replacement = medium.reference
+
+                element.replace_with(medium.reference)
+                continue
+
+        # If medium is None or too small or couldn't be resolved, remove it
+        element.decompose()
+
+    return MultimodalSequence(str(soup))
+
+
+# Fetches a resource from within the frame so replay/archive service workers
+# intercept it (the shared request context and top document escape that scope).
+# The Blob is encoded via the browser-native FileReader; Blobs are disk-backed in
+# Chromium, so this stays memory-friendly for large video. Base64 is required
+# because Playwright's evaluate can only return JSON-serializable values, so
+# binary cannot cross the CDP boundary directly.
+_IN_FRAME_FETCH_JS = """
+async (url) => {
+    const resp = await fetch(url, { credentials: 'include' });
+    if (!resp.ok) return { ok: false, status: resp.status };
+    const blob = await resp.blob();
+    const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+    });
+    return { ok: true, dataUrl, contentType: resp.headers.get('content-type') };
+}
+"""
+
+
+async def _retrieve_media_bytes(
+        source_element: Union[Frame, Page],
+        url: str,
+        timeout: float = 30.0,
+) -> tuple[Optional[bytes], Optional[str]]:
+    """Retrieves the raw bytes of a media URL using the browser's authenticated
+    session, without navigating a tab (which hangs forever on streamed video).
+
+    Two strategies are tried, in order of archive/anti-bot fidelity:
+      1. In-frame ``fetch()`` executed inside ``source_element`` (the frame that
+         renders the media). Running the request in that exact frame is essential
+         for replay-based archives (e.g. Ghostarchive / ReplayWeb.page), where
+         archived media is served by a service worker whose scope only covers the
+         replay ``iframe``; a request from the top document or from the shared
+         request context escapes that scope and 404s against the live web.
+      2. Playwright's shared ``APIRequestContext`` (``context.request``), which
+         reuses the browser context's cookies. Used as a fallback for cross-origin
+         media the in-frame fetch cannot read (e.g. blocked by CORS).
+
+    Returns a ``(content, content_type)`` tuple; ``content`` is ``None`` on failure.
+    """
+    # Strategy 1: in-frame fetch inside the frame that renders the media
+    try:
+        result = await asyncio.wait_for(source_element.evaluate(_IN_FRAME_FETCH_JS, url), timeout=timeout)
+        if result and result.get("ok"):
+            content = base64.b64decode(result["dataUrl"].partition(",")[2])
+            if content:
+                logger.debug(f"Retrieved {url} via in-frame fetch ({len(content)} bytes)")
+                return content, result.get("contentType")
+        else:
+            logger.debug(f"In-frame fetch failed for {url}: {result}")
+    except asyncio.TimeoutError:
+        logger.debug(f"In-frame fetch timed out for {url}")
+    except Exception:
+        logger.debug(f"In-frame fetch error for {url}", exc_info=True)
+
+    # Strategy 2: shared request context (for cross-origin media not reachable in-frame)
+    page = source_element if isinstance(source_element, Page) else source_element.page
+    try:
+        response = await page.context.request.get(url, timeout=timeout * 1000)
+        if response.ok:
+            content = await response.body()
+            logger.debug(f"Retrieved {url} via request context ({len(content)} bytes)")
+            return content, response.headers.get("content-type")
+        logger.debug(f"Request-context fetch failed for {url}: HTTP {response.status}")
+    except Exception:
+        logger.debug(f"Request-context fetch error for {url}", exc_info=True)
+
+    return None, None
+
+
+async def get_url_content_via_page(source_element: Union[Frame, Page], url: str) -> Optional[bytes]:
+    content, _ = await _retrieve_media_bytes(source_element, url)
+    return content
+
+
+async def fetch_image_via_page(source_element: Union[Frame, Page], url: str, **kwargs) -> Optional[Image]:
+    content = await get_url_content_via_page(source_element, url)
+    return image_from_binary(content, source_url=url, **kwargs) if content else None
+
+
+async def fetch_video_via_page(source_element: Union[Frame, Page], url: str) -> Optional[Video]:
+    content, content_type = await _retrieve_media_bytes(source_element, url)
+
+    # HLS playlists are plain text manifests, not raw video: remux via ffmpeg,
+    # reusing the shared request context so segment downloads stay authenticated.
+    if content_type and is_hls(content_type):
+        page = source_element if isinstance(source_element, Page) else source_element.page
+        return await download_hls_video(url, session=page.context.request)
+
+    return video_from_binary(content, source_url=url) if content else None
 
 
 def is_url(href: str) -> bool:
@@ -223,18 +411,31 @@ def decompose_data_uri(href: str) -> Optional[tuple[str, str]]:
 
 async def to_multimodal_sequence(
         html: str | None,
-        session: aiohttp.ClientSession,
+        session: Union[aiohttp.ClientSession, "APIRequestContext"],
         **kwargs
 ) -> Optional[MultimodalSequence]:
     """Turns a scraped output into the corresponding MultimodalSequences
-    by converting the HTML into Markdown and resolving media hyperlinks."""
-    try:
-        text = md(html, heading_style="ATX")
-    except RecursionError as e:
+    by resolving media hyperlinks in HTML and then converting to Markdown."""
+    if html is None:
         return None
 
-    text = postprocess_scraped(text)
-    return await resolve_media_hyperlinks(text, session=session, **kwargs)
+    # 0. Preprocess HTML
+    html = preprocess_html(html)
+    assert html is not None
+
+    # 1. Resolve media in HTML
+    mms = await resolve_media(html, session=session, **kwargs)
+    if not mms:
+        return None
+
+    # 2. Convert resulting (partially replaced) HTML to Markdown
+    try:
+        markdown = md(str(mms), heading_style="ATX")
+        text = postprocess_markdown(markdown)
+    except RecursionError:
+        return None
+
+    return MultimodalSequence(text)
 
 
 def sanitize(text: str) -> str:
@@ -243,16 +444,18 @@ def sanitize(text: str) -> str:
 
 
 def from_base64(b64_data: str, mime_type: str = "image/jpeg", url: str | None = None) -> Optional[Item]:
-    """Converts a base64-encoded image to an Item object."""
+    """Converts a base64-encoded image or video to an Item object."""
     try:
         binary_data = base64.b64decode(b64_data, validate=True)
         if binary_data:
-            if mime_type.startswith("image/"):
+            if mime_type == "image/svg+xml":
+                return None  # We do not care about SVGs
+            elif mime_type.startswith("image/"):
                 return Image(binary_data=binary_data, source_url=url)
             elif mime_type.startswith("video/"):
                 return Video(binary_data=binary_data, source_url=url)
             else:
-                raise ValueError(f"Unsupported media type: {mime_type}")
+                raise ValueError(f"Unsupported base64 mime type: {mime_type}")
     except binascii.Error:  # base64 validation failed
         return None
     except UnidentifiedImageError:  # Pillow could not identify image format

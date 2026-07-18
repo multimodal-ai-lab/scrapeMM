@@ -2,8 +2,6 @@ from abc import ABC, abstractmethod
 
 from bs4 import BeautifulSoup
 
-from scrapemm.integrations.archive_today import ARCHIVE_TODAY_CONTENT_DIV_ID
-
 
 class HtmlPostProcessor(ABC):
     """
@@ -34,6 +32,7 @@ class ArchiveTodayPostProcessor(HtmlPostProcessor):
         Try to extract the record content from the HTML retrieved from Archive.today. 
         If the expected div is not found, return the original HTML.
         """
+        from scrapemm.integrations.archive_today import ARCHIVE_TODAY_CONTENT_DIV_ID
         soup = BeautifulSoup(html, "html.parser")
         content_div = soup.find("div", id=ARCHIVE_TODAY_CONTENT_DIV_ID)
         return content_div.decode_contents() if content_div else html

@@ -61,8 +61,8 @@ Web scraping is done with [Firecrawl](https://github.com/mendableai/firecrawl) a
 
 ### Archiving Services
 - ✅ Perma.cc
-- (✅) Archive.today: Sometimes ending up in TimeoutErrors, generally pretty slow
+- ✅ Archive.today: Rarely ending up in TimeoutErrors
 - ✅ MediaVault (mvau.lt)
-- ❌ Wayback Machine, Internet Archive (web.archive.org)
-- ❌ AwesomeScreenshot.com
-- ❌ Ghost Archive (ghostarchive.org)
+- ✅ Internet Archive (web.archive.org)
+- ✅ AwesomeScreenshot.com
+- ✅ Ghostarchive (ghostarchive.org)

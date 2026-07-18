@@ -44,7 +44,6 @@ class Decodo:
 
     async def scrape(
             self, url: str,
-            remove_urls: bool,
             session: aiohttp.ClientSession,
             format: str,
             enable_js: bool = True,
@@ -55,7 +54,6 @@ class Decodo:
 
         Args:
             url: The URL to scrape
-            remove_urls: Whether to remove URLs from hyperlinks in the result
             session: The aiohttp ClientSession to use
             enable_js: Whether to enable JavaScript rendering (default: True)
             timeout: Request timeout in seconds (default: 30)
@@ -95,7 +93,7 @@ class Decodo:
             if format == "html":
                 return html
             else:
-                return await to_multimodal_sequence(html, remove_urls=remove_urls, session=session, url=url)
+                return await to_multimodal_sequence(html, session=session, url=url)
         return None
 
     async def _call_decodo(

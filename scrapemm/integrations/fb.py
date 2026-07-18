@@ -18,7 +18,7 @@ from scrapemm.download.common import HEADERS
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.integrations.ytdlp import get_content_with_ytdlp
 from scrapemm.secrets import get_secret
-from scrapemm.util import parse_netscape_cookies, postprocess_scraped
+from scrapemm.util import parse_netscape_cookies, postprocess_markdown
 
 logger = logging.getLogger("scrapeMM")
 
@@ -203,7 +203,7 @@ class Facebook(RetrievalIntegration):
 
         # Retrieve text only
         text = md(html, heading_style="ATX")
-        postprocessed_text = postprocess_scraped(text)
+        postprocessed_text = postprocess_markdown(text)
         # Remove SVG icons for like/comment/share
         postprocessed_text = re.sub(
             LIKE_COMMENT_SHARE_SVG_REGEX, "", str(postprocessed_text)

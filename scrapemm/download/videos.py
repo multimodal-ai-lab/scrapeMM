@@ -1,5 +1,5 @@
-from typing import Optional
-from urllib.parse import urljoin, urlparse
+from typing import Optional, TYPE_CHECKING, Union
+from urllib.parse import urljoin
 import logging
 import os
 import shutil
@@ -10,94 +10,96 @@ import m3u8
 from ezmm import Video
 from ezmm.util import ts_to_mp4
 
-from scrapemm.download.requests import fetch_headers
-from scrapemm.download.common import HEADERS, ssl_context
+from scrapemm.download.util import looks_like_hls_url, looks_like_video_file_url
+
+if TYPE_CHECKING:
+    from playwright.async_api import APIRequestContext
+
+from scrapemm.download.requests import fetch_headers, request_static
+from scrapemm.download.common import HEADERS
 
 logger = logging.getLogger("scrapeMM")
-
-VIDEO_FILE_EXTENSIONS = (
-    ".mp4", ".webm", ".mov", ".m4v", ".mkv", ".avi", ".flv", ".wmv", ".ts"
-)
-
-
-def _looks_like_hls_url(url: str) -> bool:
-    return urlparse(url).path.lower().endswith(".m3u8")
-
-
-def _looks_like_video_file_url(url: str) -> bool:
-    return urlparse(url).path.lower().endswith(VIDEO_FILE_EXTENSIONS)
 
 
 async def download_video(
         video_url: str,
-        session: aiohttp.ClientSession
+        session: Union[aiohttp.ClientSession, "APIRequestContext"],
+        **kwargs
 ) -> Optional[Video]:
     """Downloads the linked video (stream) and returns it as a Video object."""
 
     try:
-        headers = await fetch_headers(video_url, session, timeout=3)
+        headers = await fetch_headers(video_url, session, timeout=3000, **kwargs)
         content_type = headers.get('Content-Type') or headers.get('content-type') or ''
-        # Normalize for robust detection
-        normalized_ct = content_type.split(';', 1)[0].strip().lower()
-        if normalized_ct.startswith("video/"):
-            return await download_video_file(video_url, session)
-        elif (
-            normalized_ct in ("application/vnd.apple.mpegurl", "application/x-mpegurl")
-            or "mpegurl" in normalized_ct
-            or _looks_like_hls_url(video_url)
-        ):
-            return await download_hls_video(video_url, session)
-        elif normalized_ct == "binary/octet-stream":
-            if _looks_like_hls_url(video_url):
-                return await download_hls_video(video_url, session)
-            if _looks_like_video_file_url(video_url):
-                return await download_video_file(video_url, session)
-            logger.warning(
-                f"Cannot download video from {video_url}. Content type is binary/octet-stream and URL has no known video extension."
-            )
+
+        if is_video(content_type) or looks_like_video_file_url(video_url):
+            return await download_video_file(video_url, session, **kwargs)
+        elif is_hls(content_type) or looks_like_hls_url(video_url):
+            return await download_hls_video(video_url, session, **kwargs)
         else:
             logger.warning(
                 f"Cannot download video from {video_url}. Unable to handle content type: {content_type}."
             )
 
     except Exception as e:
-        logger.debug(f"Error downloading video from {video_url}"
-                     f"\n{type(e).__name__}: {e}")
+        logger.debug(f"Error downloading video from {video_url}", exc_info=e)
+
+
+def is_video(content_type: str) -> bool:
+    """Returns True iff the given content type is a video."""
+    normalized_ct = content_type.split(';', 1)[0].strip().lower()
+    return normalized_ct.startswith("video/")
+
+
+def is_hls(content_type: str) -> bool:
+    """Returns True iff the given content type is an HLS playlist."""
+    normalized_ct = content_type.split(';', 1)[0].strip().lower()
+    return (
+            normalized_ct in ("application/vnd.apple.mpegurl", "application/x-mpegurl")
+            or "mpegurl" in normalized_ct
+    )
 
 
 async def download_video_file(
         video_url: str,
-        session: aiohttp.ClientSession
+        session: Union[aiohttp.ClientSession, "APIRequestContext"],
+        **kwargs
 ) -> Optional[Video]:
     """Download a single video file from a URL and return it as a Video object."""
     try:
-        async with session.get(video_url, ssl=ssl_context) as response:
-            if response.status == 200:
-                content = await response.read()
-                video = Video(binary_data=content, source_url=video_url)
-                video.relocate(move_not_copy=True)
-                return video
-            else:
-                logger.debug(f"Failed to download video. {response.status}: {response.reason}")
+        content = await request_static(video_url, session, get_text=False, **kwargs)
+        if content:
+            assert isinstance(content, bytes)
+            return video_from_binary(content, video_url)
+        else:
+            logger.debug(f"Failed to download video from {video_url}")
     except Exception as e:
         logger.debug(f"Error downloading video file from {video_url}"
                      f"\n{type(e).__name__}: {e}")
 
 
+def video_from_binary(binary_data: bytes, source_url: str) -> Video:
+    """Create a Video object from binary data."""
+    video = Video(binary_data=binary_data, source_url=source_url)
+    video.relocate(move_not_copy=True)
+    return video
+
+
 async def download_hls_video(
         playlist_url: str,
-        session: aiohttp.ClientSession
+        session: Union[aiohttp.ClientSession, "APIRequestContext"],
+        **kwargs
 ) -> Optional[Video]:
     """Download an HTTP Live Streaming (HLS) video from a playlist URL and return it as a Video object."""
     try:
         variant_content = ""
 
         # Download the m3u8 playlist file
-        async with session.get(playlist_url, ssl=ssl_context) as response:
-            if response.status != 200:
-                logger.debug(f"Failed to download playlist: {response.status}")
-                return None
-            playlist_content = await response.text()
+        playlist_content = await request_static(playlist_url, session, get_text=True, **kwargs)
+
+        if not playlist_content:
+            logger.debug(f"Failed to download playlist: {playlist_url}")
+            return None
 
         playlist = m3u8.loads(playlist_content)
         base_url = playlist_url.rsplit('/', 1)[0] + '/'
@@ -112,11 +114,11 @@ async def download_hls_video(
             variant_url = urljoin(base_url, best_playlist.uri)
 
             # Download the variant playlist
-            async with session.get(variant_url, ssl=ssl_context) as var_response:
-                if var_response.status != 200:
-                    logger.error(f"Failed to download variant playlist: {var_response.status}")
-                    return None
-                variant_content = await var_response.text()
+            variant_content = await request_static(variant_url, session, get_text=True, **kwargs)
+
+            if not variant_content:
+                logger.error(f"Failed to download variant playlist: {variant_url}")
+                return None
 
             # Parse the variant playlist
             variant_playlist = m3u8.loads(variant_content)
@@ -161,12 +163,11 @@ async def download_hls_video(
             else:
                 segment_url = urljoin(base_url, segment.uri)
 
-            # Download the segment with SSL disabled
+            # Download the segment
             try:
-                async with session.get(segment_url, ssl=ssl_context) as seg_response:
-                    if seg_response.status == 200:
-                        segment_data = await seg_response.read()
-                        video_segments.append(segment_data)
+                segment_data = await request_static(segment_url, session, get_text=False)
+                if segment_data:
+                    video_segments.append(segment_data)
             except Exception as e:
                 logger.debug(f"Failed to download segment {i} from {segment_url}: {e}")
 
@@ -187,10 +188,10 @@ async def download_hls_video(
     return None
 
 
-async def is_maybe_video_url(url: str, session: aiohttp.ClientSession) -> bool:
+async def is_maybe_video_url(url: str, session: Union[aiohttp.ClientSession, "APIRequestContext"]) -> bool:
     """Returns True iff the URL points at an accessible video file/stream."""
     try:
-        headers = await fetch_headers(url, session, timeout=3)
+        headers = await fetch_headers(url, session, timeout=3000)
         content_type = headers.get('Content-Type') or headers.get('content-type') or ''
         if content_type.startswith("video/") or content_type == "application/vnd.apple.mpegurl":
             # Surely a video
@@ -198,7 +199,7 @@ async def is_maybe_video_url(url: str, session: aiohttp.ClientSession) -> bool:
         else:
             # If the content is a binary download stream, use URL suffix heuristics.
             return content_type == "binary/octet-stream" and (
-                _looks_like_video_file_url(url) or _looks_like_hls_url(url)
+                    looks_like_video_file_url(url) or looks_like_hls_url(url)
             )
 
     except Exception:
@@ -211,7 +212,6 @@ async def _ffmpeg_remux_hls_to_mp4(playlist_url: str) -> Optional[bytes]:
     We pass headers for basic compatibility and copy streams without re-encoding.
     """
     import asyncio
-    import shlex
 
     # Prepare optional headers for ffmpeg.
     user_agent = HEADERS.get('User-Agent', '')

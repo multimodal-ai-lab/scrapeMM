@@ -109,3 +109,15 @@ async def test_tiktok(url):
 async def test_x(url: str, expected: dict[str, int]):
     result = await retrieve(url)
     assert_expectations(result, expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url, expected", [
+    ("https://bsky.app/profile/eliothiggins.bsky.social/post/3mqrktuon4s2l", dict()),
+    ("https://bsky.app/profile/mabellogan.bsky.social/post/3mqtbpexyks2i", dict(image=1)),
+    ("https://bsky.app/profile/dennishorn.de/post/3mqt2k6c7oc2s", dict(image=4)),
+    ("https://bsky.app/profile/acyn.bsky.social/post/3mqspt2uqxz22", dict(video=1)),
+])
+async def test_bluesky(url: str, expected: dict[str, int]):
+    result = await retrieve(url)
+    assert_expectations(result, expected)

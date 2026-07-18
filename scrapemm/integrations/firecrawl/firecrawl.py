@@ -72,7 +72,6 @@ class Firecrawl:
 
     async def scrape(self,
                      url: str,
-                     remove_urls: bool,
                      session: aiohttp.ClientSession,
                      format: str,
                      max_attempts: int = 3,
@@ -127,8 +126,7 @@ class Firecrawl:
             if format == "html":
                 return html
             else:
-                return await to_multimodal_sequence(html, remove_urls=remove_urls,
-                                                    session=session, url=url)
+                return await to_multimodal_sequence(html, session=session, url=url)
         return None
 
     async def _is_available(self, url: str, session: aiohttp.ClientSession) -> bool | None:

@@ -2,7 +2,6 @@ from typing import Optional
 
 from ezmm import MultimodalSequence
 
-from scrapemm.integrations.mvault import MediaVault
 from scrapemm.util import get_domain
 from .archive_org import ArchiveOrg
 from .bluesky import Bluesky
@@ -16,6 +15,9 @@ from .x import X
 from .youtube import YouTube
 from .perma_cc import PermaCC
 from .archive_today import ArchiveToday
+from .headed_browser import HeadedBrowser
+from .ghostarchive import Ghostarchive
+from .awesomescreenshot import AwesomeScreenshot
 
 RETRIEVAL_INTEGRATIONS = [
     X(),
@@ -27,9 +29,12 @@ RETRIEVAL_INTEGRATIONS = [
     YouTube(),
     PermaCC(),
     ArchiveToday(),
-    MediaVault(),
-    ArchiveOrg()
+    ArchiveOrg(),
+    HeadedBrowser(),
+    Ghostarchive(),
+    AwesomeScreenshot()
 ]
+
 DOMAIN_TO_INTEGRATION = {
     domain: integration
     for integration in RETRIEVAL_INTEGRATIONS

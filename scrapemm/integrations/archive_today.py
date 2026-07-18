@@ -1,28 +1,20 @@
 """Integration for Archive.today retrieval."""
 
 import logging
-from io import BytesIO
-from urllib.parse import urljoin
+from typing import Optional
 
-import PIL.Image
-from ezmm import MultimodalSequence, Image, Video, Item
-from markdownify import markdownify as md
+from ezmm import MultimodalSequence
 from playwright.async_api import TimeoutError, async_playwright, BrowserContext, Page
 from playwright_stealth import Stealth
 
 from scrapemm.download.common import HEADERS
 from scrapemm.integrations.base import RetrievalIntegration
-from scrapemm.util import postprocess_scraped, is_data_uri, decompose_data_uri, from_base64, \
-    get_markdown_hyperlinks
 
 logger = logging.getLogger("scrapeMM")
 
 ARCHIVE_TODAY_CONTENT_DIV_ID = "CONTENT"
 
-IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff")
-VIDEO_EXTENSIONS = (".mp4", ".webm", ".mov", ".m4v", ".mkv", ".avi", ".flv", ".wmv", ".ts")
-
-cookies = [
+COOKIES = [
     # --- archive.is ---
     {"name": "qki", "value": "899095247488898009", "domain": ".archive.is", "path": "/",
      "expires": 1776116330, "httpOnly": False, "secure": False, "sameSite": "Lax"},
@@ -133,137 +125,6 @@ cookies = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Media helpers
-# ---------------------------------------------------------------------------
-
-async def _download_media_with_playwright(api_request_context, src: str, base_url: str) -> bytes | None:
-    """Download media bytes using Playwright's API request context (same session/cookies)."""
-    url = src if src.startswith("http") else urljoin(base_url, src)
-    try:
-        response = await api_request_context.get(url, headers={"Referer": base_url})
-        if response.ok:
-            return await response.body()
-    except Exception as e:
-        logger.debug(f"Failed to download media from {url}: {type(e).__name__}: {e}")
-    return None
-
-
-def _bytes_to_image(data: bytes, source_url: str, max_size: tuple[int, int] = (2048, 2048)) -> Image | None:
-    """Convert raw bytes to an ezmm Image, skipping small or unidentifiable images."""
-    try:
-        pillow_img = PIL.Image.open(BytesIO(data))
-    except (PIL.UnidentifiedImageError, Exception):
-        return None
-
-    if pillow_img.width <= 256 or pillow_img.height <= 256:
-        return None
-
-    if pillow_img.width > max_size[0] or pillow_img.height > max_size[1]:
-        pillow_img.thumbnail(max_size, PIL.Image.Resampling.LANCZOS)
-
-    image = Image(pillow_image=pillow_img, source_url=source_url)
-    image.relocate(move_not_copy=True)
-    return image
-
-
-def _bytes_to_video(data: bytes, source_url: str) -> Video | None:
-    """Convert raw bytes to an ezmm Video."""
-    try:
-        video = Video(binary_data=data, source_url=source_url)
-        video.relocate(move_not_copy=True)
-        return video
-    except Exception:
-        return None
-
-
-def _resolve_media_from_base64(data_uri: str, page_url: str) -> Item | None:
-    """Decode a base64 data URI into an Image or Video, excluding small images."""
-    result = decompose_data_uri(data_uri)
-    if result is None:
-        return None
-    mime_type, b64_data = result
-    item = from_base64(b64_data, mime_type=mime_type, url=page_url)
-    if isinstance(item, Image) and (item.width <= 256 or item.height <= 256):
-        return None
-    return item
-
-
-# ---------------------------------------------------------------------------
-# Page-level extraction helpers
-# ---------------------------------------------------------------------------
-
-async def _collect_media_srcs(content_el) -> tuple[list[str], list[str]]:
-    """Extract image and video src attributes from the content element."""
-    img_elements = content_el.locator("img")
-    img_srcs = []
-    for i in range(await img_elements.count()):
-        src = await img_elements.nth(i).get_attribute("src")
-        if src:
-            img_srcs.append(src)
-
-    video_srcs = []
-    video_elements = content_el.locator("video[src]")
-    for i in range(await video_elements.count()):
-        src = await video_elements.nth(i).get_attribute("src")
-        if src:
-            video_srcs.append(src)
-    source_elements = content_el.locator("video source[src]")
-    for i in range(await source_elements.count()):
-        src = await source_elements.nth(i).get_attribute("src")
-        if src:
-            video_srcs.append(src)
-
-    return img_srcs, video_srcs
-
-
-async def _download_all_media(
-        api_request_context,
-        img_srcs: list[str],
-        video_srcs: list[str],
-        page_url: str,
-) -> dict[str, Item | None]:
-    """Download (or decode) all collected media sources and return a src→Item mapping."""
-    media: dict[str, Item | None] = {}
-
-    for src in img_srcs:
-        if src in media:
-            continue
-        if is_data_uri(src):
-            media[src] = _resolve_media_from_base64(src, page_url)
-        elif src.startswith("data:"):
-            # Non-base64 data URIs (e.g. URL-encoded SVGs) – skip
-            continue
-        else:
-            data = await _download_media_with_playwright(api_request_context, src, page_url)
-            full_url = src if src.startswith("http") else urljoin(page_url, src)
-            media[src] = _bytes_to_image(data, full_url) if data else None
-
-    for src in video_srcs:
-        if src in media:
-            continue
-        if is_data_uri(src):
-            media[src] = _resolve_media_from_base64(src, page_url)
-        elif src.startswith("data:"):
-            continue
-        else:
-            data = await _download_media_with_playwright(api_request_context, src, page_url)
-            full_url = src if src.startswith("http") else urljoin(page_url, src)
-            media[src] = _bytes_to_video(data, full_url) if data else None
-
-    return media
-
-
-def _replace_media_in_markdown(markdown_text: str, media: dict[str, Item | None]) -> str:
-    """Replace markdown hyperlinks whose href matches a downloaded medium with inline references."""
-    for full_match, hypertext, href in get_markdown_hyperlinks(markdown_text):
-        medium = media.get(href)
-        if medium is not None:
-            replacement = f"{hypertext} {medium.reference}" if hypertext else medium.reference
-            markdown_text = markdown_text.replace(full_match, replacement)
-    return markdown_text
-
-
 async def _load_page(context: BrowserContext, url: str) -> Page | None:
     """Navigate to *url* inside *context*, returning the Page or None on failure."""
     page = await context.new_page()
@@ -291,10 +152,6 @@ async def _extract_content_html(page: Page) -> str | None:
         return None
 
 
-# ---------------------------------------------------------------------------
-# Integration class
-# ---------------------------------------------------------------------------
-
 class ArchiveToday(RetrievalIntegration):
     name = "Archive.today"
     domains = [
@@ -310,29 +167,22 @@ class ArchiveToday(RetrievalIntegration):
     async def _connect(self):
         self.connected = True
 
-    async def _get(self, url: str, **kwargs) -> MultimodalSequence | None:
-        return await self.download_record(url)
+    async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
+        """Retrieves the archived web page content as a MultimodalSequence.
 
-    async def download_record(self, url: str) -> MultimodalSequence | None:
+        Archive.today has strong anti-bot protection and requests captchas unless
+        the recorded session cookies are present. A headless Playwright browser with
+        stealth patches plus those cookies is enough to bypass the captcha, so there
+        is no performance reason to spin up a full headed browser here.
+
+        Media is resolved with the shared pipeline (``to_multimodal_sequence`` with
+        ``source_element=page``): media bytes are fetched in-page via the browser's
+        authenticated session, so the archive's cookies are reused automatically.
         """
-        Retrieves the archived web page content as a MultimodalSequence.
-        Uses a single Playwright session for both page loading and media downloading,
-        avoiding session mismatch issues.
-
-        Archive.today occasionally requires solving captchas. To bypass these,
-        we use Playwright with stealth settings (provided by playwright-stealth)
-        and a custom user-agent with real cookies.
-
-        Args:
-            url (str): The URL of the archived page on Archive.today.
-        Returns:
-            MultimodalSequence | None: The multimodal content, or None if retrieval fails.
-        """
-        # Download content and media
         async with Stealth().use_async(async_playwright()) as p:
             browser = await p.chromium.launch(headless=True)
             context = await browser.new_context(user_agent=HEADERS["User-Agent"])
-            await context.add_cookies(cookies)
+            await context.add_cookies(COOKIES)
 
             try:
                 page = await _load_page(context, url)
@@ -343,20 +193,9 @@ class ArchiveToday(RetrievalIntegration):
                 if content_html is None:
                     return None
 
-                content_el = page.locator(f"#{ARCHIVE_TODAY_CONTENT_DIV_ID}")
-                img_srcs, video_srcs = await _collect_media_srcs(content_el)
-                media = await _download_all_media(context.request, img_srcs, video_srcs, url)
+                from scrapemm.util import to_multimodal_sequence
+                return await to_multimodal_sequence(
+                    content_html, session=context.request, url=url, source_element=page
+                )
             finally:
                 await browser.close()
-
-        # Convert HTML to Markdown
-        try:
-            markdown_text = md(content_html, heading_style="ATX")
-        except RecursionError:
-            return None
-        markdown_text = postprocess_scraped(markdown_text)
-
-        # Inline downloaded media into the Markdown text
-        markdown_text = _replace_media_in_markdown(markdown_text, media)
-
-        return MultimodalSequence(markdown_text)

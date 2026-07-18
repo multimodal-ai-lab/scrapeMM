@@ -17,10 +17,7 @@ from scrapemm.util import run_with_semaphore, get_domain, normalize_video
 logger = logging.getLogger("scrapeMM")
 METHODS = ["integrations", "firecrawl", "decodo"]
 
-UNSUPPORTED_DOMAINS = [
-    "ghostarchive.org",
-    "archive.org",
-]
+UNSUPPORTED_DOMAINS = []
 
 BEST_METHODS = {
     "instagram.com": ["integrations", "decodo"],
@@ -35,7 +32,7 @@ BEST_METHODS = {
     "bsky.app": ["integrations"],
     "truthsocial.com": ["firecrawl"],
     "reddit.com": ["integrations"],
-    "awesomescreenshot.com": ["firecrawl"],
+    "awesomescreenshot.com": ["integrations"],
     "youtube.com": ["integrations"],
     "youtu.be": ["integrations"],
     "perma.cc": ["integrations"],
@@ -58,7 +55,6 @@ BEST_METHODS = {
 
 async def retrieve(
         urls: str | Collection[str],
-        remove_urls: bool = False,
         show_progress: bool = True,
         actions: list[dict] | None = None,
         methods: Literal["auto"] | list[str] | list[Literal["auto"] | list[str]] | None = "auto",
@@ -70,8 +66,6 @@ async def retrieve(
     For each URL, returns a ScrapingResponse containing the retrieved content, error, and method.
 
     :param urls: The URL(s) to retrieve.
-    :param remove_urls: Whether to remove URLs from hyperlinks contained in the
-        retrieved text (and only keep the hypertext).
     :param show_progress: Whether to show a progress bar while retrieving URLs.
     :param actions: A list of actions to perform with Firecrawl on the webpage before scraping.
         The actions will be ignored if an API integration (e.g., TikTok) is used to retrieve the content.
@@ -126,7 +120,7 @@ async def retrieve(
 
     async with aiohttp.ClientSession(headers=HEADERS) as session:
         # Retrieve URLs concurrently
-        tasks = [_retrieve_single(url, remove_urls, session, url_to_methods[url], actions,
+        tasks = [_retrieve_single(url, session, url_to_methods[url], actions,
                                   format, max_video_size, prioritize) for url in
                  urls_unique]
         results = await run_with_semaphore(tasks, limit=40, show_progress=show_progress and len(urls_unique) > 1,
@@ -142,7 +136,6 @@ async def retrieve(
 
 async def _retrieve_single(
         url: str,
-        remove_urls: bool,
         session: aiohttp.ClientSession,
         methods: Literal["auto"] | list[str] | None = "auto",
         actions: list[dict] | None = None,
@@ -184,9 +177,8 @@ async def _retrieve_single(
         # Find available integrations TODO: Propagate name of actual integration to ScrapingResponse
         method_map = {
             "integrations": lambda: retrieve_via_integration(url, session=session, max_video_size=max_video_size),
-            "firecrawl": lambda: fire.scrape(url, remove_urls=remove_urls,
-                                             session=session, format=format, actions=actions),
-            "decodo": lambda: decodo.scrape(url, remove_urls, session,
+            "firecrawl": lambda: fire.scrape(url, session=session, format=format, actions=actions),
+            "decodo": lambda: decodo.scrape(url, session,
                                             format=format,
                                             timeout=15 if prioritize == "speed" else 60,
                                             max_retries=1 if prioritize == "speed" else 5),
