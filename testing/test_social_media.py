@@ -90,13 +90,15 @@ async def test_telegram(url: str, expected: dict[str, int]):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("url", [
-    "https://www.tiktok.com/@realdonaldtrump/video/7433870905635409198",
-    "https://www.tiktok.com/@xxxx.xxxx5743/video/7521704371109793046"
+@pytest.mark.parametrize("url, expected", [
+    ("https://www.tiktok.com/@realdonaldtrump/video/7433870905635409198", dict(video=1)),  # Post
+    ("https://www.tiktok.com/@xxxx.xxxx5743/video/7521704371109793046", dict(video=1)),  # Post
+    ("https://www.tiktok.com/@tomekfoodemprior", dict(image=1)),  # User profile (with profile image)
+    ("https://www.tiktok.com/@policebodycam6741", dict(image=1)),  # User profile (with profile image)
 ])
-async def test_tiktok(url):
+async def test_tiktok(url: str, expected: dict[str, int]):
     result = await retrieve(url)
-    assert_expectations(result, dict(video=1))
+    assert_expectations(result, expected)
 
 
 @pytest.mark.asyncio

@@ -39,7 +39,7 @@ async def test_is_image_url(url, expected):
 
 async def download_img(url):
     async with aiohttp.ClientSession(headers=HEADERS) as session:
-        return await download_image(url, session)
+        return await download_image(url, session, ignore_small_images=False)
 
 
 @pytest.mark.asyncio
@@ -51,7 +51,8 @@ async def download_img(url):
     "https://archive.is/uTVE4/da2c6541801809f1b665e8992f7d214621ec9443/scr.png",
     "https://mediaproxy.snopes.com/width/1200/https://media.snopes.com/2024/01/origin_of_gauze.jpg",
     "https://storage.verify-sy.com/images/articles/691f227ff49091ec373a9cdd/68bf2c6fe5df49b4404c038f.png",
-    "https://storage.verify-sy.com/1784109845089-pn1nam.jpg"
+    "https://storage.verify-sy.com/1784109845089-pn1nam.jpg",
+    "https://p16-common-sign.tiktokcdn-us.com/tos-useast2a-avt-0068-euttp/7ca6a9e450cc618d8ca90a87e079ad23~tplv-tiktokx-cropcenter:168:168.jpeg?dr=9638&refresh_token=28a5c587&x-expires=1784646000&x-signature=00hQTVGshzNQVVd7V%2Bceb7v9qs8%3D&t=4d5b0474&ps=13740610&shp=a5d48078&shcp=7996dd0b&idc=useast5"
 ])
 async def test_download_image(url):
     img = await download_img(url)

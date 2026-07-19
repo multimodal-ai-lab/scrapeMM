@@ -204,7 +204,7 @@ async def _retrieve_single(
             result = await method_map[method_name]()
 
         except NotImplementedError as e:
-            logger.debug(e)
+            logger.info("Reached a method that is not implemented.", exc_info=True)
             errors[method_name] = e
 
         except sqlite3.OperationalError as e:

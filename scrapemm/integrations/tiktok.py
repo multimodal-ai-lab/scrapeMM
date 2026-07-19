@@ -9,7 +9,7 @@ from ezmm import MultimodalSequence
 from ezmm.common.items import Video, Image
 from tiktok_research_api import TikTokResearchAPI, QueryVideoRequest, QueryUserInfoRequest, Criteria, Query
 
-from scrapemm.common.exceptions import ContentBlockedError
+from scrapemm.common.exceptions import ContentBlockedError, IPBannedError
 from scrapemm.download import download_image
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.integrations.ytdlp import download_video_with_ytdlp
@@ -69,11 +69,10 @@ class TikTok(RetrievalIntegration):
             else:
                 return await self._get_user_profile(url, session)
         except Exception as e:
-            if "Your IP address is blocked from accessing this post":
-                raise ContentBlockedError("Video is blocked by TikTok.")
+            if "Your IP address is blocked from accessing this post" in str(e):
+                raise IPBannedError(f"TikTok prevents your IP address from accessing this post: {str(e)}")
             elif "This post may not be comfortable for some audiences" in str(e):
-                raise ContentBlockedError("Video is blocked by TikTok for being 'uncomfortable for some audiences'. "
-                                          "Set a 'tiktok_cookie' in ScrapeMM to download this video.")
+                raise ContentBlockedError("Video is blocked by TikTok for being 'uncomfortable for some audiences'.")
             else:
                 raise e
 
@@ -134,26 +133,12 @@ class TikTok(RetrievalIntegration):
 
     async def _get_user_profile(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
         """Retrieves a TikTok user profile."""
-
         # Try API mode first if available
         if self.api_available:
             result = await self._get_profile_with_api(url, session)
             if result:
                 return result
-            logger.warning("API method failed for profile.")
-
-        # For profiles, yt-dlp has very limited capabilities
-        # We can only provide basic info that we can extract from the URL
-        username = self._extract_username(url)
-        if username:
-            text = f"""**TikTok Profile**
-Username: @{username}
-URL: {url}
-
-Note: Profile details require TikTok Research API access.
-Configure API credentials for full profile information."""
-            return MultimodalSequence([text])
-
+            logger.warning(f"TikTok API method failed for retrieving profile at {url}.")
         return None
 
     async def _get_profile_with_api(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
@@ -169,7 +154,7 @@ Configure API credentials for full profile information."""
             if not user_info:
                 return None
 
-            return await self._create_profile_sequence_from_api(user_info, url, session)
+            return await self._create_profile_sequence_from_api(username, user_info, url, session)
 
         except Exception as e:
             raise RuntimeError(f"Error retrieving TikTok user profile with API: {e}")
@@ -213,10 +198,9 @@ Views: {view_count:,} - Likes: {like_count:,} - Comments: {comment_count:,} - Sh
 
         return MultimodalSequence(items)
 
-    async def _create_profile_sequence_from_api(self, user_info: dict, url: str,
+    async def _create_profile_sequence_from_api(self, username: str, user_info: dict, url: str,
                                                 session: aiohttp.ClientSession) -> MultimodalSequence:
         """Creates MultimodalSequence from API profile data."""
-        username = user_info.get('username', 'Unknown')
         display_name = user_info.get('display_name', '')
         bio_description = user_info.get('bio_description', '')
         follower_count = user_info.get('follower_count', 0)
@@ -228,9 +212,9 @@ Views: {view_count:,} - Likes: {like_count:,} - Comments: {comment_count:,} - Sh
 
         avatar = None
         if avatar_url:
-            avatar = await download_image(avatar_url, session)
+            avatar = await download_image(avatar_url, session, ignore_small_images=False)
 
-        text = f"""**TikTok Profile** (API data)
+        text = f"""**TikTok Profile**
 User: {display_name} (@{username})
 {"Verified" if verified else "Not verified"}
 Profile image: {avatar.reference if avatar else 'None'}
@@ -244,11 +228,7 @@ Metrics:
 - Likes: {likes_count:,}
 - Videos: {video_count:,}"""
 
-        items = [text]
-        if avatar:
-            items.append(avatar)
-
-        return MultimodalSequence(items)
+        return MultimodalSequence(text)
 
     def _is_video_url(self, url: str) -> bool:
         """Determines if the URL is a TikTok video URL."""

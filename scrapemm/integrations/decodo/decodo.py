@@ -66,7 +66,7 @@ class Decodo:
             self._load_token()
 
         if not self._has_token():
-            logger.warning("Cannot scrape with Decodo: credentials not configured.")
+            logger.warning("⚠️ Cannot scrape with Decodo: credentials not configured.")
             return None
 
         domain = get_domain(url)
@@ -84,7 +84,6 @@ class Decodo:
         #                                    use_premium_proxy=use_premium_proxy)
 
         if html:
-
             # Apply domain-specific post-processing if available (e.g. for Archive.today)
             if domain := get_domain(url):
                 post_processor = domain_to_postprocessor.get(domain, None)
@@ -223,8 +222,8 @@ class Decodo:
                     raise
                 else:
                     logger.debug("Decodo API connection error. Retrying...")
-            except aiohttp.ClientError:
-                logger.error(f"Network error while scraping with Decodo.")
+            except aiohttp.ClientError as e:
+                logger.error(f"Network error while scraping with Decodo: {e}")
                 raise
             except (RateLimitError, asyncio.TimeoutError):
                 raise

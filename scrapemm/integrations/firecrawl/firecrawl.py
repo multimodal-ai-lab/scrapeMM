@@ -10,6 +10,7 @@ from requests import ConnectionError, ReadTimeout
 from requests.exceptions import RetryError
 
 from scrapemm.common import get_config_var, update_config
+from scrapemm.common.exceptions import UnsupportedDomainError, TargetUnavailableError
 from scrapemm.download.common import HEADERS
 from scrapemm.util import read_urls_from_file, get_domain, to_multimodal_sequence
 
@@ -79,12 +80,12 @@ class Firecrawl:
 
         domain = get_domain(url)
         if domain in NO_BOT_DOMAINS:
-            raise ValueError(f"Firecrawl cannot scrape sites from {domain}")
+            raise UnsupportedDomainError(f"Firecrawl cannot scrape sites from {domain}")
 
         if not self._firecrawl:
             await self.connect()
 
-        if (await self._is_available(url, session)) == False:
+        if (await self._ensure_availability(url, session)) == False:
             # Skip unavailable URLs which would otherwise cause Firecrawl to get stuck in an infinite loop.
             return None
 
@@ -129,17 +130,17 @@ class Firecrawl:
                 return await to_multimodal_sequence(html, session=session, url=url)
         return None
 
-    async def _is_available(self, url: str, session: aiohttp.ClientSession) -> bool | None:
-        """Probe if the URL is reachable. If an HTTP error >= 400 occurs, return False."""
+    async def _ensure_availability(self, url: str, session: aiohttp.ClientSession):
+        """Probe if the URL is reachable. If an HTTP error >= 400 occurs, raise an exception."""
         try:
-            async with session.head(url, timeout=2) as response:
+            async with session.head(url, timeout=2, headers=HEADERS) as response:
                 response.raise_for_status()
-                return True
+                return  # All fine
         except (ReadTimeout, asyncio.TimeoutError):
-            return None  # We don't know yet'
+            return  # We don't know yet'
         except ClientResponseError as e:
             logger.debug(f"Firecrawl skipping URL {url} due to unavailability: {e}")
-            return False
+            raise TargetUnavailableError(f"Target {url} is not scrapable: {e}")
 
 
 fire = Firecrawl()

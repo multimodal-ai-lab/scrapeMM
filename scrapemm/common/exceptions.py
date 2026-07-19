@@ -19,3 +19,7 @@ class ContentBlockedError(Exception):
 class UnsupportedDomainError(Exception):
     """The domain is not supported by the scraper."""
     pass
+
+
+class TargetUnavailableError(Exception):
+    """The target website is not available for scraping."""
