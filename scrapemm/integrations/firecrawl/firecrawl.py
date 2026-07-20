@@ -12,7 +12,7 @@ from requests.exceptions import RetryError
 from scrapemm.common import get_config_var, update_config
 from scrapemm.common.exceptions import UnsupportedDomainError, TargetUnavailableError
 from scrapemm.download.common import HEADERS
-from scrapemm.util import read_urls_from_file, get_domain, to_multimodal_sequence
+from scrapemm.util import read_urls_from_file, get_domain, to_multimodal_sequence, html2md
 
 logger = logging.getLogger("scrapeMM")
 
@@ -76,6 +76,7 @@ class Firecrawl:
                      session: aiohttp.ClientSession,
                      format: str,
                      max_attempts: int = 3,
+                     include_media: bool = True,
                      **kwargs) -> Optional[MultimodalSequence | str]:
 
         domain = get_domain(url)
@@ -126,6 +127,8 @@ class Firecrawl:
         if html:
             if format == "html":
                 return html
+            elif not include_media:
+                return html2md(html)
             else:
                 return await to_multimodal_sequence(html, session=session, url=url)
         return None

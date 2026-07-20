@@ -1,3 +1,4 @@
+import logging
 from io import BytesIO
 from typing import Optional, Union, TYPE_CHECKING
 
@@ -13,6 +14,8 @@ if TYPE_CHECKING:
     from playwright.async_api import APIRequestContext
 
 from scrapemm.download.requests import request_static, fetch_headers
+
+logger = logging.getLogger("scrapeMM")
 
 # Tolerate images that are truncated
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -60,7 +63,7 @@ async def is_maybe_image_url(url: str, session: Union[aiohttp.ClientSession, "AP
     or if the content type is a binary download stream."""
     try:
         headers = await fetch_headers(url, session, timeout=3000, allow_redirects=True)
-        content_type = headers.get('Content-Type') or headers.get('content-type')
+        content_type = headers.get('Content-Type') or headers.get('content-type') or ''
         if content_type.startswith("image/"):
             # Surely an image
             return (not "svg" in content_type and
@@ -71,4 +74,5 @@ async def is_maybe_image_url(url: str, session: Union[aiohttp.ClientSession, "AP
             return content_type == "binary/octet-stream" and looks_like_image_file_url(url)
 
     except Exception:
+        logger.debug(f"Error probing image URL {url}", exc_info=True)
         return False

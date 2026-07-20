@@ -30,6 +30,7 @@ class Instagram(RetrievalIntegration):
             try:
                 content = await self._get_video(url, **kwargs)
             except Exception:
+                logger.debug(f"Instagram video retrieval failed for {url}, trying photo", exc_info=True)
                 content = None
             if content and content.has_videos():
                 return content
@@ -58,16 +59,7 @@ class Instagram(RetrievalIntegration):
     async def _get_user_profile(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from an Instagram user profile URL."""
         username = self._extract_username(url)
-        if username:
-            text = f"""**Instagram Profile**
-Username: @{username}
-URL: {url}
-
-Note: Profile details require Instagram API access.
-Configure API credentials for full profile information."""
-            return MultimodalSequence([text])
-
-        return None
+        raise NotImplementedError(f"No method available to retrieve Instagram profiles (user @{username}).")
 
     def _is_video_url(self, url: str) -> bool:
         """Checks if the URL is an Instagram video URL."""

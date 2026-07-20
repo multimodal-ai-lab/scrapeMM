@@ -1,4 +1,4 @@
-from .common import APP_NAME, set_wait_on_rate_limit, RateLimitError, ContentNotFoundError, logger, update_config
+from .common import APP_NAME, set_wait_on_rate_limit, RateLimitError, RetrievalFailed, logger, update_config
 from .integrations import Telegram, X
 from .retrieval import retrieve
 from .secrets import configure_secrets

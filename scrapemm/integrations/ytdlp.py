@@ -9,7 +9,7 @@ import aiohttp
 from ezmm import MultimodalSequence, Video, Image
 from yt_dlp import YoutubeDL
 
-from scrapemm.common.exceptions import ContentNotFoundError
+from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError
 from scrapemm.download import download_image
 
 logger = logging.getLogger("scrapeMM")
@@ -36,7 +36,7 @@ def _run_ytdlp_sync(
             video = Video(file_path=temp_path + f".{ext}", source_url=url)
             video.relocate(move_not_copy=True)
         except FileNotFoundError:
-            pass
+            logger.debug(f"yt-dlp reported ext={ext} but file was not found at {temp_path}.{ext}")
         except Exception as e:
             logger.warning(f"Could not load downloaded video: {e}")
 
@@ -94,7 +94,7 @@ async def download_video_with_ytdlp(
             raise e
         elif ("Video unavailable" in str(e)
               or "HTTP Error 404: Not Found" in str(e)):
-            raise ContentNotFoundError(f"Video is unavailable.")
+            raise TargetUnavailableError(f"Video is unavailable.")
         elif "Cannot parse data; please report this issue" in str(e):
             raise RuntimeError(f"yt-dlp is unable to parse the received video metadata.")
         else:
@@ -124,7 +124,7 @@ async def compose_data_to_sequence(metadata: dict, video: Video | None, thumbnai
             date_obj = datetime.strptime(upload_date, '%Y%m%d')
             formatted_date = date_obj.strftime('%Y-%m-%d')
         except ValueError:
-            pass
+            logger.debug(f"Could not parse yt-dlp upload_date: {upload_date!r}")
 
     text = f"""**{platform} Video**
 Author: @{uploader}

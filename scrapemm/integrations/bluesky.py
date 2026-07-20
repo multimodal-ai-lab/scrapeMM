@@ -5,7 +5,7 @@ import aiohttp
 from atproto_client.exceptions import RequestErrorBase
 from ezmm import MultimodalSequence
 
-from scrapemm import ContentNotFoundError
+from scrapemm.common.exceptions import TargetUnavailableError
 from scrapemm.download import download_video, download_image
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.secrets import get_secret
@@ -144,7 +144,7 @@ Likes: {like_count} - Comments: {comment_count} - Shares: {share_count}
             response = e.response
             code = response.status_code
             if code in [400, 404]:
-                raise ContentNotFoundError("Post is unavailable.")
+                raise TargetUnavailableError("Post is unavailable.")
             else:
                 raise
 

@@ -24,6 +24,8 @@ from test_social_media import assert_expectations
     ("https://perma.cc/38CZ-MMFV", dict(image=1)),  # Web article with one image
     ("https://perma.cc/ZD7Z-B3U7?type=image", dict(image=1)),  # Screenshot of Facebook video
     ("https://perma.cc/D5GB-S4E9", dict(image=1)),  # Recorded screenshot of Facebook post
+    ("https://perma.cc/Z76P-4TE3", dict(image=1)),  # Image in a Telegram post
+    ("https://perma.cc/T5T9-QQ77", dict(video=1)),  # Video in a Telegram post
     # Internet Archive (Wayback Machine)
     ("https://web.archive.org/web/20260629131321/https://www.facebook.com/peter.hamilton.54/posts/pfbid0dbCRo43miXqEyeLW9pbyPXrNLAuuNrGJw8nBWGQaNaGs4gcDq4GayR1hkUdkC4Lnl", dict()),
     ("https://web.archive.org/web/20260408100822/https://www.facebook.com/plugins/post.php?href=https%3A%2F%2Fwww.facebook.com%2Fluftari.spartak%2Fposts%2Fpfbid037cXTv7r3rVpd8A5UoGSN1FWaff65bm4C5Yi6FxD2X9qfV9bWcgG7fwM1LMBu2nXhl", dict(image=1)),

@@ -7,6 +7,7 @@ from playwright.async_api import async_playwright, Page, Frame, ElementHandle
 from seleniumbase import cdp_driver
 from seleniumbase.undetected.cdp_driver.browser import Browser
 
+from scrapemm import RetrievalFailed
 from scrapemm.integrations.base import RetrievalIntegration
 
 logger = logging.getLogger("scrapeMM")
@@ -44,11 +45,11 @@ class HeadedBrowser(RetrievalIntegration):
             )
             if self._browser:
                 logger.debug("cdp_driver started successfully.")
-        except Exception as e:
-            logger.error(f"Failed to start cdp_driver for Internet Archive integration: {e}", exc_info=True)
+            self.connected = True
+        except Exception:
+            logger.error(f"Failed to start Headed Browser for integration: {self.name}", exc_info=True)
             self._cleanup_resources()
-
-        self.connected = True
+            self.connected = False
 
     async def _prepare_context(self, context) -> None:
         """Optional hook before a new page is created (e.g. inject cookies)."""
@@ -88,6 +89,8 @@ class HeadedBrowser(RetrievalIntegration):
             finally:
                 await page.close()
 
+            raise RetrievalFailed(f"{self.name} integration was unable to extract content from {url}.")
+
     @staticmethod
     async def _html_and_source(
             target: ContentTarget, page: Page
@@ -105,7 +108,7 @@ class HeadedBrowser(RetrievalIntegration):
             try:
                 self._browser.quit()
             except Exception:
-                pass
+                logger.debug("Error while quitting headed browser", exc_info=True)
             self._browser = None
             self.connected = False
 

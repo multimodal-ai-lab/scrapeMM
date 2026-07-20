@@ -19,7 +19,10 @@ from playwright.async_api import APIRequestContext, Page, Frame
 
 from scrapemm.download import download_video, download_image
 from scrapemm.download.images import image_from_binary
-from scrapemm.download.util import looks_like_vector_file_url, looks_like_hls_url
+from scrapemm.download.util import (
+    looks_like_image_file_url,
+    looks_like_vector_file_url,
+)
 from scrapemm.download.videos import video_from_binary, download_hls_video, is_hls
 
 logger = logging.getLogger("scrapeMM")
@@ -67,7 +70,7 @@ async def run_with_semaphore(tasks: Iterable[Awaitable],
                 t.close()
             raise
 
-    tasks = [asyncio.create_task(limited_coroutine(task)) for task in tasks]
+    tasks: list = [asyncio.create_task(limited_coroutine(task)) for task in tasks]
 
     # Report completion status of tasks (if more than one task)
     if show_progress:
@@ -143,25 +146,106 @@ def postprocess_markdown(text: str) -> str:
     return sanitize(text.strip())
 
 
+_BG_IMAGE_URL_RE = re.compile(
+    r"background-image\s*:\s*url\(\s*['\"]?([^'\")\s]+)['\"]?\s*\)",
+    re.IGNORECASE,
+)
+
+
+def _normalize_media_url(url: str) -> str:
+    """Normalize protocol-relative URLs to https for downstream fetchers."""
+    if url.startswith("//"):
+        return "https:" + url
+    return url
+
+
+def _is_eligible_background_image_url(url: str) -> bool:
+    """True if a CSS background-image URL is likely real page media (not emoji/icon)."""
+    if not url or url.startswith("data:"):
+        return False
+    lowered = url.lower()
+    if "/emoji/" in lowered or "/emojis/" in lowered:
+        return False
+    if looks_like_vector_file_url(url):
+        return False
+    if looks_like_image_file_url(url):
+        return True
+    # Telegram CDN and similar often serve images under /file/ without a clean extension
+    # in every rewrite; accept common CDN path patterns.
+    if "telegram-cdn.org/file/" in lowered or "/file/" in lowered and "cdn" in lowered:
+        return True
+    return False
+
+
+def _background_image_url(element: Tag) -> Optional[str]:
+    """Extract an eligible background-image URL from an element's inline style."""
+    style = element.get("style")
+    if not style:
+        return None
+    match = _BG_IMAGE_URL_RE.search(str(style))
+    if not match:
+        return None
+    url = _normalize_media_url(match.group(1).strip())
+    if not _is_eligible_background_image_url(url):
+        return None
+    return url
+
+
+def _strip_background_image_style(element: Tag) -> None:
+    """Remove background-image from inline style without destroying child content."""
+    style = element.get("style")
+    if not style:
+        return
+    new_style = _BG_IMAGE_URL_RE.sub("", str(style))
+    new_style = re.sub(r";\s*;", ";", new_style).strip(" ;")
+    if new_style:
+        element["style"] = new_style
+    elif element.has_attr("style"):
+        del element["style"]
+    if element.has_attr("src") and not element.name in ("img", "video", "source"):
+        del element["src"]
+
+
 def _extract_media_elements(soup: BeautifulSoup) -> list[Tag]:
     """Identifies all potential media elements and their URIs in the soup."""
     media_elements = []
+    seen_ids: set[int] = set()
+
+    def _add(element: Tag) -> None:
+        eid = id(element)
+        if eid not in seen_ids:
+            seen_ids.add(eid)
+            media_elements.append(element)
 
     for element in soup.find_all("img"):
         src = str(element.get("src"))
         # Skip vector graphics
         if src and looks_like_vector_file_url(src):
             continue
-        media_elements.append(element)
+        _add(element)
+
+    # CSS background images used as primary media (e.g. Telegram photo wraps).
+    # Only leaf hosts — never page wrappers that contain the rest of the document.
+    for element in soup.find_all(style=True):
+        if element.name in ("img", "video", "source"):
+            continue
+        bg_url = _background_image_url(element)
+        if not bg_url:
+            continue
+        # Wire URI through existing src-based resolve_media path
+        if not element.get("src"):
+            element["src"] = bg_url
+        _add(element)
 
     # For videos, include either the src attribute (higher precedence) or the first source element
     for video in soup.find_all("video"):
         if video.has_attr("src"):
-            media_elements.append(video)
+            _add(video)
         elif source := video.find("source"):
-            media_elements.append(source)
+            _add(source)
             # In the HTML DOM, replace the video node with the source node to ensure a clean output
             video.replace_with(source)
+
     return media_elements
 
 
@@ -253,22 +337,25 @@ async def resolve_media(
         if element.parent is None:
             continue
 
+        has_child_tags = any(getattr(child, "name", None) for child in element.children)
+
         if medium:
             too_small = isinstance(medium, Image) and (medium.width < 256 or medium.height < 256)
 
             if not too_small:
-                # Replace the element with its reference
-                # if element.name == "a":
-                #     hypertext = element.get_text().strip()
-                #     replacement = f"{hypertext} {medium.reference}" if hypertext else medium.reference
-                # else:
-                    # replacement = medium.reference
-
-                element.replace_with(medium.reference)
+                if has_child_tags:
+                    # Keep wrapper markup; insert the resolved medium before it.
+                    _strip_background_image_style(element)
+                    element.insert_before(medium.reference)
+                else:
+                    element.replace_with(medium.reference)
                 continue
 
-        # If medium is None or too small or couldn't be resolved, remove it
-        element.decompose()
+        # No media retrieved. Remove element if not a container
+        if has_child_tags:
+            _strip_background_image_style(element)
+        else:
+            element.decompose()
 
     return MultimodalSequence(str(soup))
 
@@ -298,7 +385,7 @@ async (url) => {
 async def _retrieve_media_bytes(
         source_element: Union[Frame, Page],
         url: str,
-        timeout: float = 30.0,
+        timeout: float = 180.0,
 ) -> tuple[Optional[bytes], Optional[str]]:
     """Retrieves the raw bytes of a media URL using the browser's authenticated
     session, without navigating a tab (which hangs forever on streamed video).
@@ -356,8 +443,12 @@ async def fetch_image_via_page(source_element: Union[Frame, Page], url: str, **k
     return image_from_binary(content, source_url=url, **kwargs) if content else None
 
 
-async def fetch_video_via_page(source_element: Union[Frame, Page], url: str) -> Optional[Video]:
-    content, content_type = await _retrieve_media_bytes(source_element, url)
+async def fetch_video_via_page(
+        source_element: Union[Frame, Page],
+        url: str,
+        timeout: float = 180.0,
+) -> Optional[Video]:
+    content, content_type = await _retrieve_media_bytes(source_element, url, timeout=timeout)
 
     # HLS playlists are plain text manifests, not raw video: remux via ffmpeg,
     # reusing the shared request context so segment downloads stay authenticated.
@@ -414,8 +505,8 @@ async def to_multimodal_sequence(
         session: Union[aiohttp.ClientSession, "APIRequestContext"],
         **kwargs
 ) -> Optional[MultimodalSequence]:
-    """Turns a scraped output into the corresponding MultimodalSequences
-    by resolving media hyperlinks in HTML and then converting to Markdown."""
+    """Turns scraped HTML content into the corresponding MultimodalSequences
+    by resolving media hyperlinks and Base64 encodings and converting to Markdown."""
     if html is None:
         return None
 
@@ -429,13 +520,19 @@ async def to_multimodal_sequence(
         return None
 
     # 2. Convert resulting (partially replaced) HTML to Markdown
-    try:
-        markdown = md(str(mms), heading_style="ATX")
-        text = postprocess_markdown(markdown)
-    except RecursionError:
-        return None
+    text = html2md(mms)
 
     return MultimodalSequence(text)
+
+
+def html2md(html: str | MultimodalSequence) -> str:
+    """Converts HTML to Markdown."""
+    try:
+        markdown = md(str(html), heading_style="ATX")
+        return postprocess_markdown(markdown)
+    except RecursionError:
+        logger.debug("RecursionError while converting HTML to Markdown.")
+        raise
 
 
 def sanitize(text: str) -> str:

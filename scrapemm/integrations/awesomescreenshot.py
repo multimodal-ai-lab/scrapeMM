@@ -24,7 +24,7 @@ class AwesomeScreenshot(HeadedBrowser):
                     return frame
                 return element
         except TimeoutError:
-            pass
+            logger.debug("Timed out waiting for AwesomeScreenshot media wrapper.")
         logger.debug("Could not find image or video in AwesomeScreenshot page. "
                      "Perhaps the structure has changed?")
         return page

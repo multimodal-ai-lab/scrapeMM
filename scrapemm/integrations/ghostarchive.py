@@ -27,6 +27,7 @@ class Ghostarchive(HeadedBrowser):
                         content_frame = cf
                         break
                 except Exception:
+                    logger.debug("Error while probing Ghostarchive frames", exc_info=True)
                     continue
             if content_frame:
                 break
@@ -54,6 +55,7 @@ class Ghostarchive(HeadedBrowser):
                 )
                 size = len(await content_frame.content())
             except Exception:
+                logger.debug("Error while checking Ghostarchive content readiness", exc_info=True)
                 has_archived_content, size = False, 0
             dom_stable = size > 5000 and abs(size - previous_size) <= max(256, previous_size // 100)
             if has_archived_content and dom_stable:

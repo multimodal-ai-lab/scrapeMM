@@ -6,9 +6,9 @@ import aiohttp
 from aiohttp import ClientConnectorError
 from ezmm import MultimodalSequence
 
-from scrapemm import RateLimitError
+from scrapemm import RateLimitError, RetrievalFailed
 from scrapemm.secrets import get_secret
-from scrapemm.util import get_domain, to_multimodal_sequence
+from scrapemm.util import get_domain, to_multimodal_sequence, html2md
 from scrapemm.integrations.decodo.html_postprocessor import domain_to_postprocessor
 
 logger = logging.getLogger("scrapeMM")
@@ -48,7 +48,8 @@ class Decodo:
             format: str,
             enable_js: bool = True,
             timeout: int = 30,
-            max_retries: int = 5
+            max_retries: int = 5,
+            include_media: bool = True,
     ) -> Optional[MultimodalSequence | str]:
         """Downloads the contents of the specified webpage using Decodo's API.
 
@@ -58,6 +59,7 @@ class Decodo:
             enable_js: Whether to enable JavaScript rendering (default: True)
             timeout: Request timeout in seconds (default: 30)
             max_retries: Maximum number of retries for failed requests (default: 5)
+            include_media: Whether to download and embed images/videos (default: True)
 
         Returns:
             MultimodalSequence containing the scraped content, or None if scraping failed
@@ -76,21 +78,11 @@ class Decodo:
         html = await self._call_decodo(url, session, enable_js, timeout=timeout, max_retries=max_retries,
                                        use_premium_proxy=use_premium_proxy)
 
-        # If it failed with JS and we got a 400 error, try without JS
-        # (400 might mean the plan doesn't support headless rendering)
-        # if html is None and enable_js:
-        #     logger.debug("Retrying without JavaScript rendering...")
-        #     html = await self._call_decodo(url, session, enable_js=False, timeout=timeout, max_retries=max_retries,
-        #                                    use_premium_proxy=use_premium_proxy)
-
         if html:
-            # Apply domain-specific post-processing if available (e.g. for Archive.today)
-            if domain := get_domain(url):
-                post_processor = domain_to_postprocessor.get(domain, None)
-                html = post_processor.process(html) if post_processor else html
-
             if format == "html":
                 return html
+            elif not include_media:
+                return html2md(html)
             else:
                 return await to_multimodal_sequence(html, session=session, url=url)
         return None
@@ -181,7 +173,7 @@ class Decodo:
                                     logger.debug("Error 500: Server error.")
                                 case _:
                                     logger.debug(f"Error {response.status}: {response.reason}.")
-                            return None
+                            raise RuntimeError(f"Decodo API error {response.status}: {response.reason}")
 
                     else:
                         # Parse response
@@ -191,8 +183,9 @@ class Decodo:
                         if json_response.get("status") == "failed":
                             status_code = json_response.get("status_code")
                             message = json_response.get("message")
-                            logger.info(f"Decodo failed to scrape. Error {status_code}: {message}")
-                            return None
+                            msg = f"Decodo failed to scrape {url}: Error {status_code}: {message}"
+                            logger.info(msg)
+                            raise RetrievalFailed(msg)
 
                         # Extract HTML content from results
                         if "results" in json_response and len(json_response["results"]) > 0:
@@ -201,8 +194,9 @@ class Decodo:
                             # Check status code from the actual request
                             status_code = result.get("status_code")
                             if status_code and status_code >= 400:
-                                logger.warning(f"Target website returned status {status_code} for {url}")
-                                return None
+                                msg = f"Target website returned status {status_code} for {url}"
+                                logger.warning(msg)
+                                raise RetrievalFailed(msg)
 
                             html_content = result.get("content")
                             if html_content:
@@ -210,12 +204,14 @@ class Decodo:
                                 logger.debug(f"Successfully scraped {url} with Decodo (scrape #{self.n_scrapes})")
                                 return html_content
                             else:
-                                logger.warning(f"No content in Decodo response for {url}")
-                                return None
+                                msg = f"No content in Decodo response for {url}"
+                                logger.warning(msg)
+                                raise RetrievalFailed(msg)
                         else:
-                            logger.warning(f"No results in Decodo response for {url}")
+                            msg = f"No results in Decodo response for {url}"
+                            logger.warning(msg)
                             logger.debug(f"Response: {json_response}")
-                            return None
+                            raise RetrievalFailed(msg)
 
             except ClientConnectorError:  # Decodo sometimes has hiccups
                 if attempt >= max_retries:

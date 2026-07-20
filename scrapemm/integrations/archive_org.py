@@ -60,6 +60,7 @@ class ArchiveOrg(HeadedBrowser):
                     }"""
                 )
             except Exception:
+                logger.debug("Error while checking Archive.org playback readiness", exc_info=True)
                 info = {"ready": False, "size": 0}
 
             if info.get("ready"):

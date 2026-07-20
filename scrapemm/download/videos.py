@@ -203,6 +203,7 @@ async def is_maybe_video_url(url: str, session: Union[aiohttp.ClientSession, "AP
             )
 
     except Exception:
+        logger.debug(f"Error probing video URL {url}", exc_info=True)
         return False
 
 
@@ -314,6 +315,6 @@ def _resolve_ffmpeg_path() -> Optional[str]:
         if exe and os.path.isfile(exe):
             return exe
     except Exception:
-        pass
+        logger.debug("imageio-ffmpeg not available for FFmpeg resolution", exc_info=True)
 
     return None

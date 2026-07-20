@@ -167,6 +167,7 @@ class ArchiveToday(HeadedBrowser):
         try:
             body_text = (await page.locator("body").inner_text()).lower()
         except Exception:
+            logger.debug("Could not read Archive.today body text", exc_info=True)
             body_text = ""
 
         if any(marker in body_text for marker in (
@@ -179,7 +180,7 @@ class ArchiveToday(HeadedBrowser):
             raise RuntimeError("Archive.today asks to solve a captcha. Cannot access archived content.")
 
         try:
-            element = await page.wait_for_selector(f"#{ARCHIVE_TODAY_CONTENT_DIV_ID}", timeout=20000)
+            element = await page.wait_for_selector(f"#{ARCHIVE_TODAY_CONTENT_DIV_ID}", timeout=30000)
             if element:
                 return element
         except (TimeoutError, PlaywrightTimeoutError):

@@ -6,7 +6,7 @@ from pathlib import Path
 import yaml
 from platformdirs import user_config_dir
 
-from .exceptions import RateLimitError, ContentNotFoundError
+from .exceptions import RateLimitError, RetrievalFailed
 from .scraping_response import ScrapingResponse
 
 APP_NAME = "scrapeMM"

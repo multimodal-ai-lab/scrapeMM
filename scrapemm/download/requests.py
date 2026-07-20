@@ -1,3 +1,4 @@
+import logging
 from typing import Optional, Union, TYPE_CHECKING
 
 import aiohttp
@@ -7,6 +8,9 @@ if TYPE_CHECKING:
 
 from scrapemm.download.common import ssl_context, RELAXED_SSL_DOMAINS
 from scrapemm.download.util import stream
+
+logger = logging.getLogger("scrapeMM")
+
 
 async def fetch_headers(url, session: Union[aiohttp.ClientSession, "APIRequestContext"], **kwargs) -> dict:
     """Fetch only HTTP headers for a URL."""
@@ -26,6 +30,7 @@ async def fetch_headers(url, session: Union[aiohttp.ClientSession, "APIRequestCo
                     response.raise_for_status()
                     return dict(response.headers)
         except Exception:
+            logger.debug(f"HEAD failed for {url}, falling back to GET", exc_info=True)
             # Fallback to GET
             if not isinstance(session, aiohttp.ClientSession):
                 response = await session.get(str(url), headers=kwargs.get("headers"), timeout=kwargs.get("timeout"))
@@ -35,6 +40,7 @@ async def fetch_headers(url, session: Union[aiohttp.ClientSession, "APIRequestCo
                     response.raise_for_status()
                     return dict(response.headers)
     raise ValueError(f"Unsupported session type: {type(session)}")
+
 
 async def request_static(url: str,
                          session: Union[aiohttp.ClientSession, "APIRequestContext"],
@@ -64,4 +70,5 @@ async def request_static(url: str,
                 else:
                     return await stream(response)
     except Exception:
+        logger.debug(f"Error requesting {url}", exc_info=True)
         return None

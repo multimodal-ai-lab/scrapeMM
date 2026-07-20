@@ -6,7 +6,7 @@ class IPBannedError(Exception):
     pass
 
 
-class ContentNotFoundError(Exception):
+class RetrievalFailed(Exception):
     pass
 
 

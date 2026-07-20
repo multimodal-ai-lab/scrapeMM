@@ -111,26 +111,22 @@ class Facebook(RetrievalIntegration):
             return await self._get_photo(url, **kwargs)
 
         # The URL is not indicative, so try all methods
-        result = None
         try:
-            result = await self._get_video(url, **kwargs)
+            return await self._get_video(url, **kwargs)
         except Exception:
-            pass
-        if not result:
-            try:
-                result = await self._get_photo(url, **kwargs)
-            except Exception:
-                pass
-        if not result:
-            try:
-                result = await self._get_user_profile(url, **kwargs)
-            except Exception:
-                pass
+            logger.debug(f"Facebook video retrieval failed for {url}", exc_info=True)
 
-        if not result:
-            raise RuntimeError("Unable to retrieve content from Facebook URL.")
-        else:
-            return result
+        try:
+            return await self._get_photo(url, **kwargs)
+        except Exception:
+            logger.debug(f"Facebook photo retrieval failed for {url}", exc_info=True)
+
+        try:
+            return await self._get_user_profile(url, **kwargs)
+        except Exception:
+            logger.debug(f"Facebook profile retrieval failed for {url}", exc_info=True)
+
+        raise RuntimeError("Unable to retrieve content from Facebook URL.")
 
     async def _get_video(self, url: str, **kwargs) -> MultimodalSequence | None:
         """Retrieves content from a Facebook video URL."""

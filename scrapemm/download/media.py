@@ -1,3 +1,4 @@
+import logging
 from typing import Optional, Union, TYPE_CHECKING
 
 import aiohttp
@@ -9,6 +10,8 @@ if TYPE_CHECKING:
 from scrapemm.download.common import HEADERS
 from scrapemm.download.images import is_maybe_image_url, download_image
 from scrapemm.download.videos import is_maybe_video_url, download_video
+
+logger = logging.getLogger("scrapeMM")
 
 
 async def download_medium(
@@ -35,7 +38,7 @@ async def download_medium(
         if await is_maybe_video_url(url, session):
             return await download_video(url, session=session, **kwargs)
     except Exception:
-        pass
+        logger.debug(f"Error downloading medium from {url}", exc_info=True)
     finally:
         if own_session:
             await session.close()
