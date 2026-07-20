@@ -41,10 +41,20 @@ DOMAIN_TO_INTEGRATION = {
     for domain in integration.domains
 }
 
+NAME_TO_INTEGRATION = {integration.name: integration for integration in RETRIEVAL_INTEGRATIONS}
 
-async def retrieve_via_integration(url: str, **kwargs) -> Optional[MultimodalSequence]:
+INTEGRATION_NAMES = [integration.name for integration in RETRIEVAL_INTEGRATIONS]
+
+
+async def retrieve_via_integration(url: str, integration_name: str, **kwargs) -> Optional[MultimodalSequence]:
+    integration = NAME_TO_INTEGRATION[integration_name]
+    if integration.connected or integration.connected is None:
+        return await integration.get(url, **kwargs)
+
+
+def get_integrations_for_url(url: str) -> list[str]:
+    """Returns the list of integration names that support the given domain."""
     domain = get_domain(url)
-    if domain in DOMAIN_TO_INTEGRATION:
-        integration = DOMAIN_TO_INTEGRATION[domain]
-        if integration.connected or integration.connected is None:
-            return await integration.get(url, **kwargs)
+    return [integration.name
+            for integration in RETRIEVAL_INTEGRATIONS
+            if domain in integration.domains]

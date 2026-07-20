@@ -9,19 +9,21 @@ from ezmm import MultimodalSequence
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from scrapemm.common import ScrapingResponse
-from scrapemm.common.exceptions import RetrievalFailed, IPBannedError, UnsupportedDomainError
-from scrapemm.download import download_medium, download_image, download_video
+from scrapemm.common.exceptions import RetrievalFailed, IPBannedError, UnsupportedDomainError, DiskFull
+from scrapemm.download import download_image, download_video
 from scrapemm.download.common import HEADERS
 from scrapemm.download.util import looks_like_image_file_url, looks_like_video_file_url, looks_like_hls_url
-from scrapemm.integrations import retrieve_via_integration, fire, decodo
+from scrapemm.integrations import retrieve_via_integration, fire, decodo, get_integrations_for_url, INTEGRATION_NAMES
 from scrapemm.util import run_with_semaphore, get_domain, normalize_video
 
 logger = logging.getLogger("scrapeMM")
 METHODS = ["integrations", "firecrawl", "decodo"]
+ALL_METHODS = METHODS + INTEGRATION_NAMES
 
 UNSUPPORTED_DOMAINS = []
 
 BEST_METHODS = {
+    # Social media platforms:
     "instagram.com": ["integrations", "decodo"],
     "facebook.com": ["integrations"],
     "fb.watch": ["integrations"],
@@ -34,24 +36,24 @@ BEST_METHODS = {
     "bsky.app": ["integrations"],
     "truthsocial.com": ["firecrawl"],
     "reddit.com": ["integrations"],
-    "awesomescreenshot.com": ["integrations"],
     "youtube.com": ["integrations"],
     "youtu.be": ["integrations"],
+    # Archiving services:
+    "archive.today": ["integrations"],
+    "archive.is": ["integrations"],
+    "archive.ph": ["integrations"],
+    "archive.vn": ["integrations"],
+    "archive.li": ["integrations"],
+    "archive.fo": ["integrations"],
+    "archive.md": ["integrations"],
     "perma.cc": ["integrations"],
-    "mvau.lt": ["integrations"],
     "archive.org": ["integrations"],
+    "mvau.lt": ["integrations"],
+    "awesomescreenshot.com": ["integrations"],
+    # Miscellaneous:
+    "washingtonpost.com": ["decodo"],
     "verafiles.org": ["decodo", "firecrawl"],
     "youturn.in": ["decodo"],
-    # Archive.today:
-    "archive.today": ["integrations", "decodo"],
-    "archive.is": ["integrations", "decodo"],
-    "archive.ph": ["integrations", "decodo"],
-    "archive.vn": ["integrations", "decodo"],
-    "archive.li": ["integrations", "decodo"],
-    "archive.fo": ["integrations", "decodo"],
-    "archive.md": ["integrations", "decodo"],
-    # More special cases
-    "washingtonpost.com": ["decodo"],
 }
 
 
@@ -59,8 +61,8 @@ async def retrieve(
         urls: str | Collection[str],
         show_progress: bool = True,
         actions: list[dict] | None = None,
-        methods: Literal["auto"] | list[str] | list[Literal["auto"] | list[str]] | None = "auto",
-        format: str = "multimodal_sequence",
+        methods: Literal["auto"] | list[str] | list[Literal["auto"] | list[str]] = "auto",
+        format: Literal["multimodal_sequence", "html"] = "multimodal_sequence",
         include_media: bool = True,
         max_video_size: int | None = None,
         prioritize: Literal["completeness", "speed"] = "completeness"
@@ -80,12 +82,12 @@ async def retrieve(
         You can specify any subset in any order, e.g., ["decodo", "firecrawl"] or ["integrations"]. If provided
         a list of strings, that order of methods will be applied to all submitted URLs. In contrast, if provided
         a list of lists, each list will be applied to the corresponding URL in the batch. If provided "auto",
-        will determine the best method based on the URL's domain. If None, will use the default order.
+        will determine the best method based on the URL's domain. If "auto", will use the default order.
     :param format: The format of the output. Available formats:
         - "multimodal_sequence" (MultimodalSequence containing parsed and downloaded media from the page)
         - "html" (string containing the raw HTML code of the page, not compatible with 'integrations' method)
     :param include_media: If True (default), download and embed images/videos. If False, return text only
-        (media elements are omitted).
+        (media elements are omitted). This parameter is ignored for HTML format.
     :param max_video_size: Maximum size of videos to download, in bytes. If None, no limit is applied.
     :param prioritize: Prioritization strategy for retrieval. Available options:
         - "completeness": Higher timeout limits and more retries.
@@ -110,7 +112,7 @@ async def retrieve(
     elif isinstance(methods, list):
         assert len(methods) >= 1, "'methods' cannot be an empty list."
 
-    # Build per-URL method dict according to the provided 'methods'
+    # Unfold methods list to build per-URL method dict according to the provided 'methods'
     if isinstance(methods[0], str) and methods[0] != "auto":
         # methods: list[str] → apply same order to all URLs
         url_to_methods = {url: methods[:] for url in urls_to_retrieve}
@@ -141,9 +143,9 @@ async def retrieve(
 async def _retrieve_single(
         url: str,
         session: aiohttp.ClientSession,
-        methods: Literal["auto"] | list[str] | None = "auto",
+        methods: Literal["auto"] | list[str] = "auto",
         actions: list[dict] | None = None,
-        format: str = "multimodal_sequence",
+        format: Literal["multimodal_sequence", "html"] = "multimodal_sequence",
         include_media: bool = True,
         max_video_size: int | None = None,
         prioritize: Literal["completeness", "speed"] = "completeness"
@@ -156,22 +158,26 @@ async def _retrieve_single(
                                 errors=dict(scrapemm=UnsupportedDomainError("Unsupported domain.")),
                                 retrieval_time=time.time() - start_time)
 
-    if methods is None:
-        methods = METHODS.copy()
-    elif methods == "auto":
-        methods = get_optimal_methods(url)
+    # Ensure URL is a string
+    url = str(url)
+
+    # Resolve the best methods to try in order
+    methods: list[str] = resolve_best_methods(url, methods)
+
+    if len(methods) == 0:
+        raise AssertionError("No retrieval methods were resolved for the given URL.")
 
     try:
-        # Ensure URL is a string
-        url = str(url)
-
         # Validate methods
         for method in methods:
-            assert method in METHODS, f"Unknown method '{method}'. Allowed: {METHODS}"
+            assert method in ALL_METHODS, f"Unknown method '{method}'. Allowed: {ALL_METHODS}"
 
-        # Ensure compatibility with methods (local list only — never mutate shared globals)
-        if format == "html":
-            methods = [m for m in methods if m != "integrations"]
+            # Ensure compatibility with methods (local list only — never mutate shared globals)
+            if format == "html" and method not in ["decodo", "firecrawl"]:
+                raise AssertionError(
+                    "'html' format is only compatible with 'firecrawl' and 'decodo' method. "
+                    "Please choose a different format or use a different method."
+                )
 
         # Shortcut to download as medium
         if format != "html" and include_media:
@@ -184,44 +190,39 @@ async def _retrieve_single(
                 return ScrapingResponse(url=url, content=MultimodalSequence(medium), method="Direct download",
                                         retrieval_time=time.time() - start_time)
 
-        # Find available integrations TODO: Propagate name of actual integration to ScrapingResponse
-        method_map = {
-            "integrations": lambda: retrieve_via_integration(
-                url, session=session, max_video_size=max_video_size, include_media=include_media
-            ),
-            "firecrawl": lambda: fire.scrape(
-                url, session=session, format=format, actions=actions, include_media=include_media
-            ),
-            "decodo": lambda: decodo.scrape(
-                url, session,
-                format=format,
-                timeout=15 if prioritize == "speed" else 60,
-                max_retries=1 if prioritize == "speed" else 5,
-                include_media=include_media),
-        }
-
-        result = None
-        errors = {}
+        # Map method names to their corresponding retrieval functions
+        method_retrieval_tasks = []
+        for method in methods:
+            if method == "firecrawl":
+                method_retrieval_tasks.append(fire.scrape(url, session=session, format=format, actions=actions,
+                                                include_media=include_media))
+            elif method == "decodo":
+                method_retrieval_tasks.append(decodo.scrape(url, session, format=format,
+                                                  timeout=15 if prioritize == "speed" else 60,
+                                                  max_retries=1 if prioritize == "speed" else 5,
+                                                  include_media=include_media))
+            else:
+                method_retrieval_tasks.append(retrieve_via_integration(url, integration_name=method, session=session,
+                                                             max_video_size=max_video_size,
+                                                             include_media=include_media))
 
     except Exception as e:
         logger.error(f"Error while preparing retrieval for '{url}'.\n" + format_exc())
-        return ScrapingResponse(url=url, content=None, errors=dict(all=e), retrieval_time=time.time() - start_time)
+        return ScrapingResponse(url=url, content=None, errors=dict(scrapemm=e), retrieval_time=time.time() - start_time)
 
     # Try each method in the specified order until one succeeds
-    for method_name in methods:
-        if method_name not in method_map:
-            logger.warning(f"Unknown retrieval method '{method_name}'. Skipping...")
-            continue
-
+    result = None
+    errors = {}
+    logger.debug(f"Trying methods in order: {', '.join(methods)}")
+    for method_name, retrieval_task in zip(methods, method_retrieval_tasks):
         logger.debug(f"Trying method: {method_name}")
 
         try:
-            result = await method_map[method_name]()
+            result = await retrieval_task
 
         except NotImplementedError as e:
             logger.info("Reached a method that is not implemented.", exc_info=True)
-            errors[method_name] = e
-            result = None
+            errors[method_name] = f"{type(e).__name__}: {e}"
 
         except sqlite3.OperationalError as e:
             if str(e) == "attempt to write a readonly database":
@@ -229,29 +230,29 @@ async def _retrieve_single(
                 raise
             else:
                 logger.warning(f"Error while retrieving with method '{method_name}': {e}")
-                errors[method_name] = e
-                result = None
+                errors[method_name] = f"{type(e).__name__}: {e}"
 
         except (TimeoutError, PlaywrightTimeoutError) as e:
             logger.warning(f"Timeout while retrieving with method '{method_name}': {e}")
-            errors[method_name] = e
-            result = None
+            errors[method_name] = f"{type(e).__name__}: {e}"
 
         except IPBannedError as e:
-            logger.error(e)
-            errors[method_name] = e
-            result = None
+            logger.info(e)
+            errors[method_name] = f"{type(e).__name__}: {e}"
+
+        except OSError as e:
+            if "Disk is full" in str(e):
+                logger.critical("❌ Disk is full! Please free up space and try again. Aborting.")
+                raise DiskFull()
 
         except Exception as e:
             logger.warning(f"Error while retrieving with method '{method_name}': {e}")
             errors[method_name] = f"{type(e).__name__}: {e}"
-            result = None
 
         if result is not None:
             logger.debug(f"Successfully retrieved with method: {method_name}")
             if isinstance(result, MultimodalSequence):
-                if include_media:
-                    postprocess_media(result)
+                postprocess_media(result)
             return ScrapingResponse(url=url, content=result, method=method_name,
                                     retrieval_time=time.time() - start_time)
 
@@ -263,9 +264,23 @@ async def _retrieve_single(
 
     # All methods failed
     logger.warning(f"All retrieval methods failed for URL: {url}")
-    if not errors:
-        errors = dict(scrapemm=RetrievalFailed(f"No retrieval method produced content for '{url}'."))
     return ScrapingResponse(url=url, content=None, errors=errors, retrieval_time=time.time() - start_time)
+
+
+def resolve_best_methods(url: str, allowed_methods: Literal["auto"] | list[str]) -> list[str]:
+    """Returns the best retrieval methods for the given URL."""
+    # Initialize methods list
+    methods = get_optimal_methods(url) if allowed_methods == "auto" else allowed_methods
+
+    # Resolve 'integrations' method to specific, applicable integrations, maintaining order
+    methods_resolved = []
+    for method in methods:
+        if method == "integrations":
+            methods_resolved.extend(get_integrations_for_url(url))
+        else:
+            methods_resolved.append(method)
+
+    return methods_resolved
 
 
 def postprocess_media(result: MultimodalSequence):

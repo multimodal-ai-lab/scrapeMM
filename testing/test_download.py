@@ -43,7 +43,8 @@ async def download_img(url):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("url", [
+@pytest.mark.parametrize("url",[
+    "https://media.snopes.com/2021/05/comparison-biden-psaki.jpg",
     "https://media.cnn.com/api/v1/images/stellar/prod/02-overview-of-kursk-training-area-15april2025-wv2.jpg?q=w_1110,c_fill",
     "https://factly.in/wp-content/uploads/2025/02/Train-fire-in-Prayagraj-Claim.jpg",
     "https://www.washingtonpost.com/wp-apps/imrs.php?src=https://arc-anglerfish-washpost-prod-washpost.s3.amazonaws.com/public/MBWA4LJ5XLVC6CJLZG2OQFMGWE.JPG&w=1440&impolicy=high_res",

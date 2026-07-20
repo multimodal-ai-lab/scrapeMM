@@ -23,3 +23,7 @@ class UnsupportedDomainError(Exception):
 
 class TargetUnavailableError(Exception):
     """The target website is not available for scraping."""
+
+
+class DiskFull(Exception):
+    """No space left on disk. The application should be aborted immediately before continuing."""

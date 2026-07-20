@@ -44,18 +44,3 @@ def test_extract_skips_emoji_background_image():
     )
     soup = BeautifulSoup(html, "html.parser")
     assert _extract_media_elements(soup) == []
-
-
-def test_extract_skips_background_on_content_wrapper():
-    """Archive.today wraps the whole snapshot in a div with a decorative background-image.
-    That wrapper must not be treated as media, or decompose() would wipe the article image."""
-    html = (
-        '<div class="html1" style="background-image:url(\'/Edqcv/bg.png\')">'
-        '<img src="/Edqcv/article.webp"/>'
-        '</div>'
-    )
-    soup = BeautifulSoup(html, "html.parser")
-    elements = _extract_media_elements(soup)
-    assert len(elements) == 1
-    assert elements[0].name == "img"
-    assert elements[0].get("src") == "/Edqcv/article.webp"

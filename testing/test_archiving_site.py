@@ -16,6 +16,7 @@ from test_social_media import assert_expectations
     ("https://archive.ph/movd4", dict(image=1)),  # Online article
     ("https://archive.vn/Edqcv", dict(image=1)),  # Online article
     ("https://archive.fo/jnN0O", dict(image=1)),  # Older Facebook post
+    ("https://archive.md/yACAz", dict(image=2)),  # News article with images
     # Perma.CC:
     ("https://perma.cc/N8MR-NS96", dict(video=1)),  # TikTok video
     ("https://perma.cc/HU7Z-B24D", dict(image=1)),  # Screenshot of Twitter post

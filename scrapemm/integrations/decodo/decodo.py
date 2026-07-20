@@ -224,7 +224,7 @@ class Decodo:
             except (RateLimitError, asyncio.TimeoutError):
                 raise
             except Exception as e:
-                logger.error(f"Unexpected error while scraping with Decodo: {e}")
+                logger.debug(f"Error while scraping with Decodo: {e}")
                 raise
 
             await backoff(attempt)  # Wait before retrying
