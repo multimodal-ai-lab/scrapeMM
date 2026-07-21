@@ -10,10 +10,11 @@ from tweepy import Tweet, User, TooManyRequests
 from tweepy.asynchronous import AsyncClient
 
 import scrapemm.common
-from scrapemm.common.exceptions import RateLimitError
+from scrapemm.common.exceptions import RateLimitError, TargetUnavailableError
 from scrapemm.download import download_image, download_video
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.secrets import get_secret
+from scrapemm.util import unshorten
 
 logger = logging.getLogger("scrapeMM")
 
@@ -53,7 +54,12 @@ class X(RetrievalIntegration):
     async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
         session = kwargs.get("session")
         max_video_size = kwargs.get("max_video_size")
-        url = self._normalize(url)
+        url = await self._normalize(url, session)
+
+        # Validate the URL
+        if urlparse(url).path.startswith("/search"):
+            raise ValueError("X search URLs are not supported by the X integration.")
+
         tweet_id = extract_tweet_id_from_url(url)
         try:
             if tweet_id:
@@ -65,9 +71,15 @@ class X(RetrievalIntegration):
         except TooManyRequests:
             raise RateLimitError("X API rate limit reached.")
 
-    def _normalize(self, url: str) -> str:
+    async def _normalize(self, url: str, session: aiohttp.ClientSession) -> str:
         """Turns URLs of the form https://publish.twitter.com/?query=...
         into the bare Twitter URL."""
+        url_parsed = urlparse(url)
+        if url_parsed.netloc == "t.co":
+            unshortened = await unshorten(url, session)
+            if not unshortened:
+                raise TargetUnavailableError(f"Could not unshorten URL: {url}. Perhaps it's expired?")
+            url = unshortened
         if url.startswith("https://publish.twitter.com/?query="):
             query = urlparse(url).query
             return parse_qs(query).get("query", [])[0] or url
@@ -86,42 +98,44 @@ class X(RetrievalIntegration):
         )
         tweet: Tweet = response.data
 
-        if tweet:
-            media_raw = response.includes.get("media")
-            author = response.includes.get("users")[0]
-            metrics = tweet.public_metrics
+        if not tweet:
+            raise TargetUnavailableError(f"Tweet {tweet_id} not found.")
 
-            # Post-process text
-            text = tweet.text
-            text = re.sub(r"https?://t\.co/\S+", "", text).strip()
+        media_raw = response.includes.get("media")
+        author = response.includes.get("users")[0]
+        metrics = tweet.public_metrics
 
-            # Download the media
-            media = []
-            if media_raw:
-                for medium_raw in media_raw:
-                    if medium_raw.type == "photo":
-                        url = medium_raw.url
-                        medium = await download_image(url, session=session)
-                    elif medium_raw.type in ["video", "animated_gif"]:
-                        # Get the variant with the highest bitrate
-                        url = _get_best_quality_video_url(medium_raw.variants)
-                        medium = await download_video(url, session=session)
-                        if medium and medium.size > max_video_size:
-                            logger.info(f"Removing video {medium.reference} because it exceeds the maximum size "
-                                        f"of {max_video_size / 1024 / 1024:.2f} MB.")
-                            medium = None
-                    else:
-                        raise ValueError(f"Unsupported media type: {medium_raw.type}")
-                    if medium:
-                        media.append(medium)
+        # Post-process text
+        text = tweet.text
+        text = re.sub(r"https?://t\.co/\S+", "", text).strip()
 
-            tweet_str = f"""**Post on X**
+        # Download the media
+        media = []
+        if media_raw:
+            for medium_raw in media_raw:
+                if medium_raw.type == "photo":
+                    url = medium_raw.url
+                    medium = await download_image(url, session=session)
+                elif medium_raw.type in ["video", "animated_gif"]:
+                    # Get the variant with the highest bitrate
+                    url = _get_best_quality_video_url(medium_raw.variants)
+                    medium = await download_video(url, session=session)
+                    if medium and medium.size > max_video_size:
+                        logger.info(f"Removing video {medium.reference} because it exceeds the maximum size "
+                                    f"of {max_video_size / 1024 / 1024:.2f} MB.")
+                        medium = None
+                else:
+                    raise ValueError(f"Unsupported media type: {medium_raw.type}")
+                if medium:
+                    media.append(medium)
+
+        tweet_str = f"""**Post on X**
 Author: {author.name}, @{author.username}
 Posted on: {tweet.created_at.strftime("%B %d, %Y at %H:%M")}
 Likes: {metrics['like_count']} - Retweets: {metrics['retweet_count']} - Replies: {metrics['reply_count']} - Views: {metrics['impression_count']}
 
 {text}"""  # TODO: Add edit history
-            return MultimodalSequence([tweet_str, *media])
+        return MultimodalSequence([tweet_str, *media])
 
     async def _get_user(self, username: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
         """Returns a MultimodalSequence containing the user's profile information

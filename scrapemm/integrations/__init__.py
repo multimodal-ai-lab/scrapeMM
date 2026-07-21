@@ -41,13 +41,13 @@ DOMAIN_TO_INTEGRATION = {
     for domain in integration.domains
 }
 
-NAME_TO_INTEGRATION = {integration.name: integration for integration in RETRIEVAL_INTEGRATIONS}
+NAME_TO_INTEGRATION = {integration.name.lower(): integration for integration in RETRIEVAL_INTEGRATIONS}
 
 INTEGRATION_NAMES = [integration.name for integration in RETRIEVAL_INTEGRATIONS]
 
 
 async def retrieve_via_integration(url: str, integration_name: str, **kwargs) -> Optional[MultimodalSequence]:
-    integration = NAME_TO_INTEGRATION[integration_name]
+    integration = NAME_TO_INTEGRATION[integration_name.lower()]
     if integration.connected or integration.connected is None:
         return await integration.get(url, **kwargs)
 

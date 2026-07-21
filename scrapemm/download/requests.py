@@ -13,7 +13,7 @@ logger = logging.getLogger("scrapeMM")
 
 # Cloudflare (and similar) bot gates reject aiohttp's TLS fingerprint with HTTP 403
 # while accepting real browser JA3/JA4 profiles. Tried in order until one succeeds.
-_CURL_CFFI_IMPERSONATIONS = ("chrome124", "safari17_2_ios", "chrome110")
+_CURL_CFFI_IMPERSONATIONS = ("chrome124",)
 
 
 async def _request_via_curl_cffi(
@@ -160,13 +160,19 @@ async def request_static(url: str,
                     return await response.text()
                 else:
                     return await stream(response)
+
     except aiohttp.ClientResponseError as e:
         if e.status == 403:
             content = await _from_curl_cffi()
             if content is not None:
                 return content
-        logger.debug(f"Error requesting {url}", exc_info=True)
+        logger.debug(f"Error requesting {url}. Reason: {e}")
         return None
+
+    except aiohttp.ClientConnectorError as e:
+        logger.debug(f"Error while connecting to {url}. Reason: {e}")
+        return None
+
     except Exception:
         logger.debug(f"Error requesting {url}", exc_info=True)
         return None

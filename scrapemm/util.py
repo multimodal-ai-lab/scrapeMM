@@ -18,6 +18,7 @@ from markdownify import markdownify as md
 from playwright.async_api import APIRequestContext, Page, Frame
 
 from scrapemm.download import download_video, download_image
+from scrapemm.download.common import HEADERS
 from scrapemm.download.images import image_from_binary
 from scrapemm.download.util import (
     looks_like_image_file_url,
@@ -686,3 +687,18 @@ def parse_netscape_cookies(cookie_file: Path) -> list[dict]:
             except ValueError:
                 continue
     return cookies
+
+
+async def unshorten(url: str, session: aiohttp.ClientSession) -> Optional[str]:
+    """Expands short URLs to their full form, e.g., URLs from tinyurl.com, bit.ly,
+    goo.gl, youtu.be, t.ly, t.co, etc."""
+    try:
+        async with session.get(url, allow_redirects=True) as resp:
+            expanded = str(resp.url)
+            if expanded.rstrip("/") != str(url).rstrip("/"):
+                return expanded
+            # t.co (and similar) return 200 with a meta-refresh instead of a 3xx redirect.
+            match = re.search(r"URL=(https?://[^\"'>\s]+)", await resp.text(), re.I)
+            return match.group(1) if match else None
+    except Exception:
+        return None

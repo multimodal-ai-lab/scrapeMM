@@ -2,14 +2,15 @@ import logging
 import sqlite3
 import time
 from traceback import format_exc
-from typing import Collection, Literal
+from typing import Collection, Literal, Coroutine
 
 import aiohttp
 from ezmm import MultimodalSequence
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from scrapemm.common import ScrapingResponse
-from scrapemm.common.exceptions import RetrievalFailed, IPBannedError, UnsupportedDomainError, DiskFull
+from scrapemm.common.exceptions import RetrievalFailed, IPBannedError, UnsupportedDomainError, DiskFull, \
+    TargetUnavailableError
 from scrapemm.download import download_image, download_video
 from scrapemm.download.common import HEADERS
 from scrapemm.download.util import looks_like_image_file_url, looks_like_video_file_url, looks_like_hls_url
@@ -190,21 +191,19 @@ async def _retrieve_single(
                 return ScrapingResponse(url=url, content=MultimodalSequence(medium), method="Direct download",
                                         retrieval_time=time.time() - start_time)
 
-        # Map method names to their corresponding retrieval functions
-        method_retrieval_tasks = []
-        for method in methods:
-            if method == "firecrawl":
-                method_retrieval_tasks.append(fire.scrape(url, session=session, format=format, actions=actions,
-                                                include_media=include_media))
-            elif method == "decodo":
-                method_retrieval_tasks.append(decodo.scrape(url, session, format=format,
-                                                  timeout=15 if prioritize == "speed" else 60,
-                                                  max_retries=1 if prioritize == "speed" else 5,
-                                                  include_media=include_media))
+        def map_method_to_retrieval_routine(m: str) -> Coroutine:
+            if m.lower() == "firecrawl":
+                return fire.scrape(url, session=session, format=format, actions=actions,
+                                   include_media=include_media)
+            elif m.lower() == "decodo":
+                return decodo.scrape(url, session, format=format,
+                                     timeout=15 if prioritize == "speed" else 60,
+                                     max_retries=1 if prioritize == "speed" else 5,
+                                     include_media=include_media)
             else:
-                method_retrieval_tasks.append(retrieve_via_integration(url, integration_name=method, session=session,
-                                                             max_video_size=max_video_size,
-                                                             include_media=include_media))
+                return retrieve_via_integration(url, integration_name=m, session=session,
+                                                max_video_size=max_video_size,
+                                                include_media=include_media)
 
     except Exception as e:
         logger.error(f"Error while preparing retrieval for '{url}'.\n" + format_exc())
@@ -214,11 +213,12 @@ async def _retrieve_single(
     result = None
     errors = {}
     logger.debug(f"Trying methods in order: {', '.join(methods)}")
-    for method_name, retrieval_task in zip(methods, method_retrieval_tasks):
-        logger.debug(f"Trying method: {method_name}")
+    for method_name in methods:
+        logger.debug(f"Now executing {method_name}...")
+        routine = map_method_to_retrieval_routine(method_name)
 
         try:
-            result = await retrieval_task
+            result = await routine
 
         except NotImplementedError as e:
             logger.info("Reached a method that is not implemented.", exc_info=True)
@@ -229,7 +229,7 @@ async def _retrieve_single(
                 logger.error("ezMM database is read-only! Please check the database.")
                 raise
             else:
-                logger.warning(f"Error while retrieving with method '{method_name}': {e}")
+                logger.warning(f"DB error while retrieving with method '{method_name}'.", exc_info=True)
                 errors[method_name] = f"{type(e).__name__}: {e}"
 
         except (TimeoutError, PlaywrightTimeoutError) as e:
@@ -245,21 +245,26 @@ async def _retrieve_single(
                 logger.critical("❌ Disk is full! Please free up space and try again. Aborting.")
                 raise DiskFull()
 
+        except (RetrievalFailed, TargetUnavailableError) as e:
+            # No logging here, it's handled by the caller
+            errors[method_name] = f"{type(e).__name__}: {e}"
+
         except Exception as e:
-            logger.warning(f"Error while retrieving with method '{method_name}': {e}")
+            logger.warning(f"Error while retrieving with method '{method_name}'.", exc_info=True)
             errors[method_name] = f"{type(e).__name__}: {e}"
 
         if result is not None:
-            logger.debug(f"Successfully retrieved with method: {method_name}")
+            logger.debug(f"🎉 Successfully retrieved with method: {method_name}")
             if isinstance(result, MultimodalSequence):
                 postprocess_media(result)
-            return ScrapingResponse(url=url, content=result, method=method_name,
+            return ScrapingResponse(url=url, content=result, method=method_name, errors=errors,
                                     retrieval_time=time.time() - start_time)
 
         # Method returned None without raising — record an explicit error
         if method_name not in errors:
+            logger.debug(f"Method '{method_name}' returned no content for url: {url}.")
             errors[method_name] = RetrievalFailed(
-                f"Method '{method_name}' returned no content for '{url}'."
+                f"Method '{method_name}' returned no content."
             )
 
     # All methods failed

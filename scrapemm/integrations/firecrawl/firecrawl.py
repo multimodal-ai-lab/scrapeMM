@@ -124,14 +124,15 @@ class Firecrawl:
         self.n_scrapes += 1
         html = document.html
 
-        if html:
-            if format == "html":
-                return html
-            elif not include_media:
-                return html2md(html)
-            else:
-                return await to_multimodal_sequence(html, session=session, url=url)
-        return None
+        if not html:
+            raise RuntimeError("No HTML content found in Firecrawl response.")
+
+        if format == "html":
+            return html
+        elif not include_media:
+            return html2md(html)
+        else:
+            return await to_multimodal_sequence(html, session=session, url=url)
 
     async def _ensure_availability(self, url: str, session: aiohttp.ClientSession):
         """Probe if the URL is reachable. If an HTTP error >= 400 occurs, raise an exception."""
@@ -143,7 +144,7 @@ class Firecrawl:
             return  # We don't know yet'
         except ClientResponseError as e:
             logger.debug(f"Firecrawl skipping URL {url} due to unavailability: {e}")
-            raise TargetUnavailableError(f"Target {url} is not scrapable: {e}")
+            raise TargetUnavailableError(f"Target is not scrapable: Code {e.status} ({e.message})")
 
 
 fire = Firecrawl()

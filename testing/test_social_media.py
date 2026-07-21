@@ -105,6 +105,7 @@ async def test_tiktok(url: str, expected: dict[str, int]):
 @pytest.mark.parametrize("url, expected", [
     ("https://x.com/PopBase/status/1938496291908030484", dict(image=1)),
     ("https://x.com/realDonaldTrump", dict()),
+    ("https://t.co/GcXDN4zbRx", dict(image=1)),
     ("https://publish.twitter.com/?query=https%3A%2F%2Ftwitter.com%2FRain2097952%2Fstatus%2F1719525724279976200&widget=Tweet",
      dict(image=1)),
 ])

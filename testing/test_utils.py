@@ -1,12 +1,12 @@
 import aiohttp
 import pytest
 from bs4 import BeautifulSoup
-from ezmm import MultimodalSequence
 
+from scrapemm.download.common import HEADERS
 from scrapemm.util import (
     _extract_media_elements,
     get_markdown_hyperlinks,
-    to_multimodal_sequence,
+    unshorten,
 )
 
 
@@ -44,3 +44,17 @@ def test_extract_skips_emoji_background_image():
     )
     soup = BeautifulSoup(html, "html.parser")
     assert _extract_media_elements(soup) == []
+
+
+async def do_unshorten(short_url):
+    async with aiohttp.ClientSession(headers=HEADERS) as session:
+        return await unshorten(short_url, session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("short_url,long_url", [
+    ("https://t.co/GcXDN4zbRx", "https://twitter.com/mossos/status/1415935363567263744/photo/1"),
+])
+async def test_unshorten(short_url: str, long_url: str):
+    extended = await do_unshorten(short_url)
+    assert extended == long_url

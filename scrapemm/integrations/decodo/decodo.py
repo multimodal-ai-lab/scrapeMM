@@ -183,9 +183,8 @@ class Decodo:
                         if json_response.get("status") == "failed":
                             status_code = json_response.get("status_code")
                             message = json_response.get("message")
-                            msg = f"Decodo failed to scrape {url}: Error {status_code}: {message}"
-                            logger.info(msg)
-                            raise RetrievalFailed(msg)
+                            logger.info(f"Decodo failed to scrape {url}: Error {status_code}: {message}")
+                            raise RetrievalFailed(f"Decodo failed with error {status_code}: {message}")
 
                         # Extract HTML content from results
                         if "results" in json_response and len(json_response["results"]) > 0:
