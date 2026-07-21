@@ -173,7 +173,7 @@ class Decodo:
                                     logger.debug("Error 500: Server error.")
                                 case _:
                                     logger.debug(f"Error {response.status}: {response.reason}.")
-                            raise RuntimeError(f"Decodo API error {response.status}: {response.reason}")
+                            raise RuntimeError(f"Decodo returned error {response.status}: {response.reason}")
 
                     else:
                         # Parse response

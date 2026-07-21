@@ -15,7 +15,7 @@ from scrapemm.download import download_image, download_video
 from scrapemm.download.common import HEADERS
 from scrapemm.download.util import looks_like_image_file_url, looks_like_video_file_url, looks_like_hls_url
 from scrapemm.integrations import retrieve_via_integration, fire, decodo, get_integrations_for_url, INTEGRATION_NAMES
-from scrapemm.util import run_with_semaphore, get_domain, normalize_video
+from scrapemm.util import run_with_semaphore, get_domain, normalize_video, preprocess_url
 
 logger = logging.getLogger("scrapeMM")
 METHODS = ["integrations", "firecrawl", "decodo"]
@@ -159,8 +159,8 @@ async def _retrieve_single(
                                 errors=dict(scrapemm=UnsupportedDomainError("Unsupported domain.")),
                                 retrieval_time=time.time() - start_time)
 
-    # Ensure URL is a string
-    url = str(url)
+    # Ensure URL is a string and remove unwanted symbols
+    url = preprocess_url(url)
 
     # Resolve the best methods to try in order
     methods: list[str] = resolve_best_methods(url, methods)

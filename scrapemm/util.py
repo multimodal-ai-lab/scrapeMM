@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, Awaitable, Iterable, Union
+from urllib.parse import unquote
 
 import aiohttp
 import tqdm
@@ -18,7 +19,6 @@ from markdownify import markdownify as md
 from playwright.async_api import APIRequestContext, Page, Frame
 
 from scrapemm.download import download_video, download_image
-from scrapemm.download.common import HEADERS
 from scrapemm.download.images import image_from_binary
 from scrapemm.download.util import (
     looks_like_image_file_url,
@@ -29,6 +29,12 @@ from scrapemm.download.videos import video_from_binary, download_hls_video, is_h
 logger = logging.getLogger("scrapeMM")
 
 DOMAIN_REGEX = r"(?:https?:\/\/)?(?:www\.)?([-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6})/?"
+
+
+def preprocess_url(url: str) -> str:
+    """Decodes a URL and removes unwanted symbols from it such
+    as surrounding whitespace, non-breaking spaces, etc."""
+    return unquote(str(url)).strip()
 
 
 def get_domain(url: str, keep_subdomain: bool = False) -> Optional[str]:
@@ -315,12 +321,14 @@ async def resolve_media(
                 if source_element:
                     tasks.append(fetch_video_via_page(source_element, uri))
                 else:
-                    tasks.append(download_video(uri, session=session, headers={"Referer": url} if url else {}, **kwargs))
+                    tasks.append(
+                        download_video(uri, session=session, headers={"Referer": url} if url else {}, **kwargs))
             else:  # It's an image
                 if source_element:
                     tasks.append(fetch_image_via_page(source_element, uri, **kwargs))
                 else:
-                    tasks.append(download_image(uri, session=session, headers={"Referer": url} if url else {}, **kwargs))
+                    tasks.append(
+                        download_image(uri, session=session, headers={"Referer": url} if url else {}, **kwargs))
             unique_urls.append(uri)
 
     # 4. Download media
@@ -653,6 +661,7 @@ def run_command(cmd: list[str]) -> subprocess.CompletedProcess | None:
     except UnicodeDecodeError:
         logger.debug(f"Error running command {cmd}: Unicode decoding failed")
         return None
+
 
 def parse_netscape_cookies(cookie_file: Path) -> list[dict]:
     """Parse the Netscape-format cookie file and return cookie dicts.

@@ -78,6 +78,7 @@ async def test_facebook(url: str, expected: dict[str, int]):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url, expected", [
+    ("https://t.me/sheyhtamir1974/93691%C2%A0", dict(image=1)),  # One image
     ("https://t.me/durov/404", dict(image=1)),  # One image
     ("https://t.me/tglobaleye/16172", dict(image=2)),  # Multiple images
     ("https://t.me/tglobaleye/16178", dict(video=1)),  # Video and quote
@@ -104,8 +105,13 @@ async def test_tiktok(url: str, expected: dict[str, int]):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url, expected", [
     ("https://x.com/PopBase/status/1938496291908030484", dict(image=1)),
+    ("https://twitter.com/Cow__Momma/status/1729708561934991851/photo/2", dict(image=1)),
     ("https://x.com/realDonaldTrump", dict()),
     ("https://t.co/GcXDN4zbRx", dict(image=1)),
+    ("https://x.com/HPhobiaWatch/status/1875842972216066547", dict(image=2)),
+    ("https://x.com/TigerRajaSingh/status/1125050909338169345", dict(video=1)),
+    ("https://x.com/visegrad24/status/2072633510725071224", dict(image=1, video=3)),
+    ("https://x.com/visegrad24/status/2072633510725071224/video/2", dict(video=1)),
     ("https://publish.twitter.com/?query=https%3A%2F%2Ftwitter.com%2FRain2097952%2Fstatus%2F1719525724279976200&widget=Tweet",
      dict(image=1)),
 ])

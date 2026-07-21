@@ -9,6 +9,7 @@ from ezmm import MultimodalSequence, Image, Item, Video
 from telethon import TelegramClient
 from telethon.tl.types import Channel, User
 
+from scrapemm.common.exceptions import TargetUnavailableError
 from scrapemm.secrets import get_secret
 from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.util import get_domain
@@ -50,7 +51,7 @@ class Telegram(RetrievalIntegration):
         path_parts = parsed.path.strip("/").split("/")
 
         if len(path_parts) < 2:
-            return None
+            raise ValueError("Invalid Telegram post URL. Expected format: https://t.me/channel_name/post_id")
 
         channel_name = path_parts[0]
         post_id = int(path_parts[1])
@@ -58,13 +59,13 @@ class Telegram(RetrievalIntegration):
         # Get the message
         channel = await self.client.get_entity(channel_name)
         if not channel:
-            return None
+            raise TargetUnavailableError(f"The channel {channel_name} is not available on Telegram.")
 
         assert isinstance(channel, Channel), f"Can only retrieve posts from Telegram channels, but got {type(channel).__name__}."
 
         message = await self.client.get_messages(channel, ids=post_id)
         if not message:
-            return None
+            raise TargetUnavailableError(f"The post {post_id} in channel {channel_name} is not available on Telegram.")
 
         # Handle media
         max_video_size = kwargs.get("max_video_size")

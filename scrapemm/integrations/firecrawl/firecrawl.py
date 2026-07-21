@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 import aiohttp
-from aiohttp import ClientResponseError
+from aiohttp import ClientResponseError, ClientConnectorError
 from ezmm import MultimodalSequence
 from requests import ConnectionError, ReadTimeout
 from requests.exceptions import RetryError
@@ -86,9 +86,9 @@ class Firecrawl:
         if not self._firecrawl:
             await self.connect()
 
-        if (await self._ensure_availability(url, session)) == False:
-            # Skip unavailable URLs which would otherwise cause Firecrawl to get stuck in an infinite loop.
-            return None
+        # Throw an exception for unavailable URLs which would otherwise cause Firecrawl
+        # to get stuck in an infinite loop.
+        await self._ensure_availability(url, session)
 
         document = None
         for attempt in range(max_attempts):
@@ -141,10 +141,13 @@ class Firecrawl:
                 response.raise_for_status()
                 return  # All fine
         except (ReadTimeout, asyncio.TimeoutError):
-            return  # We don't know yet'
+            return  # We don't know yet
         except ClientResponseError as e:
             logger.debug(f"Firecrawl skipping URL {url} due to unavailability: {e}")
             raise TargetUnavailableError(f"Target is not scrapable: Code {e.status} ({e.message})")
+        except ClientConnectorError as e:
+            logger.debug(f"Firecrawl skipping URL {url} due to unavailability: {e}")
+            raise TargetUnavailableError(f"Target is not scrapable: {e}")
 
 
 fire = Firecrawl()

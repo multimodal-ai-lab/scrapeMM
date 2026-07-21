@@ -12,7 +12,7 @@ from yt_dlp.networking.impersonate import ImpersonateTarget
 
 from scrapemm import RateLimitError
 from scrapemm.common import CONFIG_DIR
-from scrapemm.common.exceptions import ContentBlockedError
+from scrapemm.common.exceptions import ContentBlockedError, TargetUnavailableError
 from scrapemm.download import download_image
 from scrapemm.download.common import HEADERS
 from scrapemm.integrations.base import RetrievalIntegration
@@ -109,6 +109,8 @@ class Facebook(RetrievalIntegration):
                     raise e
         elif self._is_photo_url(url):
             return await self._get_photo(url, **kwargs)
+        elif self._is_profile_url(url):
+            return await self._get_user_profile(url, **kwargs)
 
         # The URL is not indicative, so try all methods
         try:
@@ -189,13 +191,13 @@ class Facebook(RetrievalIntegration):
                 await browser.close()
 
         if not image_url:
-            raise RuntimeError("Could not locate image on Facebook photo page.")
+            raise TargetUnavailableError("Could not locate image on Facebook photo page.")
 
         async with aiohttp.ClientSession(headers=HEADERS) as session:
             image = await download_image(image_url, session)
 
         if not image:
-            raise RuntimeError("Could not download image from Facebook photo.")
+            raise TargetUnavailableError("Could not download image from Facebook photo.")
 
         # Retrieve text only
         text = md(html, heading_style="ATX")
@@ -291,6 +293,12 @@ class Facebook(RetrievalIntegration):
     def _is_photo_url(self, url: str) -> bool:
         """Checks if the URL is a Facebook photo URL."""
         return "facebook.com/photo" in url or "facebook.com/photos" in url
+
+    def _is_profile_url(self, url: str) -> bool:
+        """Checks if the URL is a Facebook profile URL."""
+        parsed = urlparse(url)
+        path_parts = parsed.path.strip("/").split("/")
+        return len(path_parts) > 0 and path_parts[0] == "profile.php"
 
     def _extract_username(self, url: str) -> str:
         """Extracts the username from a Facebook profile URL."""

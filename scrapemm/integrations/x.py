@@ -60,16 +60,26 @@ class X(RetrievalIntegration):
         if urlparse(url).path.startswith("/search"):
             raise ValueError("X search URLs are not supported by the X integration.")
 
-        tweet_id = extract_tweet_id_from_url(url)
+        tweet_id, media_number = extract_tweet_id_from_url(url)
         try:
             if tweet_id:
-                return await self._get_tweet(tweet_id, session, max_video_size)
+                tweet_content = await self._get_tweet(tweet_id, session, max_video_size)
+                if media_number is not None:
+                    media = list(tweet_content.unique_items())
+                    return MultimodalSequence(media[media_number - 1])
+                else:
+                    return tweet_content
             else:
                 username = extract_username_from_url(url)
                 if username:
                     return await self._get_user(username, session)
         except TooManyRequests:
             raise RateLimitError("X API rate limit reached.")
+        except Exception as e:
+            logger.debug(f"Error retrieving X content from {url}: {e}", exc_info=True)
+            raise RuntimeError(f"Error retrieving X content: {e}")
+
+        raise TargetUnavailableError(f"Could not retrieve X content from {url}.")
 
     async def _normalize(self, url: str, session: aiohttp.ClientSession) -> str:
         """Turns URLs of the form https://publish.twitter.com/?query=...
@@ -120,7 +130,7 @@ class X(RetrievalIntegration):
                     # Get the variant with the highest bitrate
                     url = _get_best_quality_video_url(medium_raw.variants)
                     medium = await download_video(url, session=session)
-                    if medium and medium.size > max_video_size:
+                    if medium and max_video_size and medium.size > max_video_size:
                         logger.info(f"Removing video {medium.reference} because it exceeds the maximum size "
                                     f"of {max_video_size / 1024 / 1024:.2f} MB.")
                         medium = None
@@ -144,10 +154,13 @@ Likes: {metrics['like_count']} - Retweets: {metrics['retweet_count']} - Replies:
         # The fields "parody" and "verified_followers_count" are fairly new. See
         # https://x.com/Safety/status/1877581125608153389
         # and https://x.com/XDevelopers/status/1865180409425715202
-        response = await self.client.get_user(username=username, user_fields=[
-            "created_at", "description", "location", "parody", "profile_banner_url", "profile_image_url",
-            "protected", "public_metrics", "url", "verified", "verified_followers_count", "verified_type", "withheld"
-        ])
+        try:
+            response = await self.client.get_user(username=username, user_fields=[
+                "created_at", "description", "location", "parody", "profile_banner_url", "profile_image_url",
+                "protected", "public_metrics", "url", "verified", "verified_followers_count", "verified_type", "withheld"
+            ])
+        except Exception:
+            raise TargetUnavailableError(f"X user @{username} apparently doesn't exist.")
         user: User = response.data
 
         if user:
@@ -210,13 +223,20 @@ def extract_username_from_url(url: str) -> Optional[str]:
         return None
 
 
-def extract_tweet_id_from_url(url: str) -> Optional[int]:
-    parsed = urlparse(url)
-    id_candidate = parsed.path.strip("/").split("/")[-1]  # Takes variants (like short links) into account
+def extract_tweet_id_from_url(url: str) -> tuple[Optional[int], Optional[int]]:
     try:
-        return int(id_candidate)
+        parsed = urlparse(url)
+        match = re.fullmatch(
+            r"/[^/]+/status/(\d+)(?:/(?:photo|video)/(\d+))?/?",
+            parsed.path,
+        )
+        if match:
+            tweet_id, media_number = match.groups()
+            media_number = int(media_number) if media_number else None
+            return int(tweet_id), media_number
     except ValueError:
-        return None
+        pass
+    return None, None
 
 
 def _get_best_quality_video_url(variants: list) -> Optional[str]:
