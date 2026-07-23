@@ -5,7 +5,7 @@ from ezmm import MultimodalSequence
 from yt_dlp import DownloadError
 
 from scrapemm.common.exceptions import RateLimitError
-from scrapemm.integrations.base import RetrievalIntegration
+from scrapemm.common.retrieval_integration import RetrievalIntegration
 from scrapemm.integrations.ytdlp import get_content_with_ytdlp
 
 logger = logging.getLogger("scrapeMM")
@@ -20,7 +20,7 @@ class Instagram(RetrievalIntegration):
         logger.info(f"✅ Instagram integration ready (yt-dlp only mode).")
         self.connected = True
 
-    async def _get(self, url: str, **kwargs) -> MultimodalSequence | None:
+    async def _get(self, url: str, **kwargs) -> MultimodalSequence:
         """Retrieves content from an Instagram post URL."""
         # Determine if this is a video or profile URL
         if self._is_video_url(url):
@@ -39,7 +39,7 @@ class Instagram(RetrievalIntegration):
         else:
             return await self._get_user_profile(url, **kwargs)
 
-    async def _get_video(self, url: str, **kwargs) -> MultimodalSequence | None:
+    async def _get_video(self, url: str, **kwargs) -> MultimodalSequence:
         """Retrieves content from an Instagram video URL."""
         if self.api_available:
             raise NotImplementedError
@@ -52,11 +52,11 @@ class Instagram(RetrievalIntegration):
                 else:
                     raise e
 
-    async def _get_photo(self, url: str, **kwargs) -> MultimodalSequence | None:
+    async def _get_photo(self, url: str, **kwargs) -> MultimodalSequence:
         """Retrieves content from an Instagram photo URL (can also be a reel)."""
         raise NotImplementedError("Native Instagram photo download not yet supported. Use Decodo for that.")
 
-    async def _get_user_profile(self, url: str, **kwargs) -> MultimodalSequence | None:
+    async def _get_user_profile(self, url: str, **kwargs) -> MultimodalSequence:
         """Retrieves content from an Instagram user profile URL."""
         username = self._extract_username(url)
         raise NotImplementedError(f"No method available to retrieve Instagram profiles (user @{username}).")

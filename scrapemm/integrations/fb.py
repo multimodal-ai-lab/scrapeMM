@@ -12,10 +12,10 @@ from yt_dlp.networking.impersonate import ImpersonateTarget
 
 from scrapemm import RateLimitError
 from scrapemm.common import CONFIG_DIR
-from scrapemm.common.exceptions import ContentBlockedError, TargetUnavailableError
+from scrapemm.common.exceptions import ContentBlockedError, TargetUnavailableError, IPBannedError
 from scrapemm.download import download_image
 from scrapemm.download.common import HEADERS
-from scrapemm.integrations.base import RetrievalIntegration
+from scrapemm.common.retrieval_integration import RetrievalIntegration
 from scrapemm.integrations.ytdlp import get_content_with_ytdlp
 from scrapemm.secrets import get_secret
 from scrapemm.util import parse_netscape_cookies, postprocess_markdown
@@ -90,7 +90,7 @@ class Facebook(RetrievalIntegration):
         logger.info("✅ Facebook integration ready (yt-dlp only mode).")
         self.connected = True
 
-    async def _get(self, url: str, **kwargs) -> MultimodalSequence | None:
+    async def _get(self, url: str, **kwargs) -> MultimodalSequence:
         """Retrieves content from a Facebook post URL."""
         url = self._normalize_url(url)
 
@@ -98,6 +98,8 @@ class Facebook(RetrievalIntegration):
         if self._is_video_url(url):
             try:
                 return await self._get_video(url, **kwargs)
+            except (ContentBlockedError, TargetUnavailableError):
+                raise
             except Exception as e:
                 if "No video formats found" in str(e):
                     raise ContentBlockedError("Video is blocked by Facebook.")
@@ -113,24 +115,44 @@ class Facebook(RetrievalIntegration):
             return await self._get_user_profile(url, **kwargs)
 
         # The URL is not indicative, so try all methods
+
+        # Get the text first
+        content = []
         try:
-            return await self._get_video(url, **kwargs)
+            video = await self._get_video(url, **kwargs)
+            if video:
+                content.append(video)
+        except (TargetUnavailableError, ContentBlockedError, IPBannedError):
+            raise
         except Exception:
-            logger.debug(f"Facebook video retrieval failed for {url}", exc_info=True)
+            pass
 
         try:
-            return await self._get_photo(url, **kwargs)
+            image = await self._get_photo(url, **kwargs)
+            if image:
+                content.append(image)
         except Exception:
-            logger.debug(f"Facebook photo retrieval failed for {url}", exc_info=True)
+            pass
+
+        try:
+            from scrapemm.integrations.decodo import decodo
+            text = await decodo.scrape(url, session=kwargs.get("session"), format="markdown", include_media=False)
+            if text:
+                content.append(text)
+        except Exception:
+            pass
+
+        if content:
+            return MultimodalSequence(content)
 
         try:
             return await self._get_user_profile(url, **kwargs)
         except Exception:
-            logger.debug(f"Facebook profile retrieval failed for {url}", exc_info=True)
+            pass
 
-        raise RuntimeError("Unable to retrieve content from Facebook URL.")
+        raise TargetUnavailableError("Unable to retrieve content from Facebook URL.")
 
-    async def _get_video(self, url: str, **kwargs) -> MultimodalSequence | None:
+    async def _get_video(self, url: str, **kwargs) -> MultimodalSequence:
         """Retrieves content from a Facebook video URL."""
         if self.api_available:
             raise NotImplementedError(
@@ -145,7 +167,7 @@ class Facebook(RetrievalIntegration):
                 **kwargs,
             )
 
-    async def _get_photo(self, url: str, **kwargs) -> MultimodalSequence | None:
+    async def _get_photo(self, url: str, **kwargs) -> MultimodalSequence:
         """Retrieves content from a Facebook photo URL using Playwright with session cookies."""
         cookies = parse_netscape_cookies(self.cookie_file)
 
@@ -158,8 +180,8 @@ class Facebook(RetrievalIntegration):
         return await self._get_photo_from_regular_post(url, cookies)
 
     async def _get_photo_from_regular_post(
-        self, url, cookies: list[dict[str, str]]
-    ) -> MultimodalSequence | None:
+            self, url, cookies: list[dict[str, str]]
+    ) -> MultimodalSequence:
         image_url = None
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
@@ -210,7 +232,7 @@ class Facebook(RetrievalIntegration):
         return MultimodalSequence([image, postprocessed_text])
 
     async def _get_photos_from_post_permalink(
-        self, url: str, cookies: list[dict[str, str]], **kwargs
+            self, url: str, cookies: list[dict[str, str]], **kwargs
     ) -> list[Image]:
         """Retrieves all photos from a Facebook post permalink URL."""
         async with async_playwright() as p:
@@ -250,7 +272,7 @@ class Facebook(RetrievalIntegration):
         hrefs = re.findall(FB_PHOTO_HREF_REGEX, html)
         return hrefs
 
-    async def _get_user_profile(self, url: str, **kwargs) -> MultimodalSequence | None:
+    async def _get_user_profile(self, url: str, **kwargs) -> MultimodalSequence:
         """Retrieves content from a Facebook user profile URL."""
         raise NotImplementedError("No method available to retrieve Facebook profiles.")
 
@@ -258,12 +280,12 @@ class Facebook(RetrievalIntegration):
         """If the URL is a login Facebook URL, i.e., of the form https://www.facebook.com/login/?next=...
         or https://www.facebook.com/plugins/post.php?href=..., extracts the actual post's URL."""
         if url.startswith(
-            "https://www.facebook.com/login/?next="
+                "https://www.facebook.com/login/?next="
         ):  # Login redirect URLs
             query = urlparse(url).query
             return parse_qs(query).get("next", [])[0] or url
         elif url.startswith(
-            "https://www.facebook.com/plugins/post.php?href="
+                "https://www.facebook.com/plugins/post.php?href="
         ):  # Post embedding links
             query = urlparse(url).query
             return parse_qs(query).get("href", [])[0] or url
@@ -274,11 +296,11 @@ class Facebook(RetrievalIntegration):
         # video URLS are in the format: https://www.facebook.com/watch?v=VIDEO_ID or fb.watch/...
         # or Reels: https://www.facebook.com/reel/REEL_ID
         return (
-            "facebook.com/watch" in url
-            or "facebook.com/reel" in url
-            or bool(re.search(VIDEO_URL_REGEX, url))
-            or "fb.watch" in url
-            or "/videos/" in url
+                "facebook.com/watch" in url
+                or "facebook.com/reel" in url
+                or bool(re.search(VIDEO_URL_REGEX, url))
+                or "fb.watch" in url
+                or "/videos/" in url
         )
 
     def _extract_video_id(self, url: str) -> str:

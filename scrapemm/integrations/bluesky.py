@@ -1,13 +1,12 @@
 import logging
-from typing import Optional
 
 import aiohttp
 from atproto_client.exceptions import RequestErrorBase
 from ezmm import MultimodalSequence
 
 from scrapemm.common.exceptions import TargetUnavailableError
+from scrapemm.common.retrieval_integration import RetrievalIntegration
 from scrapemm.download import download_video, download_image
-from scrapemm.integrations.base import RetrievalIntegration
 from scrapemm.secrets import get_secret
 
 logger = logging.getLogger("scrapeMM")
@@ -30,27 +29,24 @@ class Bluesky(RetrievalIntegration):
         self.client = AsyncClient()
         await self._authenticate()
 
-    async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
-        session = kwargs.get("session")
+    async def _get(self, url: str, **kwargs) -> MultimodalSequence:
+        session = kwargs["session"]
         max_video_size = kwargs.get("max_video_size")
         if "post" in url:
-            result = await self._retrieve_post(url, session, max_video_size)
+            return await self._retrieve_post(url, session, max_video_size)
         else:
-            result = await self._retrieve_profile(url, session)
-
-        return result
+            return await self._retrieve_profile(url, session)
 
     async def _retrieve_post(
-        self,
-        url: str,
-        session: aiohttp.ClientSession | None = None,
-        max_video_size: int | None = None
-    ) -> Optional[MultimodalSequence]:
+            self,
+            url: str,
+            session: aiohttp.ClientSession,
+            max_video_size: int | None = None
+    ) -> MultimodalSequence:
         """Retrieve a post from the given Bluesky URL."""
         uri = await self._construct_uri(url)
         if not uri:
-            logger.warning(f"Could not construct URI for Bluesky post: {url}")
-            return None
+            raise RuntimeError(f"Could not construct URI for Bluesky post: {url}")
 
         try:
             thread_response = await self.client.get_post_thread(uri=uri, depth=0, parent_height=0)
@@ -148,7 +144,7 @@ Likes: {like_count} - Comments: {comment_count} - Shares: {share_count}
             else:
                 raise
 
-    async def _retrieve_profile(self, url: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
+    async def _retrieve_profile(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence:
         """Retrieve a profile from the given Bluesky URL."""
         profile = await self.client.get_profile(url.split('/')[-1])
 
@@ -183,8 +179,8 @@ Metrics:
             return False
 
     async def _construct_uri(self, url: str) -> str | None:
-        # Extract post URI from the URL - Bluesky URLs typically look like:
-        # https://bsky.app/profile/username.bsky.social/post/abcdef123
+        """Extract post URI from the URL - Bluesky URLs typically look like:
+        https://bsky.app/profile/username.bsky.social/post/abcdef123"""
         try:
             # Parse URL to extract components for building the AT URI
             parts = url.split('/')

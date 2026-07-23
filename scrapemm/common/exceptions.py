@@ -2,6 +2,10 @@ class RateLimitError(Exception):
     pass
 
 
+class QuotaExceededError(Exception):
+    pass
+
+
 class IPBannedError(Exception):
     pass
 

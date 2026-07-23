@@ -6,13 +6,13 @@ from urllib.parse import urlparse, parse_qs
 
 import aiohttp
 from ezmm import MultimodalSequence
-from tweepy import Tweet, User, TooManyRequests
+from tweepy import Tweet, User, TooManyRequests, HTTPException
 from tweepy.asynchronous import AsyncClient
 
 import scrapemm.common
-from scrapemm.common.exceptions import RateLimitError, TargetUnavailableError
+from scrapemm.common.exceptions import RateLimitError, TargetUnavailableError, QuotaExceededError
 from scrapemm.download import download_image, download_video
-from scrapemm.integrations.base import RetrievalIntegration
+from scrapemm.common.retrieval_integration import RetrievalIntegration
 from scrapemm.secrets import get_secret
 from scrapemm.util import unshorten
 
@@ -51,8 +51,8 @@ class X(RetrievalIntegration):
             self.connected = False
             logger.warning("❌ X (Twitter) integration not configured: Missing bearer token.")
 
-    async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
-        session = kwargs.get("session")
+    async def _get(self, url: str, **kwargs) -> MultimodalSequence:
+        session = kwargs["session"]
         max_video_size = kwargs.get("max_video_size")
         url = await self._normalize(url, session)
 
@@ -75,6 +75,13 @@ class X(RetrievalIntegration):
                     return await self._get_user(username, session)
         except TooManyRequests:
             raise RateLimitError("X API rate limit reached.")
+        except HTTPException as e:
+            if e.response.status == 402:
+                raise QuotaExceededError(f"X API credits depleted. {e}")
+            else:
+                raise RuntimeError(f"X API error: {e}")
+        except TargetUnavailableError as e:
+            raise e
         except Exception as e:
             logger.debug(f"Error retrieving X content from {url}: {e}", exc_info=True)
             raise RuntimeError(f"Error retrieving X content: {e}")
@@ -95,7 +102,7 @@ class X(RetrievalIntegration):
             return parse_qs(query).get("query", [])[0] or url
         return url
 
-    async def _get_tweet(self, tweet_id: int, session: aiohttp.ClientSession, max_video_size: int = None) -> Optional[MultimodalSequence]:
+    async def _get_tweet(self, tweet_id: int, session: aiohttp.ClientSession, max_video_size: int = None) -> MultimodalSequence:
         """Returns a MultimodalSequence containing the tweet's text and media
         along with information like metrics, etc."""
 
@@ -123,17 +130,19 @@ class X(RetrievalIntegration):
         media = []
         if media_raw:
             for medium_raw in media_raw:
+                medium = None
                 if medium_raw.type == "photo":
                     url = medium_raw.url
                     medium = await download_image(url, session=session)
                 elif medium_raw.type in ["video", "animated_gif"]:
                     # Get the variant with the highest bitrate
                     url = _get_best_quality_video_url(medium_raw.variants)
-                    medium = await download_video(url, session=session)
-                    if medium and max_video_size and medium.size > max_video_size:
-                        logger.info(f"Removing video {medium.reference} because it exceeds the maximum size "
-                                    f"of {max_video_size / 1024 / 1024:.2f} MB.")
-                        medium = None
+                    if url:
+                        medium = await download_video(url, session=session)
+                        if medium and max_video_size and medium.size > max_video_size:
+                            logger.info(f"Removing video {medium.reference} because it exceeds the maximum size "
+                                        f"of {max_video_size / 1024 / 1024:.2f} MB.")
+                            medium = None
                 else:
                     raise ValueError(f"Unsupported media type: {medium_raw.type}")
                 if medium:
@@ -147,7 +156,7 @@ Likes: {metrics['like_count']} - Retweets: {metrics['retweet_count']} - Replies:
 {text}"""  # TODO: Add edit history
         return MultimodalSequence([tweet_str, *media])
 
-    async def _get_user(self, username: str, session: aiohttp.ClientSession) -> Optional[MultimodalSequence]:
+    async def _get_user(self, username: str, session: aiohttp.ClientSession) -> MultimodalSequence:
         """Returns a MultimodalSequence containing the user's profile information
         incl. profile image and profile banner."""
 
@@ -161,38 +170,44 @@ Likes: {metrics['like_count']} - Retweets: {metrics['retweet_count']} - Replies:
             ])
         except Exception:
             raise TargetUnavailableError(f"X user @{username} apparently doesn't exist.")
+
         user: User = response.data
+        if not user:
+            raise TargetUnavailableError(f"X user @{username} not found.")
 
-        if user:
-            # Turn all the data into a multimodal sequence
-            profile_image = profile_banner = None
-            if profile_image_url := user.profile_image_url:
-                profile_image_url = profile_image_url.replace("_normal", "")  # Use the original picture variant
-                profile_image = await download_image(profile_image_url, session)
-            if hasattr(user, "profile_banner_url"):
-                profile_banner_url = user.profile_banner_url
-                if profile_banner_url:
-                    profile_banner = await download_image(profile_banner_url, session)
+        return await _parse_user(user, session)
 
-            verification_status_text = f"{'Verified' if user.verified else 'Not verified'}"
-            if user.verified:
-                verification_status_text += f" ({user.verified_type})"
 
-            metrics = [f" - {k.capitalize().replace('_', ' ')}: {v}"
-                       for k, v in user.public_metrics.items()]
-            metrics_text = "\n".join(metrics)
-            if hasattr(user, "verified_followers_count"):
-                metrics_text += f"\n - Verified followers count: {user.verified_followers_count}"
+async def _parse_user(user: User, session: aiohttp.ClientSession) -> MultimodalSequence:
+    # Turn all the data into a multimodal sequence
+    profile_image = profile_banner = None
+    if profile_image_url := user.profile_image_url:
+        profile_image_url = profile_image_url.replace("_normal", "")  # Use the original picture variant
+        profile_image = await download_image(profile_image_url, session)
+    if hasattr(user, "profile_banner_url"):
+        profile_banner_url = user.profile_banner_url
+        if profile_banner_url:
+            profile_banner = await download_image(profile_banner_url, session)
 
-            properties_text = f"- {verification_status_text}"
-            if user.protected:
-                properties_text += "\n- Protected"
-            if user.withheld:
-                properties_text += "\n- Withheld"
-            if hasattr(user, "parody") and user.parody:
-                properties_text += "\n- Marked as parody"
+    verification_status_text = f"{'Verified' if user.verified else 'Not verified'}"
+    if user.verified:
+        verification_status_text += f" ({user.verified_type})"
 
-            text = f"""**Profile on X**
+    metrics = [f" - {k.capitalize().replace('_', ' ')}: {v}"
+               for k, v in user.public_metrics.items()]
+    metrics_text = "\n".join(metrics)
+    if hasattr(user, "verified_followers_count"):
+        metrics_text += f"\n - Verified followers count: {user.verified_followers_count}"
+
+    properties_text = f"- {verification_status_text}"
+    if user.protected:
+        properties_text += "\n- Protected"
+    if user.withheld:
+        properties_text += "\n- Withheld"
+    if hasattr(user, "parody") and user.parody:
+        properties_text += "\n- Marked as parody"
+
+    text = f"""**Profile on X**
 User: {user.name}, @{user.username}
 Joined: {user.created_at.strftime("%B %d, %Y") if user.created_at else "Unknown"}
 Profile image: {profile_image.reference if profile_image else 'None'}
@@ -208,7 +223,8 @@ Metrics:
 Account properties:
 {properties_text}"""
 
-            return MultimodalSequence(text)
+    return MultimodalSequence(text)
+
 
 
 def extract_username_from_url(url: str) -> Optional[str]:

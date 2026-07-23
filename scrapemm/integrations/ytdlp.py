@@ -8,8 +8,9 @@ from typing import Any, Optional
 import aiohttp
 from ezmm import MultimodalSequence, Video, Image
 from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
 
-from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError
+from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError, ContentBlockedError
 from scrapemm.download import download_image
 
 logger = logging.getLogger("scrapeMM")
@@ -63,6 +64,7 @@ async def download_video_with_ytdlp(
             logger=logger_yt_dlp,  # Reroute logs to dedicated logger
             noplaylist=True,  # Disable playlist downloading
             retries=3,
+            ignoreerrors=False,
             **kwargs
         )
 
@@ -88,15 +90,21 @@ async def download_video_with_ytdlp(
 
         return video, thumbnail, metadata
 
+    except DownloadError as e:
+        if "This content isn't available to everyone" in str(e):
+            raise ContentBlockedError(f"Target content not available to everyone.")
+        else:
+            raise
+
     except Exception as e:
         if "The following content is not available on this app" in str(e):
             logger.warning(f"You should update yt-dlp to re-enable YouTube downloads.")
             raise e
         elif ("Video unavailable" in str(e)
               or "HTTP Error 404: Not Found" in str(e)):
-            raise TargetUnavailableError(f"Video is unavailable.")
+            raise TargetUnavailableError(f"Target content not found (Error 404).")
         elif "Cannot parse data; please report this issue" in str(e):
-            raise RuntimeError(f"yt-dlp is unable to parse the received video metadata.")
+            raise RetrievalFailed(f"yt-dlp is unable to parse the target content.")
         else:
             raise RuntimeError(f"Could not download video with yt-dlp: {e}")
 
@@ -148,9 +156,10 @@ async def get_content_with_ytdlp(
         session: aiohttp.ClientSession,
         platform: str,
         **kwargs
-) -> MultimodalSequence | None:
+) -> MultimodalSequence:
     """Retrieves video, thumbnail, and metadata using the powerful yt-dlp package."""
     video, thumbnail, metadata = await download_video_with_ytdlp(url, session, **kwargs)
     if metadata:
         return await compose_data_to_sequence(metadata, video, thumbnail, platform)
-    return None
+    else:
+        raise RetrievalFailed("Could not retrieve video metadata.")

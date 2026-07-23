@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError, Page
 
+from scrapemm.common.exceptions import TargetUnavailableError
 from scrapemm.integrations.headed_browser import HeadedBrowser, ContentTarget
 
 logger = logging.getLogger("scrapeMM")
@@ -170,6 +171,11 @@ class ArchiveToday(HeadedBrowser):
             logger.debug("Could not read Archive.today body text", exc_info=True)
             body_text = ""
 
+        # Catch missing capture
+        if "Not Found (yet?)".lower() in body_text.lower():
+            raise TargetUnavailableError("Archive.today capture not found.")
+
+        # Detect CAPTCHA gate
         if any(marker in body_text for marker in (
             "security check", "captcha", "just a moment", "performing security verification",
         )):

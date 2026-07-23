@@ -23,18 +23,21 @@ class RetrievalIntegration(ABC):
         Must set self.connect = True if connection was successful, else False."""
         raise NotImplementedError
 
-    async def get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
-        """Ensures connectivity before invoking the service for retrieval."""
+    async def get(self, url: str, **kwargs) -> MultimodalSequence:
+        """Executes the retrieval routine. Ensures connectivity before invoking the
+         retrieval. Raises an exception if anything goes wrong during retrieval."""
         assert get_domain(url) in self.domains, f"Invalid domain {get_domain(url)} for integration {self.name}."
+
         if self.connected is None:
             await self._connect()
-            if not self.connected:
-                logger.warning(f"❌ Connection to {self.name} service could not be established.")
-        if self.connected:
-            logger.debug(f"Calling {self.name} service for {url}")
-            return await self._get(url, **kwargs)
+
+        if not self.connected:
+            raise RuntimeError(f"Connection to {self.name} service could not be established.")
+
+        logger.debug(f"Calling {self.name} service for {url}")
+        return await self._get(url, **kwargs)
 
     @abstractmethod
-    async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
+    async def _get(self, url: str, **kwargs) -> MultimodalSequence:
         """Retrieves the contents present at the given URL."""
         raise NotImplementedError

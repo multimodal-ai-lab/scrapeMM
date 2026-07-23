@@ -23,6 +23,8 @@ class PermaCC(HeadedBrowser):
     name = "Perma.cc"
     domains = ["perma.cc"]
 
+    # TODO: Implement PDF support, e.g., https://perma.cc/83VA-LTH9
+
     async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
         # Check for Cloudflare challenge (passive check)
         body_text = await page.content()

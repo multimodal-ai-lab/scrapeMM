@@ -3,8 +3,9 @@ import logging
 import time
 from typing import Optional
 
-from playwright.async_api import TimeoutError, Page, Frame
+from playwright.async_api import TimeoutError, Page, Frame, Error as PlaywrightError
 
+from scrapemm.common.exceptions import TargetUnavailableError
 from scrapemm.integrations.headed_browser import HeadedBrowser, ContentTarget
 from scrapemm.integrations.perma_cc import _inline_media_in_frame
 
@@ -82,6 +83,9 @@ class ArchiveOrg(HeadedBrowser):
         logger.debug("Archive.org playback frame did not report ready before timeout; continuing.")
 
     async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
+        if "503 Service Unavailable".lower() in (await page.content()).lower():
+            raise TargetUnavailableError("Archive.org is currently unavailable (Error 503).")
+
         # Selector was already awaited in _settle_after_goto — no second long wait.
         playback_iframe = await page.query_selector(_PLAYBACK_IFRAME)
         if playback_iframe:

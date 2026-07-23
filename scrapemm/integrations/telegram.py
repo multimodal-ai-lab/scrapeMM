@@ -4,15 +4,14 @@ from typing import Optional
 from urllib.parse import urlparse
 import sqlite3
 
-import aiohttp
 from ezmm import MultimodalSequence, Image, Item, Video
 from telethon import TelegramClient
+from telethon.errors import FloodWaitError
 from telethon.tl.types import Channel, User
 
-from scrapemm.common.exceptions import TargetUnavailableError
+from scrapemm.common.exceptions import TargetUnavailableError, RateLimitError
 from scrapemm.secrets import get_secret
-from scrapemm.integrations.base import RetrievalIntegration
-from scrapemm.util import get_domain
+from scrapemm.common.retrieval_integration import RetrievalIntegration
 
 logger = logging.getLogger("scrapeMM")
 
@@ -44,7 +43,7 @@ class Telegram(RetrievalIntegration):
             self.connected = False
             logger.warning("❌ Telegram integration not configured: Missing API keys.")
 
-    async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
+    async def _get(self, url: str, **kwargs) -> MultimodalSequence:
         """Retrieves content from a Telegram post URL."""
         # Parse the URL to get channel/group name and post ID
         parsed = urlparse(url)
@@ -56,20 +55,24 @@ class Telegram(RetrievalIntegration):
         channel_name = path_parts[0]
         post_id = int(path_parts[1])
 
-        # Get the message
-        channel = await self.client.get_entity(channel_name)
-        if not channel:
-            raise TargetUnavailableError(f"The channel {channel_name} is not available on Telegram.")
+        try:
+            # Get the message
+            channel = await self.client.get_entity(channel_name)
+            if not channel:
+                raise TargetUnavailableError(f"The channel {channel_name} is not available on Telegram.")
 
-        assert isinstance(channel, Channel), f"Can only retrieve posts from Telegram channels, but got {type(channel).__name__}."
+            assert isinstance(channel, Channel), f"Can only retrieve posts from Telegram channels, but got {type(channel).__name__}."
 
-        message = await self.client.get_messages(channel, ids=post_id)
-        if not message:
-            raise TargetUnavailableError(f"The post {post_id} in channel {channel_name} is not available on Telegram.")
+            message = await self.client.get_messages(channel, ids=post_id)
+            if not message:
+                raise TargetUnavailableError(f"The post {post_id} in channel {channel_name} is not available on Telegram.")
 
-        # Handle media
-        max_video_size = kwargs.get("max_video_size")
-        media = await self._get_media_from_message(channel, message, max_video_size=max_video_size)
+            # Handle media
+            max_video_size = kwargs.get("max_video_size")
+            media = await self._get_media_from_message(channel, message, max_video_size=max_video_size)
+
+        except FloodWaitError as e:
+            raise RateLimitError(f"Telegram rate limit reached. Please wait {e.seconds} seconds.") from e
 
         author = message.sender
         author_type = type(author).__name__

@@ -53,6 +53,7 @@ async def test_instagram(url: str, expected: dict[str, int]):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url, expected", [
+    ("https://www.facebook.com/esta.spencer/posts/pfbid0zTQ51pwQ1ZGvoTnh6dWKaSqMTcjwpis7tcX1XE5YZ7jhnoc9ZCY8TiUw1Ewr8Wq3l", dict()),
     ("https://www.facebook.com/photo/?fbid=1721085455188778&set=a.107961589834514&_rdc=1&_rdr", dict(image=1)),
     ("https://www.facebook.com/photo/?fbid=1287391456760943&set=a.644291054404323", dict(image=1)),
     ("https://www.facebook.com/photo/?fbid=1148555903931627&set=a.859126372874583", dict(image=1)),

@@ -5,13 +5,13 @@ from datetime import datetime
 from urllib.parse import urlparse
 
 import aiohttp
-from ezmm import MultimodalSequence
+from ezmm import MultimodalSequence, Item
 from ezmm.common.items import Video, Image
 from tiktok_research_api import TikTokResearchAPI, QueryVideoRequest, QueryUserInfoRequest, Criteria, Query
 
-from scrapemm.common.exceptions import ContentBlockedError, IPBannedError
+from scrapemm.common.exceptions import ContentBlockedError, IPBannedError, TargetUnavailableError
 from scrapemm.download import download_image
-from scrapemm.integrations.base import RetrievalIntegration
+from scrapemm.common.retrieval_integration import RetrievalIntegration
 from scrapemm.integrations.ytdlp import download_video_with_ytdlp
 from scrapemm.secrets import get_secret
 
@@ -58,8 +58,8 @@ class TikTok(RetrievalIntegration):
         logger.info(f"✅ TikTok integration ready ({mode} mode).")
         self.connected = True
 
-    async def _get(self, url: str, **kwargs) -> MultimodalSequence | None:
-        session = kwargs.get('session')
+    async def _get(self, url: str, **kwargs) -> MultimodalSequence:
+        session = kwargs['session']
         max_video_size = kwargs.get('max_video_size')
 
         # Determine if this is a video or profile URL
@@ -77,21 +77,11 @@ class TikTok(RetrievalIntegration):
                 raise e
 
     async def _get_video(self, url: str, session: aiohttp.ClientSession,
-                         max_video_size=None) -> MultimodalSequence | None:
-        """Retrieves content from a TikTok video URL."""
-
-        # Try API mode first if available
-        if self.api_available:
-            result = await self._get_video_with_api(url, session, max_video_size=max_video_size)
-            if result:
-                return result
-
-    async def _get_video_with_api(self, url: str, session: aiohttp.ClientSession,
-                                  max_video_size=None) -> MultimodalSequence | None:
-        """Retrieves video using TikTok Research API."""
+                         max_video_size=None) -> MultimodalSequence:
+        """Retrieves video using TikTok Research API and yt-dlp."""
         video_id = self._extract_video_id(url)
         if not video_id:
-            return None
+            raise TargetUnavailableError("TikTok video not available.")
 
         try:
             # Create criteria to search for the specific video ID
@@ -131,33 +121,22 @@ class TikTok(RetrievalIntegration):
         except Exception as e:
             raise RuntimeError(f"Error retrieving TikTok video: {e}")
 
-    async def _get_user_profile(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
-        """Retrieves a TikTok user profile."""
-        # Try API mode first if available
-        if self.api_available:
-            result = await self._get_profile_with_api(url, session)
-            if result:
-                return result
-            logger.warning(f"TikTok API method failed for retrieving profile at {url}.")
-        return None
-
-    async def _get_profile_with_api(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence | None:
+    async def _get_user_profile(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence:
         """Retrieves profile using TikTok Research API."""
         username = self._extract_username(url)
         if not username:
-            return None
+            raise TargetUnavailableError("TikTok user not available.")
 
         try:
             user_info_request = QueryUserInfoRequest(username=username)
             user_info = self.api.query_user_info(user_info_request)
-
-            if not user_info:
-                return None
-
-            return await self._create_profile_sequence_from_api(username, user_info, url, session)
-
         except Exception as e:
             raise RuntimeError(f"Error retrieving TikTok user profile with API: {e}")
+
+        if not user_info:
+            raise TargetUnavailableError(f"TikTok user @{username} not available.")
+
+        return await self._create_profile_sequence_from_api(username, user_info, url, session)
 
     async def _create_video_sequence_from_api(self, metadata: dict, video: Video | None,
                                               thumbnail: Image | None) -> MultimodalSequence:
@@ -190,7 +169,7 @@ Views: {view_count:,} - Likes: {like_count:,} - Comments: {comment_count:,} - Sh
 
 {voice_text}"""
 
-        items = [text]
+        items: list[Item | str] = [text]
         if video:
             items.append(video)
         elif thumbnail:

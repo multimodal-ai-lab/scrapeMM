@@ -6,11 +6,12 @@ from typing import Collection, Literal, Coroutine
 
 import aiohttp
 from ezmm import MultimodalSequence
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 
+from scrapemm import RateLimitError
 from scrapemm.common import ScrapingResponse
 from scrapemm.common.exceptions import RetrievalFailed, IPBannedError, UnsupportedDomainError, DiskFull, \
-    TargetUnavailableError
+    TargetUnavailableError, QuotaExceededError, ContentBlockedError
 from scrapemm.download import download_image, download_video
 from scrapemm.download.common import HEADERS
 from scrapemm.download.util import looks_like_image_file_url, looks_like_video_file_url, looks_like_hls_url
@@ -210,66 +211,98 @@ async def _retrieve_single(
         return ScrapingResponse(url=url, content=None, errors=dict(scrapemm=e), retrieval_time=time.time() - start_time)
 
     # Try each method in the specified order until one succeeds
-    result = None
     errors = {}
     logger.debug(f"Trying methods in order: {', '.join(methods)}")
     for method_name in methods:
         logger.debug(f"Now executing {method_name}...")
         routine = map_method_to_retrieval_routine(method_name)
 
-        try:
-            result = await routine
+        result = await _execute_routine(url, routine, method_name, session)
 
-        except NotImplementedError as e:
-            logger.info("Reached a method that is not implemented.", exc_info=True)
-            errors[method_name] = f"{type(e).__name__}: {e}"
-
-        except sqlite3.OperationalError as e:
-            if str(e) == "attempt to write a readonly database":
-                logger.error("ezMM database is read-only! Please check the database.")
-                raise
-            else:
-                logger.warning(f"DB error while retrieving with method '{method_name}'.", exc_info=True)
-                errors[method_name] = f"{type(e).__name__}: {e}"
-
-        except (TimeoutError, PlaywrightTimeoutError) as e:
-            logger.warning(f"Timeout while retrieving with method '{method_name}': {e}")
-            errors[method_name] = f"{type(e).__name__}: {e}"
-
-        except IPBannedError as e:
-            logger.info(e)
-            errors[method_name] = f"{type(e).__name__}: {e}"
-
-        except OSError as e:
-            if "Disk is full" in str(e):
-                logger.critical("❌ Disk is full! Please free up space and try again. Aborting.")
-                raise DiskFull()
-
-        except (RetrievalFailed, TargetUnavailableError) as e:
-            # No logging here, it's handled by the caller
-            errors[method_name] = f"{type(e).__name__}: {e}"
-
-        except Exception as e:
-            logger.warning(f"Error while retrieving with method '{method_name}'.", exc_info=True)
-            errors[method_name] = f"{type(e).__name__}: {e}"
-
-        if result is not None:
+        if isinstance(result, (MultimodalSequence, str)):
             logger.debug(f"🎉 Successfully retrieved with method: {method_name}")
             if isinstance(result, MultimodalSequence):
                 postprocess_media(result)
             return ScrapingResponse(url=url, content=result, method=method_name, errors=errors,
                                     retrieval_time=time.time() - start_time)
-
-        # Method returned None without raising — record an explicit error
-        if method_name not in errors:
-            logger.debug(f"Method '{method_name}' returned no content for url: {url}.")
+        elif result is None:
+            logger.info(f"Method {method_name} returned no content for url: {url}.")
             errors[method_name] = RetrievalFailed(
-                f"Method '{method_name}' returned no content."
+                f"Method {method_name} returned no content."
             )
+        else:
+            # We got an exception
+            errors[method_name] = result
 
     # All methods failed
     logger.warning(f"All retrieval methods failed for URL: {url}")
     return ScrapingResponse(url=url, content=None, errors=errors, retrieval_time=time.time() - start_time)
+
+
+async def _execute_routine(
+        url: str, routine: Coroutine, method_name: str,
+        session: aiohttp.ClientSession, attempts_remaining: int = 1,
+) -> MultimodalSequence | Exception:
+    """Executes a retrieval routine and handles exceptions. If an error occurred, returns
+    the exception object in place of the result."""
+    try:
+        return await routine
+
+    except NotImplementedError as e:
+        logger.info("Reached a method that is not implemented.", exc_info=True)
+        return e
+
+    except sqlite3.OperationalError as e:
+        if str(e) == "attempt to write a readonly database":
+            logger.error("ezMM database is read-only! Please check the database.")
+            raise
+        else:
+            logger.warning(f"DB error while retrieving with method {method_name}.", exc_info=True)
+            return e
+
+    except (TimeoutError, PlaywrightTimeoutError) as e:
+        logger.warning(f"Timeout while retrieving with method {method_name}: {e}")
+        return e
+
+    except IPBannedError as e:
+        logger.info(e)
+        return e
+
+    except OSError as e:
+        if "Disk is full" in str(e):
+            logger.critical("❌ Disk is full! Please free up space and try again. Aborting.")
+            raise DiskFull()
+        return e
+
+    except RetrievalFailed as e:
+        logger.debug(f"Retrieval of {url} with method {method_name} failed with {e}.")
+        return e
+
+    except ContentBlockedError as e:
+        logger.debug(f"{method_name} cannot access {url} because it is blocked: {e}")
+        return e
+
+    except TargetUnavailableError as e:
+        logger.debug(f"{method_name} cannot access {url} because it is unavailable: {e}")
+        return e
+
+    except RateLimitError as e:
+        logger.warning(f"⚠️ Rate limit reached for {method_name}: {e}")
+        return e
+
+    except QuotaExceededError as e:
+        logger.error(f"❌ Quota exceeded for {method_name}! {e}")
+        return e
+
+    except PlaywrightError as e:
+        if "ERR_NETWORK_CHANGED" in str(e) and attempts_remaining > 0:
+            return await _execute_routine(url, routine, method_name, session, attempts_remaining - 1)
+        else:
+            raise
+
+    except Exception as e:
+        logger.warning(f"Error while retrieving with method {method_name}.", exc_info=True)
+        return e
 
 
 def resolve_best_methods(url: str, allowed_methods: Literal["auto"] | list[str]) -> list[str]:

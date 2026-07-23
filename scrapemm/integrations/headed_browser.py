@@ -3,12 +3,13 @@ import sys
 from typing import Optional
 
 from ezmm import MultimodalSequence
-from playwright.async_api import async_playwright, Page, Frame, ElementHandle
+from playwright.async_api import async_playwright, Page, Frame, ElementHandle, Playwright, \
+    BrowserContext
 from seleniumbase import cdp_driver
 from seleniumbase.undetected.cdp_driver.browser import Browser
 
 from scrapemm import RetrievalFailed
-from scrapemm.integrations.base import RetrievalIntegration
+from scrapemm.common.retrieval_integration import RetrievalIntegration
 
 logger = logging.getLogger("scrapeMM")
 
@@ -60,13 +61,26 @@ class HeadedBrowser(RetrievalIntegration):
         # Default: no fixed sleep. Subclasses that need more should wait on concrete signals.
         return
 
-    async def _get(self, url: str, **kwargs) -> Optional[MultimodalSequence]:
+    async def _load_browser_context(self, p: Playwright) -> BrowserContext:
+        """Connect to the UC browser and return the context. Tries to reset
+        the browser if connection fails."""
+        endpoint_url = self._browser.get_endpoint_url()
+        try:
+            browser = await p.chromium.connect_over_cdp(endpoint_url, timeout=10_000)
+        except TimeoutError:
+            # Reset the browser and try again.
+            await self._connect()
+            browser = await p.chromium.connect_over_cdp(endpoint_url, timeout=10_000)
+        except Exception:
+            logger.error(f"Failed to connect to Headed Browser for integration: {self.name}", exc_info=True)
+            raise
+        return browser.contexts[0]
+
+    async def _get(self, url: str, **kwargs) -> MultimodalSequence:
         # Fresh Playwright/CDP session per request. Reusing one connection across requests
         # deadlocks on the second URL (CDP session wedges after the first page lifecycle).
         async with async_playwright() as p:
-            endpoint_url = self._browser.get_endpoint_url()
-            browser = await p.chromium.connect_over_cdp(endpoint_url, timeout=10_000)
-            context = browser.contexts[0]
+            context = await self._load_browser_context(p)
             page = await context.new_page()
 
             try:
