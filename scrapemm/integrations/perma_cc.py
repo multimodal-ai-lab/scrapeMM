@@ -16,7 +16,6 @@ MAX_VIDEO_BYTES = 250 * 1024 * 1024  # 250 MB
 INLINE_CONCURRENCY = 6
 # Large WARCs (e.g. 80MB+ Telegram videos) need a long wait for the innermost iframe.
 INNERMOST_FRAME_TIMEOUT_MS = 120_000
-INLINE_EVAL_TIMEOUT_MS = 180_000
 
 
 class PermaCC(HeadedBrowser):
@@ -308,13 +307,16 @@ async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, vide
               preferClearTelegramVideo();
 
               // Video sources: <video src> and <video><source src>
+              // Skip blob: URLs here — wombat's patched fetch cannot read them; handled below.
               document.querySelectorAll('video[src]').forEach((video) => {
                 const url = video.getAttribute('src');
+                if (url && url.startsWith('blob:')) return;
                 const full = abs(url);
                 if (full) { tasks.push({ el: video, attr: 'src', url: full, kind: 'video' }); videoTaskCount++; }
               });
               document.querySelectorAll('video source[src]').forEach((source) => {
                 const url = source.getAttribute('src');
+                if (url && url.startsWith('blob:')) return;
                 const full = abs(url);
                 if (full) { tasks.push({ el: source, attr: 'src', url: full, kind: 'video' }); videoTaskCount++; }
               });
@@ -471,6 +473,67 @@ async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, vide
 
               if (videoInlined === 0) {
                 try { await tryInlineTikTok(); } catch (_) { /* ignore */ }
+              }
+
+              // Facebook (and similar) players often expose only blob: src under ReplayWeb.
+              // Wombat's patched fetch cannot read blob: URLs, but the original MP4 is usually
+              // still present in the archived HTML and reachable via the replay id_/mp_/if_ proxy.
+              const tryInlineReplayMp4 = async () => {
+                const needs = [...document.querySelectorAll('video')].filter((v) => {
+                  const s = v.getAttribute('src') || '';
+                  return !s.startsWith('data:');
+                });
+                if (!needs.length) return false;
+
+                const loc = location.href || '';
+                const prefixMatch = loc.match(
+                  /^(https:\\/\\/rejouer\\.perma\\.cc\\/replay-web-page\\/w\\/id-[^/]+)\\//
+                );
+                if (!prefixMatch) return false;
+                const replayBase = prefixMatch[1];
+
+                let html = document.documentElement.outerHTML || '';
+                html = html
+                  .replace(/\\\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+                  .replace(/\\\\\\//g, '/');
+                const found = [...html.matchAll(/https:\\/\\/video[^\"'\\s<>]+\\.mp4[^\"'\\s<>]*/gi)]
+                  .map((m) => m[0].replace(/&amp;/g, '&').split('<')[0]);
+                const uniq = [...new Set(found)];
+                if (!uniq.length) return false;
+
+                uniq.sort((a, b) => {
+                  const score = (u) =>
+                    (u.includes('t42.') ? -10 : 0)
+                    + (u.includes('audio') ? 20 : 0)
+                    + (u.includes('vabr=') ? 5 : 0);
+                  return score(a) - score(b);
+                });
+
+                for (const video of needs) {
+                  for (const mp4 of uniq) {
+                    for (const kind of ['id_', 'mp_', 'if_']) {
+                      try {
+                        const res = await fetchToDataURL(`${replayBase}/${kind}/${mp4}`, 'video');
+                        if (res && res.dataURL) {
+                          video.querySelectorAll('source').forEach((s) => s.remove());
+                          video.setAttribute('src', res.dataURL);
+                          videoInlined++;
+                          inlined++;
+                          return true;
+                        }
+                      } catch (_) { /* try next */ }
+                    }
+                  }
+                }
+                return false;
+              };
+
+              const stillNeedsVideo = [...document.querySelectorAll('video')].some((v) => {
+                const s = v.getAttribute('src') || '';
+                return s.startsWith('blob:') || (!s.startsWith('data:') && videoInlined === 0);
+              });
+              if (stillNeedsVideo) {
+                try { await tryInlineReplayMp4(); } catch (_) { /* ignore */ }
               }
 
               return { total: tasks.length, inlined, skipped, videoInlined };

@@ -4,7 +4,7 @@ from typing import Optional
 
 from ezmm import MultimodalSequence
 from playwright.async_api import async_playwright, Page, Frame, ElementHandle, Playwright, \
-    BrowserContext
+    BrowserContext, TimeoutError as PlaywrightTimeoutError
 from seleniumbase import cdp_driver
 from seleniumbase.undetected.cdp_driver.browser import Browser
 
@@ -67,7 +67,7 @@ class HeadedBrowser(RetrievalIntegration):
         endpoint_url = self._browser.get_endpoint_url()
         try:
             browser = await p.chromium.connect_over_cdp(endpoint_url, timeout=10_000)
-        except TimeoutError:
+        except PlaywrightTimeoutError:
             # Reset the browser and try again.
             await self._connect()
             browser = await p.chromium.connect_over_cdp(endpoint_url, timeout=10_000)
