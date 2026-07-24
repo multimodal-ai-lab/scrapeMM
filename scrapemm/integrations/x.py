@@ -10,6 +10,7 @@ from tweepy import Tweet, User, TooManyRequests, HTTPException
 from tweepy.asynchronous import AsyncClient
 
 import scrapemm.common
+from scrapemm import RetrievalFailed
 from scrapemm.common.exceptions import RateLimitError, TargetUnavailableError, QuotaExceededError
 from scrapemm.download import download_image, download_video
 from scrapemm.common.retrieval_integration import RetrievalIntegration
@@ -86,7 +87,7 @@ class X(RetrievalIntegration):
             logger.debug(f"Error retrieving X content from {url}: {e}", exc_info=True)
             raise RuntimeError(f"Error retrieving X content: {e}")
 
-        raise TargetUnavailableError(f"Could not retrieve X content from {url}.")
+        raise RetrievalFailed(f"Could not retrieve content from X.")
 
     async def _normalize(self, url: str, session: aiohttp.ClientSession) -> str:
         """Turns URLs of the form https://publish.twitter.com/?query=...

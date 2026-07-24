@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from typing import Optional
 
 import aiohttp
 from aiohttp import ClientConnectorError
@@ -9,7 +8,6 @@ from ezmm import MultimodalSequence
 from scrapemm import RateLimitError, RetrievalFailed
 from scrapemm.secrets import get_secret
 from scrapemm.util import get_domain, to_multimodal_sequence, html2md
-from scrapemm.integrations.decodo.html_postprocessor import domain_to_postprocessor
 
 logger = logging.getLogger("scrapeMM")
 
@@ -50,7 +48,7 @@ class Decodo:
             timeout: int = 30,
             max_retries: int = 5,
             include_media: bool = True,
-    ) -> Optional[MultimodalSequence | str]:
+    ) -> MultimodalSequence | str:
         """Downloads the contents of the specified webpage using Decodo's API.
 
         Args:
@@ -69,7 +67,7 @@ class Decodo:
 
         if not self._has_token():
             logger.warning("⚠️ Cannot scrape with Decodo: credentials not configured.")
-            return None
+            raise RuntimeError("Decodo credentials not configured.")
 
         domain = get_domain(url)
         use_premium_proxy = domain in PREMIUM_PROXY_DOMAINS
@@ -78,14 +76,12 @@ class Decodo:
         html = await self._call_decodo(url, session, enable_js, timeout=timeout, max_retries=max_retries,
                                        use_premium_proxy=use_premium_proxy)
 
-        if html:
-            if format == "html":
-                return html
-            elif not include_media:
-                return html2md(html)
-            else:
-                return await to_multimodal_sequence(html, session=session, url=url)
-        return None
+        if format == "html":
+            return html
+        elif not include_media:
+            return html2md(html)
+        else:
+            return await to_multimodal_sequence(html, session=session, url=url)
 
     async def _call_decodo(
             self, url: str,
@@ -94,7 +90,7 @@ class Decodo:
             timeout: int = 10,
             max_retries: int = 5,
             use_premium_proxy: bool = False
-    ) -> Optional[str]:
+    ) -> str:
         """Calls the Decodo API to scrape the given URL with exponential backoff retry logic.
 
         Args:
@@ -228,8 +224,8 @@ class Decodo:
 
             await backoff(attempt)  # Wait before retrying
 
-        # Should not reach here, but return None as fallback
-        return None
+        # Should not reach here
+        raise RetrievalFailed("Failed to scrape with Decodo after multiple attempts.")
 
 
 async def backoff(n_past_attempts: int):

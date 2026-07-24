@@ -1,7 +1,6 @@
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional
 
 import aiohttp
 from aiohttp import ClientResponseError, ClientConnectorError
@@ -10,7 +9,7 @@ from requests import ConnectionError, ReadTimeout
 from requests.exceptions import RetryError
 
 from scrapemm.common import get_config_var, update_config
-from scrapemm.common.exceptions import UnsupportedDomainError, TargetUnavailableError
+from scrapemm.common.exceptions import UnsupportedDomainError, TargetUnavailableError, AccessBlockedError
 from scrapemm.download.common import HEADERS
 from scrapemm.util import read_urls_from_file, get_domain, to_multimodal_sequence, html2md
 
@@ -77,7 +76,7 @@ class Firecrawl:
                      format: str,
                      max_attempts: int = 3,
                      include_media: bool = True,
-                     **kwargs) -> Optional[MultimodalSequence | str]:
+                     **kwargs) -> MultimodalSequence | str:
 
         domain = get_domain(url)
         if domain in NO_BOT_DOMAINS:
@@ -144,10 +143,10 @@ class Firecrawl:
             return  # We don't know yet
         except ClientResponseError as e:
             logger.debug(f"Firecrawl skipping URL {url} due to unavailability: {e}")
-            raise TargetUnavailableError(f"Target is not scrapable: Code {e.status} ({e.message})")
+            raise AccessBlockedError(f"Firecrawl could not access the content: Code {e.status} ({e.message})")
         except ClientConnectorError as e:
             logger.debug(f"Firecrawl skipping URL {url} due to unavailability: {e}")
-            raise TargetUnavailableError(f"Target is not scrapable: {e}")
+            raise TargetUnavailableError(f"Firecrawl could not connect to the target: {e}")
 
 
 fire = Firecrawl()

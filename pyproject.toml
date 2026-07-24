@@ -1,6 +1,6 @@
 [project]
 name = "scrapeMM"
-version = "0.7.8"
+version = "0.7.9"
 description = "Multimodal scraper for social media, internet archives, and the open web."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,7 +15,7 @@ dependencies = [
     "brotli",  # Required to read brotli-encoded media
     "cryptography",
     "curl_cffi~=0.15.0",  # Provides browser binaries for impersonation
-    "ezmm~=0.5.1",
+    "ezmm~=0.5.2",
     "firecrawl-py~=4.32.0",
     "markdownify~=1.2.3",
     "pip-system-certs",  # For better SSL certificate handling

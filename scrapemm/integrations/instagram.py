@@ -2,9 +2,9 @@ import logging
 from urllib.parse import urlparse
 
 from ezmm import MultimodalSequence
-from yt_dlp import DownloadError
 
-from scrapemm.common.exceptions import RateLimitError
+from scrapemm import RetrievalFailed
+from scrapemm.common.exceptions import RateLimitError, TargetUnavailableError, AccessBlockedError
 from scrapemm.common.retrieval_integration import RetrievalIntegration
 from scrapemm.integrations.ytdlp import get_content_with_ytdlp
 
@@ -27,11 +27,17 @@ class Instagram(RetrievalIntegration):
             return await self._get_video(url, **kwargs)
         elif self._is_photo_url(url):
             # /p/ URLs can also be reels, so try both
+            content = None
             try:
                 content = await self._get_video(url, **kwargs)
+            except (TargetUnavailableError, RetrievalFailed, AccessBlockedError):
+                pass  # Uncritical errors that can be ignored
+            except RateLimitError:
+                raise
             except Exception:
-                logger.debug(f"Instagram video retrieval failed for {url}, trying photo", exc_info=True)
-                content = None
+                # Needs closer investigation
+                logger.debug(f"Instagram video retrieval failed for {url}", exc_info=True)
+
             if content and content.has_videos():
                 return content
             else:
@@ -44,17 +50,13 @@ class Instagram(RetrievalIntegration):
         if self.api_available:
             raise NotImplementedError
         else:
-            try:
-                return await get_content_with_ytdlp(url, platform="Instagram", **kwargs)
-            except DownloadError as e:
-                if "rate-limit reached" in str(e):
-                    raise RateLimitError(f"Instagram rate limit likely reached: {e}")
-                else:
-                    raise e
+            return await get_content_with_ytdlp(url, platform="Instagram", **kwargs)
 
     async def _get_photo(self, url: str, **kwargs) -> MultimodalSequence:
         """Retrieves content from an Instagram photo URL (can also be a reel)."""
-        raise NotImplementedError("Native Instagram photo download not yet supported. Use Decodo for that.")
+        from scrapemm.integrations.decodo import decodo
+        return await decodo.scrape(url, format="multimodal_sequence",
+                                   session=kwargs["session"], timeout=60)
 
     async def _get_user_profile(self, url: str, **kwargs) -> MultimodalSequence:
         """Retrieves content from an Instagram user profile URL."""

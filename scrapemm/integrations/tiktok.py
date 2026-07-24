@@ -9,7 +9,7 @@ from ezmm import MultimodalSequence, Item
 from ezmm.common.items import Video, Image
 from tiktok_research_api import TikTokResearchAPI, QueryVideoRequest, QueryUserInfoRequest, Criteria, Query
 
-from scrapemm.common.exceptions import ContentBlockedError, IPBannedError, TargetUnavailableError
+from scrapemm.common.exceptions import AccessBlockedError, TargetUnavailableError
 from scrapemm.download import download_image
 from scrapemm.common.retrieval_integration import RetrievalIntegration
 from scrapemm.integrations.ytdlp import download_video_with_ytdlp
@@ -70,9 +70,9 @@ class TikTok(RetrievalIntegration):
                 return await self._get_user_profile(url, session)
         except Exception as e:
             if "Your IP address is blocked from accessing this post" in str(e):
-                raise IPBannedError(f"TikTok prevents your IP address from accessing the post {url}")
+                raise AccessBlockedError(f"TikTok prevents your IP address from accessing the post {url}")
             elif "This post may not be comfortable for some audiences" in str(e):
-                raise ContentBlockedError("Video is blocked by TikTok for being 'uncomfortable for some audiences'.")
+                raise AccessBlockedError("Video is blocked by TikTok for being 'uncomfortable for some audiences'.")
             else:
                 raise e
 

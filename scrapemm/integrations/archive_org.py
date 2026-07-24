@@ -5,6 +5,7 @@ from typing import Optional
 
 from playwright.async_api import TimeoutError, Page, Frame, Error as PlaywrightError
 
+from scrapemm import RetrievalFailed
 from scrapemm.common.exceptions import TargetUnavailableError
 from scrapemm.integrations.headed_browser import HeadedBrowser, ContentTarget
 from scrapemm.integrations.perma_cc import _inline_media_in_frame
@@ -82,18 +83,90 @@ class ArchiveOrg(HeadedBrowser):
 
         logger.debug("Archive.org playback frame did not report ready before timeout; continuing.")
 
+    @staticmethod
+    def _url_suggests_primary_video(url: str) -> bool:
+        u = (url or "").lower()
+        return "/video/" in u or "tiktok.com" in u or "kwai.com" in u
+
+    @staticmethod
+    async def _frame_has_primary_video(frame: Frame) -> bool:
+        try:
+            return bool(
+                await frame.evaluate(
+                    """() => {
+                        const decoy = (s) => {
+                            const u = (s || '').toLowerCase();
+                            return u.includes('playback1.mp4')
+                                || u.includes('ttwstatic.com')
+                                || u.includes('webapp-desktop/playback');
+                        };
+                        for (const v of document.querySelectorAll('video')) {
+                            const src = v.getAttribute('src') || '';
+                            const cur = v.currentSrc || '';
+                            if ((src || cur) && !decoy(src) && !decoy(cur)) return true;
+                            for (const s of v.querySelectorAll('source[src]')) {
+                                const u = s.getAttribute('src') || '';
+                                if (u && !decoy(u)) return true;
+                            }
+                        }
+                        return false;
+                    }"""
+                )
+            )
+        except Exception:
+            return False
+
+    async def _wait_for_primary_video(self, page: Page, preferred: Frame | None = None,
+                                      timeout_ms: int = 30000) -> Frame:
+        """Wait for a late-mounted content <video> across frames (TikTok SPA).
+
+        TikTok's archived shell already has enough text/images for `_wait_playback_frame_ready`
+        to return, while the real player only mounts ~10–15s later. A login-page decoy
+        (`playback1.mp4` on ttwstatic) must not count as success.
+
+        Returns the frame that contains the video (or `preferred` / main on timeout).
+        """
+        deadline = time.monotonic() + timeout_ms / 1000
+        fallback = preferred or page.main_frame
+        while time.monotonic() < deadline:
+            frames = []
+            if preferred is not None:
+                frames.append(preferred)
+            for f in page.frames:
+                if f not in frames:
+                    frames.append(f)
+            for frame in frames:
+                if await self._frame_has_primary_video(frame):
+                    return frame
+            await asyncio.sleep(0.25)
+        logger.debug("Archive.org primary video did not appear before timeout; continuing.")
+        return fallback
+
     async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
         if "503 Service Unavailable".lower() in (await page.content()).lower():
             raise TargetUnavailableError("Archive.org is currently unavailable (Error 503).")
 
-        # Selector was already awaited in _settle_after_goto — no second long wait.
-        playback_iframe = await page.query_selector(_PLAYBACK_IFRAME)
-        if playback_iframe:
-            frame = await playback_iframe.content_frame()
-            if frame:
-                await self._wait_playback_frame_ready(frame)
-                await _inline_media_in_frame(frame)
-                return frame
+        wants_video = self._url_suggests_primary_video(page.url or "")
 
-        # Rewritten snapshot without playback iframe
+        # Selector was already awaited in _settle_after_goto — no second long wait.
+        try:
+            playback_iframe = await page.query_selector(_PLAYBACK_IFRAME)
+            if playback_iframe:
+                frame = await playback_iframe.content_frame()
+                if frame:
+                    await self._wait_playback_frame_ready(frame)
+                    if wants_video:
+                        frame = await self._wait_for_primary_video(page, preferred=frame)
+                    await _inline_media_in_frame(frame)
+                    return frame
+        except PlaywrightError:
+            raise RetrievalFailed("Archive.org playback iframe not loaded successfully.")
+
+        # Rewritten snapshot without playback iframe (content already on the top frame).
+        target: Frame = page.main_frame
+        if wants_video:
+            await self._wait_playback_frame_ready(target)
+            target = await self._wait_for_primary_video(page, preferred=target)
+            await _inline_media_in_frame(target)
+            return target
         return page

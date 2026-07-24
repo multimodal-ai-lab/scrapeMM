@@ -306,11 +306,29 @@ async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, vide
               };
               preferClearTelegramVideo();
 
+              // Drop TikTok login-shell decoy clips so they are not preferred over the real player.
+              document.querySelectorAll('video').forEach((video) => {
+                const s = ((video.getAttribute('src') || '') + ' ' + (video.currentSrc || '')).toLowerCase();
+                if (s.includes('playback1.mp4') || s.includes('ttwstatic.com')
+                    || s.includes('webapp-desktop/playback')) {
+                  video.remove();
+                }
+              });
+
               // Video sources: <video src> and <video><source src>
               // Skip blob: URLs here — wombat's patched fetch cannot read them; handled below.
+              // Prefer currentSrc when the attribute still points at a live CDN URL while the
+              // archive rewriter has already bound a replayable URL on currentSrc (Wayback).
               document.querySelectorAll('video[src]').forEach((video) => {
-                const url = video.getAttribute('src');
-                if (url && url.startsWith('blob:')) return;
+                const attr = video.getAttribute('src') || '';
+                if (attr.startsWith('blob:')) return;
+                const cur = video.currentSrc || '';
+                let url = attr;
+                if (cur && !cur.startsWith('blob:') && cur.includes('web.archive.org')
+                    && attr && !attr.includes('web.archive.org')) {
+                  url = cur;
+                  video.setAttribute('src', cur);
+                }
                 const full = abs(url);
                 if (full) { tasks.push({ el: video, attr: 'src', url: full, kind: 'video' }); videoTaskCount++; }
               });
@@ -395,55 +413,104 @@ async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, vide
               await Promise.all(workers);
 
               // If no video was inlined via direct <video/src> or <source>,
-              // attempt a TikTok-specific fallback by parsing the hydration JSON
-              // and fetching an MP4 using the same session (Perma SW rewrites requests).
+              // attempt a TikTok-specific fallback: hydration JSON and/or playAddr
+              // strings embedded in the archived HTML (Wayback often rewrites those
+              // even when webapp.video-detail is missing from __UNIVERSAL_DATA__).
               const tryInlineTikTok = async () => {
                 try {
-                  const sc = document.querySelector('#__UNIVERSAL_DATA_FOR_REHYDRATION__');
-                  if (!sc || !sc.textContent) return false;
-                  let j;
-                  try { j = JSON.parse(sc.textContent); } catch (_) { return false; }
-                  const v = j?.__DEFAULT_SCOPE__?.["webapp.video-detail"]?.itemInfo?.itemStruct?.video;
-                  if (!v) return false;
                   const cand = [];
+                  const decodeArchived = (u) => {
+                    let s = String(u);
+                    // Decode JSON-style \\uXXXX escapes left in Wayback HTML (\\u002F, \\u0026, …).
+                    s = s.replace(new RegExp('\\\\u([0-9a-fA-F]{4})', 'g'), (_, h) =>
+                      String.fromCharCode(parseInt(h, 16)));
+                    s = s.split('\\\\/').join('/');
+                    s = s.split('&amp;').join('&');
+                    return s;
+                  };
                   const pushUrl = (u) => {
                     if (!u) return;
                     try {
-                      const href = abs(u);
+                      const href = abs(decodeArchived(u));
                       if (!href) return;
-                      if (isStreaming(href)) return; // skip HLS
+                      const low = href.toLowerCase();
+                      if (isStreaming(href)) return;
+                      if (low.includes('playback1.mp4') || low.includes('ttwstatic.com')) return;
                       cand.push(href);
                     } catch (_) { /* noop */ }
                   };
-                  pushUrl(v.playAddr);
-                  pushUrl(v.downloadAddr);
-                  if (Array.isArray(v.bitrateInfo)) {
-                    for (const bi of v.bitrateInfo) {
-                      const list = bi?.PlayAddr?.UrlList;
-                      if (Array.isArray(list)) {
-                        for (const u of list) pushUrl(u);
+
+                  const sc = document.querySelector('#__UNIVERSAL_DATA_FOR_REHYDRATION__');
+                  if (sc && sc.textContent) {
+                    try {
+                      const j = JSON.parse(sc.textContent);
+                      const v = j?.__DEFAULT_SCOPE__?.["webapp.video-detail"]?.itemInfo?.itemStruct?.video;
+                      if (v) {
+                        pushUrl(v.playAddr);
+                        pushUrl(v.downloadAddr);
+                        if (Array.isArray(v.bitrateInfo)) {
+                          for (const bi of v.bitrateInfo) {
+                            const list = bi?.PlayAddr?.UrlList;
+                            if (Array.isArray(list)) {
+                              for (const u of list) pushUrl(u);
+                            }
+                          }
+                        }
                       }
-                    }
+                    } catch (_) { /* ignore */ }
                   }
-                  // de-dup
+
+                  // Wayback TikTok captures often keep playAddr only as a rewritten
+                  // string in page HTML, not under webapp.video-detail. Prefer longer
+                  // signed CDN URLs when present (truncated playAddr alone often 404s).
+                  let html = document.documentElement?.outerHTML || '';
+                  html = decodeArchived(html);
+                  let m;
+                  const playRe = /"playAddr"\\s*:\\s*"([^"]+)"/g;
+                  while ((m = playRe.exec(html)) !== null) {
+                    pushUrl(m[1]);
+                  }
+                  const signedRe = /https:\\/\\/web\\.archive\\.org\\/web\\/\\d+(?:id_|mp_|if_)?\\/https:\\/\\/v16[^\\s\"'<>]*signature=[^\\s\"'<>]+/gi;
+                  while ((m = signedRe.exec(html)) !== null) {
+                    pushUrl(m[0]);
+                  }
+                  const v16Re = /https:\\/\\/(?:web\\.archive\\.org\\/web\\/\\d+(?:id_|mp_|if_)?\\/)?https:\\/\\/v16[^\\s\"'<>]+/gi;
+                  while ((m = v16Re.exec(html)) !== null) {
+                    pushUrl(m[0]);
+                  }
+
                   const seen = new Set();
-                  const urls = cand.filter(u => (seen.has(u) ? false : (seen.add(u), true)));
+                  let urls = cand.filter(u => (seen.has(u) ? false : (seen.add(u), true)));
+                  // Also try Wayback id_ raw-media form of each archived URL.
+                  const expanded = [];
+                  for (const u of urls) {
+                    expanded.push(u);
+                    const idForm = u.replace(/(\\/web\\/\\d+)(\\/https?:)/i, '$1id_$2');
+                    if (idForm !== u) expanded.push(idForm);
+                  }
+                  urls = expanded;
+                  urls.sort((a, b) => {
+                    const score = (u) => (u.includes('signature=') ? 1000 : 0)
+                      + (u.includes('id_/') ? 100 : 0)
+                      + Math.min(u.length, 500);
+                    return score(b) - score(a);
+                  });
                   for (const u of urls) {
                     try {
                       const res = await fetch(u, { credentials: 'include' });
                       if (!res.ok) continue;
                       const ct = (res.headers.get('content-type') || '').toLowerCase();
-                      if (!ct.includes('video')) {
-                        // still allow if URL looks like mp4
-                        if (!u.toLowerCase().includes('.mp4')) continue;
-                      }
+                      const looksVideo = ct.includes('video')
+                        || u.toLowerCase().includes('.mp4')
+                        || u.toLowerCase().includes('mime_type=video');
+                      if (!looksVideo) continue;
                       const lenH = res.headers.get('content-length');
                       if (lenH) {
                         const len = parseInt(lenH);
                         if (!Number.isNaN(len) && len > maxVideoBytes) continue;
                       }
                       const blob = await res.blob();
-                      if (blob.size > maxVideoBytes) continue;
+                      if (blob.size < 1000 || blob.size > maxVideoBytes) continue;
                       const buf = await blob.arrayBuffer();
                       const b64 = ab2b64(buf);
                       const mime = blob.type || ct || 'video/mp4';
@@ -453,17 +520,16 @@ async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, vide
                         vEl = document.createElement('video');
                         vEl.setAttribute('controls', '');
                         vEl.setAttribute('preload', 'metadata');
-                        // Try to place near app root if present
                         const host = document.querySelector('#app') || document.body;
                         if (host.firstChild) host.insertBefore(vEl, host.firstChild); else host.appendChild(vEl);
                       } else {
-                        // Remove <source> children to avoid conflicts
                         vEl.querySelectorAll('source').forEach(s => s.remove());
                       }
                       vEl.setAttribute('src', dataURL);
+                      videoInlined++;
+                      inlined++;
                       return true;
                     } catch (_) {
-                      // try next candidate
                       continue;
                     }
                   }

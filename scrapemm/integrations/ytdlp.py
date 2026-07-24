@@ -8,16 +8,15 @@ from typing import Any, Optional
 import aiohttp
 from ezmm import MultimodalSequence, Video, Image
 from yt_dlp import YoutubeDL
-from yt_dlp.utils import DownloadError
 
-from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError, ContentBlockedError
+from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError, AccessBlockedError, RateLimitError
 from scrapemm.download import download_image
 
 logger = logging.getLogger("scrapeMM")
 
 # Add yt-dlp-specific logger to print warnings to console
 logger_yt_dlp = logging.getLogger("yt_dlp")
-logger_yt_dlp.setLevel(logging.WARNING)
+logger_yt_dlp.setLevel(logging.CRITICAL)
 logger_yt_dlp.addHandler(logging.StreamHandler(sys.stdout))
 
 
@@ -90,12 +89,6 @@ async def download_video_with_ytdlp(
 
         return video, thumbnail, metadata
 
-    except DownloadError as e:
-        if "This content isn't available to everyone" in str(e):
-            raise ContentBlockedError(f"Target content not available to everyone.")
-        else:
-            raise
-
     except Exception as e:
         if "The following content is not available on this app" in str(e):
             logger.warning(f"You should update yt-dlp to re-enable YouTube downloads.")
@@ -105,6 +98,16 @@ async def download_video_with_ytdlp(
             raise TargetUnavailableError(f"Target content not found (Error 404).")
         elif "Cannot parse data; please report this issue" in str(e):
             raise RetrievalFailed(f"yt-dlp is unable to parse the target content.")
+        elif "There is no video in this post" in str(e) or "No video formats found" in str(e):
+            raise RetrievalFailed(f"Target content has no video.")
+        elif "Sign in to confirm you’re not a bot" in str(e):
+            raise AccessBlockedError(f"Login required to access target content.")
+        elif "This video has been removed" in str(e):
+            raise AccessBlockedError(f"Target content has been removed.")
+        elif "This content isn't available to everyone" in str(e):
+            raise AccessBlockedError(f"Target content not available to everyone.")
+        elif "rate-limit reached" in str(e):
+            raise RateLimitError(f"Rate limit reached: {e}")
         else:
             raise RuntimeError(f"Could not download video with yt-dlp: {e}")
 

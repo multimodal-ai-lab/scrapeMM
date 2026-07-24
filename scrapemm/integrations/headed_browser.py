@@ -4,7 +4,7 @@ from typing import Optional
 
 from ezmm import MultimodalSequence
 from playwright.async_api import async_playwright, Page, Frame, ElementHandle, Playwright, \
-    BrowserContext, TimeoutError as PlaywrightTimeoutError
+    BrowserContext, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 from seleniumbase import cdp_driver
 from seleniumbase.undetected.cdp_driver.browser import Browser
 
@@ -61,20 +61,21 @@ class HeadedBrowser(RetrievalIntegration):
         # Default: no fixed sleep. Subclasses that need more should wait on concrete signals.
         return
 
-    async def _load_browser_context(self, p: Playwright) -> BrowserContext:
+    async def _load_browser_context(self, p: Playwright, attempts: int = 2) -> BrowserContext:
         """Connect to the UC browser and return the context. Tries to reset
         the browser if connection fails."""
         endpoint_url = self._browser.get_endpoint_url()
         try:
             browser = await p.chromium.connect_over_cdp(endpoint_url, timeout=10_000)
-        except PlaywrightTimeoutError:
-            # Reset the browser and try again.
-            await self._connect()
-            browser = await p.chromium.connect_over_cdp(endpoint_url, timeout=10_000)
+            return browser.contexts[0]
+        except PlaywrightError:
+            if attempts > 1:
+                # Reset the browser and try again.
+                await self._connect()
+                return await self._load_browser_context(p, attempts - 1)
         except Exception:
             logger.error(f"Failed to connect to Headed Browser for integration: {self.name}", exc_info=True)
             raise
-        return browser.contexts[0]
 
     async def _get(self, url: str, **kwargs) -> MultimodalSequence:
         # Fresh Playwright/CDP session per request. Reusing one connection across requests

@@ -283,14 +283,10 @@ async def resolve_media(
         url: str | None = None,
         source_element: Union[Frame, Page, None] = None,
         **kwargs
-) -> Optional[MultimodalSequence]:
+) -> MultimodalSequence:
     """Downloads all media that are contained in the provided HTML.
     Removes images that are smaller than 256 x 256. Replaces the
     respective HTML elements with their proper item reference."""
-
-    if html is None:
-        return None
-
     soup = BeautifulSoup(html, "html.parser")
     domain_root = get_domain_root(url) if url else None
 
@@ -510,23 +506,18 @@ def decompose_data_uri(href: str) -> Optional[tuple[str, str]]:
 
 
 async def to_multimodal_sequence(
-        html: str | None,
+        html: str,
         session: Union[aiohttp.ClientSession, "APIRequestContext"],
         **kwargs
-) -> Optional[MultimodalSequence]:
+) -> MultimodalSequence:
     """Turns scraped HTML content into the corresponding MultimodalSequences
     by resolving media hyperlinks and Base64 encodings and converting to Markdown."""
-    if html is None:
-        return None
-
     # 0. Preprocess HTML
     html = preprocess_html(html)
     assert html is not None
 
     # 1. Resolve media in HTML
     mms = await resolve_media(html, session=session, **kwargs)
-    if not mms:
-        return None
 
     # 2. Convert resulting (partially replaced) HTML to Markdown
     text = html2md(mms)

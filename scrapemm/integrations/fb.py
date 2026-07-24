@@ -10,9 +10,9 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 from yt_dlp.networking.impersonate import ImpersonateTarget
 
-from scrapemm import RateLimitError
+from scrapemm import RateLimitError, RetrievalFailed
 from scrapemm.common import CONFIG_DIR
-from scrapemm.common.exceptions import ContentBlockedError, TargetUnavailableError, IPBannedError
+from scrapemm.common.exceptions import AccessBlockedError, TargetUnavailableError
 from scrapemm.download import download_image
 from scrapemm.download.common import HEADERS
 from scrapemm.common.retrieval_integration import RetrievalIntegration
@@ -98,11 +98,11 @@ class Facebook(RetrievalIntegration):
         if self._is_video_url(url):
             try:
                 return await self._get_video(url, **kwargs)
-            except (ContentBlockedError, TargetUnavailableError):
+            except (AccessBlockedError, TargetUnavailableError):
                 raise
             except Exception as e:
                 if "No video formats found" in str(e):
-                    raise ContentBlockedError("Video is blocked by Facebook.")
+                    raise AccessBlockedError("Video is blocked by Facebook.")
                 elif "This video is only available for registered users" in str(e):
                     raise RateLimitError(
                         "Facebook is rate-limiting your IP address. Set a 'facebook_cookie' in ScrapeMM."
@@ -120,25 +120,20 @@ class Facebook(RetrievalIntegration):
         content = []
         try:
             video = await self._get_video(url, **kwargs)
-            if video:
-                content.append(video)
-        except (TargetUnavailableError, ContentBlockedError, IPBannedError):
-            raise
+            content.append(video)
         except Exception:
             pass
 
         try:
             image = await self._get_photo(url, **kwargs)
-            if image:
-                content.append(image)
+            content.append(image)
         except Exception:
             pass
 
         try:
             from scrapemm.integrations.decodo import decodo
             text = await decodo.scrape(url, session=kwargs.get("session"), format="markdown", include_media=False)
-            if text:
-                content.append(text)
+            content.append(text)
         except Exception:
             pass
 
@@ -150,7 +145,7 @@ class Facebook(RetrievalIntegration):
         except Exception:
             pass
 
-        raise TargetUnavailableError("Unable to retrieve content from Facebook URL.")
+        raise RetrievalFailed("Unable to retrieve content from Facebook URL.")
 
     async def _get_video(self, url: str, **kwargs) -> MultimodalSequence:
         """Retrieves content from a Facebook video URL."""
@@ -213,13 +208,13 @@ class Facebook(RetrievalIntegration):
                 await browser.close()
 
         if not image_url:
-            raise TargetUnavailableError("Could not locate image on Facebook photo page.")
+            raise RetrievalFailed("Could not locate image on Facebook photo page.")
 
         async with aiohttp.ClientSession(headers=HEADERS) as session:
             image = await download_image(image_url, session)
 
         if not image:
-            raise TargetUnavailableError("Could not download image from Facebook photo.")
+            raise RetrievalFailed("Could not download image from Facebook photo.")
 
         # Retrieve text only
         text = md(html, heading_style="ATX")

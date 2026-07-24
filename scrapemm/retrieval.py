@@ -2,16 +2,17 @@ import logging
 import sqlite3
 import time
 from traceback import format_exc
-from typing import Collection, Literal, Coroutine
+from typing import Collection, Literal, Coroutine, Callable, Tuple
 
 import aiohttp
 from ezmm import MultimodalSequence
+from playwright._impl._errors import TargetClosedError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 
 from scrapemm import RateLimitError
 from scrapemm.common import ScrapingResponse
-from scrapemm.common.exceptions import RetrievalFailed, IPBannedError, UnsupportedDomainError, DiskFull, \
-    TargetUnavailableError, QuotaExceededError, ContentBlockedError
+from scrapemm.common.exceptions import RetrievalFailed, UnsupportedDomainError, DiskFull, \
+    TargetUnavailableError, QuotaExceededError, AccessBlockedError
 from scrapemm.download import download_image, download_video
 from scrapemm.download.common import HEADERS
 from scrapemm.download.util import looks_like_image_file_url, looks_like_video_file_url, looks_like_hls_url
@@ -26,7 +27,7 @@ UNSUPPORTED_DOMAINS = []
 
 BEST_METHODS = {
     # Social media platforms:
-    "instagram.com": ["integrations", "decodo"],
+    "instagram.com": ["integrations"],
     "facebook.com": ["integrations"],
     "fb.watch": ["integrations"],
     "x.com": ["integrations"],
@@ -167,7 +168,10 @@ async def _retrieve_single(
     methods: list[str] = resolve_best_methods(url, methods)
 
     if len(methods) == 0:
-        raise AssertionError("No retrieval methods were resolved for the given URL.")
+        e = UnsupportedDomainError("scrapeMM does not support that URL at this time.")
+        return ScrapingResponse(url=url, content=None,
+                                errors=dict(scrapeMM=e),
+                                retrieval_time=time.time() - start_time)
 
     try:
         # Validate methods
@@ -215,12 +219,11 @@ async def _retrieve_single(
     logger.debug(f"Trying methods in order: {', '.join(methods)}")
     for method_name in methods:
         logger.debug(f"Now executing {method_name}...")
-        routine = map_method_to_retrieval_routine(method_name)
 
-        result = await _execute_routine(url, routine, method_name, session)
+        result = await _execute(url, map_method_to_retrieval_routine, method_name, session)
 
         if isinstance(result, (MultimodalSequence, str)):
-            logger.debug(f"🎉 Successfully retrieved with method: {method_name}")
+            logger.info(f"🎉 Successfully retrieved with method: {method_name}")
             if isinstance(result, MultimodalSequence):
                 postprocess_media(result)
             return ScrapingResponse(url=url, content=result, method=method_name, errors=errors,
@@ -233,19 +236,22 @@ async def _retrieve_single(
         else:
             # We got an exception
             errors[method_name] = result
+            if isinstance(result, TargetUnavailableError):
+                break  # Not worth trying other methods
 
     # All methods failed
     logger.warning(f"All retrieval methods failed for URL: {url}")
     return ScrapingResponse(url=url, content=None, errors=errors, retrieval_time=time.time() - start_time)
 
 
-async def _execute_routine(
-        url: str, routine: Coroutine, method_name: str,
+async def _execute(
+        url: str, method_to_routine: Callable[[str], Coroutine], method_name: str,
         session: aiohttp.ClientSession, attempts_remaining: int = 1,
 ) -> MultimodalSequence | Exception:
     """Executes a retrieval routine and handles exceptions. If an error occurred, returns
     the exception object in place of the result."""
     try:
+        routine = method_to_routine(method_name)  # Apply factory to get the actual routine
         return await routine
 
     except NotImplementedError as e:
@@ -264,10 +270,6 @@ async def _execute_routine(
         logger.warning(f"Timeout while retrieving with method {method_name}: {e}")
         return e
 
-    except IPBannedError as e:
-        logger.info(e)
-        return e
-
     except OSError as e:
         if "Disk is full" in str(e):
             logger.critical("❌ Disk is full! Please free up space and try again. Aborting.")
@@ -275,15 +277,15 @@ async def _execute_routine(
         return e
 
     except RetrievalFailed as e:
-        logger.debug(f"Retrieval of {url} with method {method_name} failed with {e}.")
+        logger.debug(f"Retrieval of {url} with method '{method_name}' failed with {e}.")
         return e
 
-    except ContentBlockedError as e:
-        logger.debug(f"{method_name} cannot access {url} because it is blocked: {e}")
+    except AccessBlockedError as e:
+        logger.debug(f"Method '{method_name}' was prevented from accessing {url}: {e}")
         return e
 
     except TargetUnavailableError as e:
-        logger.debug(f"{method_name} cannot access {url} because it is unavailable: {e}")
+        logger.debug(f"Method '{method_name}' cannot reach target {url}: {e}")
         return e
 
     except RateLimitError as e:
@@ -295,10 +297,14 @@ async def _execute_routine(
         return e
 
     except PlaywrightError as e:
-        if "ERR_NETWORK_CHANGED" in str(e) and attempts_remaining > 0:
-            return await _execute_routine(url, routine, method_name, session, attempts_remaining - 1)
+        if attempts_remaining > 0 and (
+                "ERR_NETWORK_CHANGED" in str(e)
+                or "ECONNREFUSED" in str(e)
+                or isinstance(e, TargetClosedError)
+        ):
+            return await _execute(url, method_to_routine, method_name, session, attempts_remaining - 1)
         else:
-            raise
+            return e
 
     except Exception as e:
         logger.warning(f"Error while retrieving with method {method_name}.", exc_info=True)
