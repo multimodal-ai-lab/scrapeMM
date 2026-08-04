@@ -97,6 +97,7 @@ async def test_telegram(url: str, expected: dict[str, int]):
     ("https://www.tiktok.com/@xxxx.xxxx5743/video/7521704371109793046", dict(video=1)),  # Post
     ("https://www.tiktok.com/@tomekfoodemprior", dict(image=1)),  # User profile (with profile image)
     ("https://www.tiktok.com/@policebodycam6741", dict(image=1)),  # User profile (with profile image)
+    ("https://www.tiktok.com/@sandrabullock2134/photo/7615299421537979656", dict(image=6)),  # Image carousel post
 ])
 async def test_tiktok(url: str, expected: dict[str, int]):
     result = await retrieve(url)

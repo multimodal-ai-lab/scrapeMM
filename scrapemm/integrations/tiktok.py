@@ -12,8 +12,10 @@ from tiktok_research_api import TikTokResearchAPI, QueryVideoRequest, QueryUserI
 from scrapemm.common.exceptions import AccessBlockedError, TargetUnavailableError
 from scrapemm.download import download_image
 from scrapemm.common.retrieval_integration import RetrievalIntegration
+from scrapemm.integrations import decodo
 from scrapemm.integrations.ytdlp import download_video_with_ytdlp
 from scrapemm.secrets import get_secret
+from scrapemm.util import to_multimodal_sequence, preprocess_html
 
 logger = logging.getLogger("scrapeMM")
 
@@ -62,10 +64,12 @@ class TikTok(RetrievalIntegration):
         session = kwargs['session']
         max_video_size = kwargs.get('max_video_size')
 
-        # Determine if this is a video or profile URL
+        # Determine if this is a video, photo, or profile URL
         try:
             if self._is_video_url(url):
                 return await self._get_video(url, session, max_video_size)
+            elif self._is_photo_url(url):
+                return await self._get_photo(url, session)
             else:
                 return await self._get_user_profile(url, session)
         except Exception as e:
@@ -120,6 +124,40 @@ class TikTok(RetrievalIntegration):
 
         except Exception as e:
             raise RuntimeError(f"Error retrieving TikTok video: {e}")
+
+    async def _get_photo(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence:
+        html = await decodo.scrape(url, session, format="html")
+        html = self._prepare_photo_html(html)
+        return await to_multimodal_sequence(html, session=session, url=url)
+
+    @staticmethod
+    def _prepare_photo_html(html: str) -> str:
+        """Strip carousel clone slides and redundant CDN variants from Decodo HTML.
+
+        TikTok photo posts use Swiper, which duplicates slides for infinite scroll
+        (same img src repeated 3×). When both preview and origin CDN URLs exist,
+        keep only the full-size origin variant.
+        """
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(preprocess_html(html), "html.parser")
+
+        for dup in soup.select(".swiper-slide-duplicate"):
+            dup.decompose()
+
+        page_text = str(soup)
+        if "tiktokx-origin" in page_text:
+            for img in soup.find_all("img"):
+                src = img.get("src") or ""
+                if "photomode" in src:
+                    img.decompose()
+
+        for img in soup.find_all("img"):
+            src = img.get("src") or ""
+            if "/100x100/" in src or "/avatar" in src.lower():
+                img.decompose()
+
+        return str(soup)
 
     async def _get_user_profile(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence:
         """Retrieves profile using TikTok Research API."""
@@ -211,7 +249,11 @@ Metrics:
 
     def _is_video_url(self, url: str) -> bool:
         """Determines if the URL is a TikTok video URL."""
-        return '/video/' in url or 'vm.tiktok.com' in url or re.search(r'/\d{10,}', url)
+        return '/video/' in url or 'vm.tiktok.com' in url
+
+    def _is_photo_url(self, url: str) -> bool:
+        """Determines if the URL is a TikTok photo URL."""
+        return '/photo/' in url
 
     def _extract_video_id(self, url: str) -> str | None:
         """Extracts the video ID from a TikTok URL."""

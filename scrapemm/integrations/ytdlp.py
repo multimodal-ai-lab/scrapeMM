@@ -94,12 +94,15 @@ async def download_video_with_ytdlp(
             logger.warning(f"You should update yt-dlp to re-enable YouTube downloads.")
             raise e
         elif ("Video unavailable" in str(e)
-              or "HTTP Error 404: Not Found" in str(e)):
+              or "HTTP Error 404: Not Found" in str(e)
+              or "Instagram sent an empty media response" in str(e)):
             raise TargetUnavailableError(f"Target content not found (Error 404).")
         elif "Cannot parse data; please report this issue" in str(e):
             raise RetrievalFailed(f"yt-dlp is unable to parse the target content.")
         elif "There is no video in this post" in str(e) or "No video formats found" in str(e):
             raise RetrievalFailed(f"Target content has no video.")
+        elif "Error 403: Forbidden" in str(e):
+            raise AccessBlockedError(f"Access to target content forbidden.")
         elif "Sign in to confirm you’re not a bot" in str(e):
             raise AccessBlockedError(f"Login required to access target content.")
         elif "This video has been removed" in str(e):

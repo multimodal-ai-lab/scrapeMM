@@ -159,14 +159,15 @@ class ArchiveOrg(HeadedBrowser):
                         frame = await self._wait_for_primary_video(page, preferred=frame)
                     await _inline_media_in_frame(frame)
                     return frame
+
+            # Rewritten snapshot without playback iframe (content already on the top frame).
+            target: Frame = page.main_frame
+            if wants_video:
+                await self._wait_playback_frame_ready(target)
+                target = await self._wait_for_primary_video(page, preferred=target)
+                await _inline_media_in_frame(target)
+                return target
+            return page
+
         except PlaywrightError:
             raise RetrievalFailed("Archive.org playback iframe not loaded successfully.")
-
-        # Rewritten snapshot without playback iframe (content already on the top frame).
-        target: Frame = page.main_frame
-        if wants_video:
-            await self._wait_playback_frame_ready(target)
-            target = await self._wait_for_primary_video(page, preferred=target)
-            await _inline_media_in_frame(target)
-            return target
-        return page

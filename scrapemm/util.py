@@ -337,17 +337,28 @@ async def resolve_media(
             resolved_media[i] = medium
 
     # 6. Replace or remove elements in the SOUP
-    for element, medium in zip(media_elements, resolved_media):
+    inserted_url_refs: set[str] = set()
+    for i, (element, medium) in enumerate(zip(media_elements, resolved_media)):
         # Check if element is still in the tree
         if element.parent is None:
             continue
 
+        uri = media_uris[i]
         has_child_tags = any(getattr(child, "name", None) for child in element.children)
 
         if medium:
             too_small = isinstance(medium, Image) and (medium.width < 256 or medium.height < 256)
 
             if not too_small:
+                if uri and uri in inserted_url_refs:
+                    if has_child_tags:
+                        _strip_background_image_style(element)
+                    else:
+                        element.decompose()
+                    continue
+                if uri:
+                    inserted_url_refs.add(uri)
+
                 if has_child_tags:
                     # Keep wrapper markup; insert the resolved medium before it.
                     _strip_background_image_style(element)

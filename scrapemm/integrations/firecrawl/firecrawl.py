@@ -142,10 +142,13 @@ class Firecrawl:
         except (ReadTimeout, asyncio.TimeoutError):
             return  # We don't know yet
         except ClientResponseError as e:
-            logger.debug(f"Firecrawl skipping URL {url} due to unavailability: {e}")
-            raise AccessBlockedError(f"Firecrawl could not access the content: Code {e.status} ({e.message})")
+            if isinstance(e.status, int) and (e.status >= 500 or e.status == 404):
+                raise TargetUnavailableError(f"Error {e.status}: {e.message}")
+            else:
+                # logger.debug(f"Firecrawl skipping URL {url} due to unavailability: {e}")
+                raise AccessBlockedError(f"Firecrawl could not access the content: Code {e.status} ({e.message})")
         except ClientConnectorError as e:
-            logger.debug(f"Firecrawl skipping URL {url} due to unavailability: {e}")
+            # logger.debug(f"Firecrawl skipping URL {url} due to unavailability: {e}")
             raise TargetUnavailableError(f"Firecrawl could not connect to the target: {e}")
 
 

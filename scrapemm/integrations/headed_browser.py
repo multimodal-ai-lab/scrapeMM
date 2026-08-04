@@ -1,10 +1,11 @@
+import asyncio
 import logging
 import sys
-from typing import Optional
+from typing import Optional, ClassVar
 
 from ezmm import MultimodalSequence
 from playwright.async_api import async_playwright, Page, Frame, ElementHandle, Playwright, \
-    BrowserContext, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
+    BrowserContext, Error as PlaywrightError
 from seleniumbase import cdp_driver
 from seleniumbase.undetected.cdp_driver.browser import Browser
 
@@ -23,18 +24,63 @@ class HeadedBrowser(RetrievalIntegration):
     name = "Headed Browser"
     domains = ["mvau.lt"]
 
-    _browser: Optional[Browser] = None
+    # Shared UC browser for all HeadedBrowser integrations (Perma.cc, Archive.org, …).
+    _browser: ClassVar[Optional[Browser]] = None
+    _lock: ClassVar[asyncio.Lock] = asyncio.Lock()
 
     async def _connect(self):
-        """Persistent UC browser; Playwright connects over CDP per request."""
-        if self._browser:
+        """Establishes a connection to a persistent UC browser. Playwright connects
+        over CDP per request."""
+        async with self._lock:
+            await self._connect_locked_internal()
+            self.connected = HeadedBrowser._browser is not None
+
+    async def _reconnect(self):
+        """Like _connect(), but removes any previously existing connections"""
+        async with self._lock:
             self._cleanup_resources()
+            await self._connect_locked_internal()
+            self.connected = HeadedBrowser._browser is not None
+
+    async def _prepare_context(self, context: BrowserContext) -> None:
+        """Optional hook before a new page is created (e.g. inject cookies)."""
+        return
+
+    async def _settle_after_goto(self, page: Page) -> None:
+        """Optional post-navigation settle. Override in subclasses for content-specific readiness."""
+        return
+
+    async def _new_page(self, p: Playwright, attempts: int = 3) -> Page:
+        """Connect to the UC browser and open a new tab."""
+        for attempt in range(attempts):
+            if HeadedBrowser._browser is None:
+                raise RuntimeError(f"Headed Browser not connected for integration: {self.name}")
+
+            try:
+                endpoint_url = HeadedBrowser._browser.get_endpoint_url()
+                browser = await p.chromium.connect_over_cdp(endpoint_url, timeout=10_000)
+                context: BrowserContext = browser.contexts[0]
+                await self._prepare_context(context)
+                return await context.new_page()
+
+            except PlaywrightError as e:
+                if attempt < attempts - 1:
+                    logger.warning(f"Connection attempt {attempt + 1} failed, retrying...")
+                    await self._reconnect()
+                    continue
+                raise RuntimeError(f"Failed to initiate a new browser page.") from e
+
+            except Exception as e:
+                raise RuntimeError(f"Failed to initiate a new browser page.") from e
+
+    async def _connect_locked_internal(self):
+        """Internal helper to connect while lock is already held."""
+        if HeadedBrowser._browser is not None:
+            return
 
         try:
             xvfb_metrics = "1920,1080" if sys.platform.startswith("linux") else None
-
-            # Start cdp_driver (UC Mode)
-            self._browser = await cdp_driver.start_async(
+            HeadedBrowser._browser = await cdp_driver.start_async(
                 headless=False,
                 uc=True,
                 no_sandbox=True,
@@ -44,53 +90,19 @@ class HeadedBrowser(RetrievalIntegration):
                 timeout=30,
                 chromium_arg="--ignore-certificate-errors",
             )
-            if self._browser:
+            if HeadedBrowser._browser:
                 logger.debug("cdp_driver started successfully.")
-            self.connected = True
         except Exception:
-            logger.error(f"Failed to start Headed Browser for integration: {self.name}", exc_info=True)
+            logger.error(f"Failed to start/restart Headed Browser for integration: {self.name}", exc_info=True)
             self._cleanup_resources()
-            self.connected = False
-
-    async def _prepare_context(self, context) -> None:
-        """Optional hook before a new page is created (e.g. inject cookies)."""
-        return
-
-    async def _settle_after_goto(self, page: Page) -> None:
-        """Optional post-navigation settle. Override in subclasses for content-specific readiness."""
-        # Default: no fixed sleep. Subclasses that need more should wait on concrete signals.
-        return
-
-    async def _load_browser_context(self, p: Playwright, attempts: int = 2) -> BrowserContext:
-        """Connect to the UC browser and return the context. Tries to reset
-        the browser if connection fails."""
-        endpoint_url = self._browser.get_endpoint_url()
-        try:
-            browser = await p.chromium.connect_over_cdp(endpoint_url, timeout=10_000)
-            return browser.contexts[0]
-        except PlaywrightError:
-            if attempts > 1:
-                # Reset the browser and try again.
-                await self._connect()
-                return await self._load_browser_context(p, attempts - 1)
-        except Exception:
-            logger.error(f"Failed to connect to Headed Browser for integration: {self.name}", exc_info=True)
-            raise
 
     async def _get(self, url: str, **kwargs) -> MultimodalSequence:
         # Fresh Playwright/CDP session per request. Reusing one connection across requests
         # deadlocks on the second URL (CDP session wedges after the first page lifecycle).
         async with async_playwright() as p:
-            context = await self._load_browser_context(p)
-            page = await context.new_page()
-
+            page = await self._new_page(p)
             try:
-                # After new_page: more reliable for CDP/UC contexts than preparing beforehand.
-                await self._prepare_context(context)
                 await page.set_viewport_size({"width": 1920, "height": 1080})
-
-                # domcontentloaded: return as soon as the DOM is parseable. Waiting for "load"
-                # often burns many seconds on archive/analytics assets after content is ready.
                 await page.goto(url, timeout=60000, wait_until="domcontentloaded")
                 await self._settle_after_goto(page)
 
@@ -104,7 +116,7 @@ class HeadedBrowser(RetrievalIntegration):
             finally:
                 await page.close()
 
-            raise RetrievalFailed(f"{self.name} integration was unable to extract content from {url}.")
+        raise RetrievalFailed(f"{self.name} integration was unable to extract content from {url}.")
 
     @staticmethod
     async def _html_and_source(
@@ -118,14 +130,14 @@ class HeadedBrowser(RetrievalIntegration):
         return await target.content(), target
 
     def _cleanup_resources(self):
-        """Close the UC browser."""
-        if self._browser:
+        """Close the shared UC browser."""
+        if HeadedBrowser._browser:
             try:
-                self._browser.quit()
+                HeadedBrowser._browser.quit()
             except Exception:
                 logger.debug("Error while quitting headed browser", exc_info=True)
-            self._browser = None
-            self.connected = False
+            HeadedBrowser._browser = None
+        self.connected = False
 
     async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
         """Change this function as needed to make it work for specific platforms.
