@@ -2,7 +2,7 @@ import asyncio
 import logging
 from typing import Optional
 
-from playwright.async_api import Page
+from playwright.async_api import Page, Response
 
 from scrapemm.integrations.headed_browser import HeadedBrowser, ContentTarget
 
@@ -13,7 +13,8 @@ class Ghostarchive(HeadedBrowser):
     name = "Ghostarchive"
     domains = ["ghostarchive.org"]
 
-    async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
+    async def _extract_content(self, page: Page,
+                               response: Optional[Response] = None) -> Optional[ContentTarget]:
         # Ghostarchive renders archived content with ReplayWeb.page, which loads the
         # archived page into an <iframe class="iframe-main"> nested inside the replay
         # app (itself in an iframe/shadow DOM). Returning that frame ensures its media

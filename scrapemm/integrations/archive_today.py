@@ -1,135 +1,113 @@
 """Integration for Archive.today retrieval."""
 
+import asyncio
+import json
 import logging
-from typing import Optional
+import time
+from pathlib import Path
+from typing import ClassVar, Optional
 from urllib.parse import urlparse
 
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError, Page
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError, Page, Response
 
-from scrapemm.common.exceptions import TargetUnavailableError
+from scrapemm import CaptchaEncounteredError
+from scrapemm.common.exceptions import (RetrievalFailed, TargetUnavailableError, AccessBlockedError,
+                                        RateLimitError)
 from scrapemm.integrations.headed_browser import HeadedBrowser, ContentTarget
+from scrapemm.common.scraping_response import ScrapedContent
+from scrapemm.secrets import get_secret, set_secret
+from scrapemm.util import parse_cookies, parse_netscape_cookies
 
 logger = logging.getLogger("scrapeMM")
 
 ARCHIVE_TODAY_CONTENT_DIV_ID = "CONTENT"
 
-# Captured session cookies that help bypass Archive.today's CAPTCHA gate.
-# `expires` is stripped at use-time so Chromium still accepts them as session cookies
-# after the recorded expiry timestamps have passed.
-COOKIES = [
-    # --- archive.is ---
-    {"name": "qki", "value": "899095247488898009", "domain": ".archive.is", "path": "/",
-     "expires": 1776116330, "httpOnly": False, "secure": False, "sameSite": "Lax"},
-    {"name": "HstCfa2293961", "value": "1776109957355", "domain": "archive.is", "path": "/",
-     "expires": 1807645957, "httpOnly": False, "secure": False, "sameSite": "Lax"},
-    {"name": "HstCla2293961", "value": "1776112901839", "domain": "archive.is", "path": "/",
-     "expires": 1807648901, "httpOnly": False, "secure": False, "sameSite": "Lax"},
-    {"name": "HstCmu2293961", "value": "1776109957355", "domain": "archive.is", "path": "/",
-     "expires": 1807645957, "httpOnly": False, "secure": False, "sameSite": "Lax"},
-    {"name": "HstPn2293961", "value": "4", "domain": "archive.is", "path": "/", "expires": 1807648901,
-     "httpOnly": False, "secure": False, "sameSite": "Lax"},
-    {"name": "HstPt2293961", "value": "4", "domain": "archive.is", "path": "/", "expires": 1807648901,
-     "httpOnly": False, "secure": False, "sameSite": "Lax"},
-    {"name": "HstCnv2293961", "value": "1", "domain": "archive.is", "path": "/", "expires": 1807648901,
-     "httpOnly": False, "secure": False, "sameSite": "Lax"},
-    {"name": "HstCns2293961", "value": "2", "domain": "archive.is", "path": "/", "expires": 1807648901,
-     "httpOnly": False, "secure": False, "sameSite": "Lax"},
+# Session cookies that help to bypass Archive.today's CAPTCHA gate. They expire
+# eventually, in which case you can supply your own ones by setting the
+# 'archive_today_cookie' secret, see `scrapemm.configure_secrets()`.
+DEFAULT_COOKIES_PATH = Path(__file__).parent / "archive_today_cookies.txt"
 
-    # --- archive.ph ---
-    {"domain": "archive.ph", "path": "/", "name": "HstCfa2293961", "value": "1775752561306", "expires": 1807288561,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.ph", "path": "/", "name": "HstCla2293961", "value": "1776114941713", "expires": 1807650941,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.ph", "path": "/", "name": "HstCmu2293961", "value": "1775752561306", "expires": 1807288561,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.ph", "path": "/", "name": "HstPn2293961", "value": "3", "expires": 1807650941,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.ph", "path": "/", "name": "HstPt2293961", "value": "4", "expires": 1807650941,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.ph", "path": "/", "name": "HstCnv2293961", "value": "2", "expires": 1807650941,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.ph", "path": "/", "name": "HstCns2293961", "value": "3", "expires": 1807650941,
-     "httpOnly": False, "secure": False},
-    {"domain": ".archive.ph", "path": "/", "name": "qki", "value": "5916913656267410838", "expires": 1776118541,
-     "httpOnly": False, "secure": False},
+# Instead of the snapshot, Archive.today serves nginx' default page ("Welcome to nginx!")
+# to clients it distrusts. It is served per browser build: at the time of writing, every
+# Chrome 153 gets it (manual browsing included) while Playwright's bundled Chromium and
+# Firefox are served normally, no matter their cookies, IP address or request headers.
+# That is why the shared browser runs on Playwright's Chromium, see
+# `headed_browser._resolve_browser_executable()`. Unlike the CAPTCHA gate, the decoy page
+# sets no session cookie, so retrying never gets us out of it.
+DECOY_HINT = (
+    "Archive.today served nginx' default page instead of the snapshot. It does that for "
+    "browser builds it distrusts (e.g. the very latest Chrome release). Make sure "
+    "Playwright's Chromium is installed ('playwright install'), since scrapeMM prefers it "
+    "over the locally installed Chrome for exactly this reason. You can point scrapeMM at "
+    "another browser binary via update_config(browser_executable_path=...)."
+)
 
-    # --- archive.vn ---
-    {"domain": ".archive.vn", "path": "/", "name": "qki", "value": "17207459285007075470", "expires": 1776118630,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.vn", "path": "/", "name": "HstCfa2293961", "value": "1776115023034", "expires": 1807651023,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.vn", "path": "/", "name": "HstCla2293961", "value": "1776115030131", "expires": 1807651030,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.vn", "path": "/", "name": "HstCmu2293961", "value": "1776115023034", "expires": 1807651023,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.vn", "path": "/", "name": "HstPn2293961", "value": "2", "expires": 1807651030,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.vn", "path": "/", "name": "HstPt2293961", "value": "2", "expires": 1807651030,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.vn", "path": "/", "name": "HstCnv2293961", "value": "1", "expires": 1807651030,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.vn", "path": "/", "name": "HstCns2293961", "value": "1", "expires": 1807651030,
-     "httpOnly": False, "secure": False},
 
-    # --- archive.fo ---
-    {"domain": ".archive.fo", "path": "/", "name": "qki", "value": "4449720061710956499", "expires": 1776118647,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.fo", "path": "/", "name": "HstCfa2293961", "value": "1776115047204", "expires": 1807651047,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.fo", "path": "/", "name": "HstCla2293961", "value": "1776115047204", "expires": 1807651047,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.fo", "path": "/", "name": "HstCmu2293961", "value": "1776115047204", "expires": 1807651047,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.fo", "path": "/", "name": "HstPn2293961", "value": "1", "expires": 1807651047,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.fo", "path": "/", "name": "HstPt2293961", "value": "1", "expires": 1807651047,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.fo", "path": "/", "name": "HstCnv2293961", "value": "1", "expires": 1807651047,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.fo", "path": "/", "name": "HstCns2293961", "value": "1", "expires": 1807651047,
-     "httpOnly": False, "secure": False},
+# Markers of Archive.today's access check. It is shown both as a bot challenge and as
+# the body of a 429 response when the IP address sent too many requests recently.
+GATE_MARKERS = ("security check", "captcha", "just a moment", "performing security verification")
 
-    # --- archive.md ---
-    {"domain": ".archive.md", "path": "/", "name": "qki", "value": "6722863595999379080", "expires": 1776122883,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.md", "path": "/", "name": "HstCfa2293961", "value": "1776119275554", "expires": 1807655275,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.md", "path": "/", "name": "HstCla2293961", "value": "1776119275554", "expires": 1807655275,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.md", "path": "/", "name": "HstCmu2293961", "value": "1776119275554", "expires": 1807655275,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.md", "path": "/", "name": "HstPn2293961", "value": "1", "expires": 1807655275,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.md", "path": "/", "name": "HstPt2293961", "value": "1", "expires": 1807655275,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.md", "path": "/", "name": "HstCnv2293961", "value": "1", "expires": 1807655275,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.md", "path": "/", "name": "HstCns2293961", "value": "1", "expires": 1807655275,
-     "httpOnly": False, "secure": False},
 
-    # --- archive.li ---
-    {"domain": ".archive.li", "path": "/", "name": "qki", "value": "4025865995672402797", "expires": 1776123053,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.li", "path": "/", "name": "HstCfa2293961", "value": "1776119430870", "expires": 1807655430,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.li", "path": "/", "name": "HstCla2293961", "value": "1776119430870", "expires": 1807655430,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.li", "path": "/", "name": "HstCmu2293961", "value": "1776119430870", "expires": 1807655430,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.li", "path": "/", "name": "HstPn2293961", "value": "1", "expires": 1807655430,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.li", "path": "/", "name": "HstPt2293961", "value": "1", "expires": 1807655430,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.li", "path": "/", "name": "HstCnv2293961", "value": "1", "expires": 1807655430,
-     "httpOnly": False, "secure": False},
-    {"domain": "archive.li", "path": "/", "name": "HstCns2293961", "value": "1", "expires": 1807655430,
-     "httpOnly": False, "secure": False},
-]
+def _looks_like_gate(body_text: str) -> bool:
+    """True if the page is Archive.today's access check rather than actual content."""
+    return any(marker in body_text.lower() for marker in GATE_MARKERS)
 
 
 def _session_cookies(cookies: list[dict]) -> list[dict]:
     """Return cookies without expires so Chromium treats them as session cookies."""
     return [{k: v for k, v in cookie.items() if k != "expires"} for cookie in cookies]
+
+
+GATE_HINT = (
+    "Archive.today asks to solve a captcha. Cannot access archived content. scrapeMM does "
+    "not solve captchas. Run scrapemm.configure_archive_today_session() to pass the check "
+    "yourself once in scrapeMM's own browser; the resulting session is then re-used."
+)
+
+# The session has to be established on the kind of URL that retrieval uses: a snapshot
+# referenced by its short id. Archive.today keeps its landing page and some other URL
+# forms accessible even while it gates those, so checking anything else gives a false
+# sense of access. Which id is used does not matter — the access check precedes the
+# lookup, so even an unknown id brings it up.
+VERIFICATION_SNAPSHOT = "Ubqsd"
+
+# Archive.today serves its access check with status 429 on every snapshot URL — including
+# ids that do not exist, and regardless of the client's IP address — while its landing page
+# stays at 200. So the status says "too many requests", but what it actually demands is a
+# session that passed the check.
+RATE_LIMIT_HINT = (
+    "Archive.today answered with HTTP 429 and its access check instead of the snapshot. It "
+    "serves that response to clients without an established session. Run "
+    "scrapemm.configure_archive_today_session() to pass the check once in scrapeMM's own "
+    "browser. If a passed check does not help either, Archive.today is throttling and only "
+    "waiting helps; raise ArchiveToday.MIN_REQUEST_INTERVAL to space out future requests."
+)
+
+
+def _mirror_to_uncovered_domains(cookies: list[dict], domains: list[str]) -> list[dict]:
+    """Archive.today is reachable under several mirror domains but cookies are usually
+    only available for the one the user (or we) visited. So copy them over to every
+    mirror domain that has no cookies of its own."""
+    if not cookies:
+        return cookies
+
+    covered = {cookie.get("domain", "").lstrip(".") for cookie in cookies}
+    first_domain = cookies[0].get("domain", "").lstrip(".")
+    template = [cookie for cookie in cookies
+                if cookie.get("domain", "").lstrip(".") == first_domain]
+
+    mirrored = list(cookies)
+    for domain in domains:
+        if domain in covered:
+            continue
+        for cookie in template:
+            if cookie["name"] == "cf_clearance":
+                # Cloudflare binds its clearance to one domain; a copy is worthless
+                continue
+            copy = dict(cookie)
+            copy["domain"] = ("." if cookie["domain"].startswith(".") else "") + domain
+            mirrored.append(copy)
+    return mirrored
 
 
 class ArchiveToday(HeadedBrowser):
@@ -140,6 +118,12 @@ class ArchiveToday(HeadedBrowser):
     The headed UC stack already works for the other archive integrations on that host.
     """
     name = "Archive.today"
+
+    # Archive.today rate-limits bursts, so requests are serialized and spaced out
+    MIN_REQUEST_INTERVAL: ClassVar[float] = 3.0
+    _request_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
+    _last_request_at: ClassVar[float] = 0.0
+
     domains = [
         "archive.today",
         "archive.is",
@@ -150,21 +134,133 @@ class ArchiveToday(HeadedBrowser):
         "archive.md",
     ]
 
+    _cookies: Optional[list[dict]] = None
+
+    def _load_cookies(self) -> list[dict]:
+        """Returns the cookies to use, preferring the user-configured ones over the
+        defaults shipped with scrapeMM. Configure your own cookies by exporting them
+        from your browser (cookies.txt or JSON) and running
+        `scrapemm.override_secret("archive_today_cookie")`."""
+        if self._cookies is None:
+            configured = get_secret("archive_today_cookie")
+            cookies = parse_cookies(configured) if configured else []
+            if cookies:
+                logger.debug(f"Using {len(cookies)} configured Archive.today cookies.")
+            else:
+                if configured:
+                    logger.warning("⚠️ Could not parse the configured Archive.today cookies. "
+                                   "Falling back to the default ones.")
+                cookies = parse_netscape_cookies(DEFAULT_COOKIES_PATH)
+            ArchiveToday._cookies = _mirror_to_uncovered_domains(cookies, self.domains)
+        return self._cookies
+
     async def _prepare_context(self, context) -> None:
-        cookies = _session_cookies(COOKIES)
-        # Mirror archive.is cookies onto archive.today (tests/users often use that host).
-        for cookie in list(cookies):
-            domain = cookie.get("domain", "")
-            if domain in ("archive.is", ".archive.is"):
-                mirrored = dict(cookie)
-                mirrored["domain"] = domain.replace("archive.is", "archive.today")
-                cookies.append(mirrored)
         try:
-            await context.add_cookies(cookies)
+            await context.add_cookies(_session_cookies(self._load_cookies()))
         except Exception:
             logger.warning("Could not add Archive.today cookies to browser context.", exc_info=True)
 
-    async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
+    async def _get(self, url: str, **kwargs) -> ScrapedContent:
+        """Retrieves the snapshot, one request at a time. Archive.today answers bursts of
+        requests with its access check (HTTP 429), so requests are serialized and spaced
+        out by `MIN_REQUEST_INTERVAL`."""
+        async with ArchiveToday._request_lock:
+            pause = ArchiveToday.MIN_REQUEST_INTERVAL - (time.time() - ArchiveToday._last_request_at)
+            if pause > 0:
+                logger.debug(f"Waiting {pause:.1f}s before the next Archive.today request.")
+                await asyncio.sleep(pause)
+            try:
+                return await super()._get(url, **kwargs)
+            finally:
+                ArchiveToday._last_request_at = time.time()
+
+    async def capture_session(self, timeout: float = 300,
+                              domains: Optional[list[str]] = None) -> bool:
+        """Opens a snapshot of every Archive.today mirror in scrapeMM's browser so that
+        **you** can pass their access checks, then stores the resulting session cookies.
+
+        Every mirror is a separate Cloudflare zone that hands out its own clearance
+        cookie, so the check has to be passed once per mirror — the ones you skip stay
+        unavailable. `timeout` applies per mirror. Cookies of mirrors that were captured
+        earlier are kept, so you can do this in several goes.
+
+        scrapeMM does not solve captchas: this only persists the sessions you established
+        manually. Cloudflare binds each clearance to the browser and IP address that
+        obtained it, which is why the checks have to be passed in this very browser window.
+
+        Returns True if every requested mirror serves snapshots afterwards.
+        """
+        domains = domains or self.domains
+        captured: dict[str, list[dict]] = {}
+
+        logger.info(f"Establishing Archive.today sessions for {len(domains)} mirrors: "
+                    f"{', '.join(domains)}")
+
+        async with async_playwright() as p:
+            page, _ = await self._new_page(p)
+            try:
+                for i, domain in enumerate(domains, start=1):
+                    url = f"https://{domain}/{VERIFICATION_SNAPSHOT}"
+                    prefix = f"[{i}/{len(domains)}] {domain}"
+                    try:
+                        await page.goto(url, timeout=60_000, wait_until="domcontentloaded")
+                    except Exception as e:
+                        logger.warning(f"{prefix}: could not be opened ({type(e).__name__}).")
+                        continue
+
+                    if await self._await_gate_passed(page, prefix, timeout):
+                        captured[domain] = await page.context.cookies(f"https://{domain}/")
+                        logger.info(f"{prefix}: ✅ {len(captured[domain])} cookies captured.")
+            finally:
+                await page.close()
+
+        if captured:
+            self._store_cookies(captured)
+
+        missing = [domain for domain in domains if domain not in captured]
+        if missing:
+            logger.warning(f"⚠️ No session for: {', '.join(missing)}. Snapshots on those "
+                           f"mirrors stay unavailable until you run this again for them.")
+        return not missing
+
+    async def _await_gate_passed(self, page: Page, prefix: str, timeout: float) -> bool:
+        """Waits until the page in front of us is no longer Archive.today's access check."""
+        try:
+            if not _looks_like_gate(await page.locator("body").inner_text()):
+                logger.info(f"{prefix}: already accessible, nothing to pass.")
+                return True
+        except Exception:
+            pass
+
+        logger.info(f"{prefix}: 👉 please pass the access check in the browser window "
+                    f"(waiting up to {timeout:.0f}s)...")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            await asyncio.sleep(2)
+            try:
+                body = await page.locator("body").inner_text()
+            except Exception:
+                continue  # Page is navigating; look again in a moment
+            if body and not _looks_like_gate(body):
+                return True
+
+        logger.warning(f"{prefix}: ⌛ gave up waiting, the access check is still shown.")
+        return False
+
+    def _store_cookies(self, captured: dict[str, list[dict]]) -> None:
+        """Merges the freshly captured cookies into the stored session, keeping the ones
+        of mirrors that were not part of this run."""
+        kept = [cookie for cookie in parse_cookies(get_secret("archive_today_cookie") or "")
+                if cookie.get("domain", "").lstrip(".") not in captured]
+        cookies = kept + [cookie for domain_cookies in captured.values()
+                          for cookie in domain_cookies]
+        set_secret("archive_today_cookie", json.dumps(cookies))
+        ArchiveToday._cookies = None  # Re-read on the next retrieval
+        logger.info(f"Stored {len(cookies)} Archive.today cookies covering "
+                    f"{len(captured)} mirror(s). They are used automatically from now on.")
+
+    async def _extract_content(self, page: Page,
+                               response: Optional[Response] = None) -> Optional[ContentTarget]:
         try:
             body_text = (await page.locator("body").inner_text()).lower()
         except Exception:
@@ -175,15 +271,21 @@ class ArchiveToday(HeadedBrowser):
         if "Not Found (yet?)".lower() in body_text.lower():
             raise TargetUnavailableError("Archive.today capture not found.")
 
-        # Detect CAPTCHA gate
-        if any(marker in body_text for marker in (
-            "security check", "captcha", "just a moment", "performing security verification",
-        )):
-            raise RuntimeError("Archive.today asks to solve a captcha. Cannot access archived content.")
+        # Detect the decoy page, see DECOY_HINT
+        if "welcome to nginx" in body_text:
+            raise RetrievalFailed(DECOY_HINT)
 
-        # CAPTCHA gate often redirects to the bare host with no snapshot path.
+        # A rate limit and the captcha gate render the same page, so check the status first
+        if response is not None and response.status == 429:
+            raise RateLimitError(RATE_LIMIT_HINT)
+
+        # Detect the access check
+        if _looks_like_gate(body_text):
+            raise CaptchaEncounteredError(GATE_HINT)
+
+        # CAPTCHA gate sometimes redirects to the bare host with no snapshot path.
         if urlparse(page.url).path in ("", "/"):
-            raise RuntimeError("Archive.today asks to solve a captcha. Cannot access archived content.")
+            raise AccessBlockedError("Archive.today redirects to a decoy page.")
 
         try:
             element = await page.wait_for_selector(f"#{ARCHIVE_TODAY_CONTENT_DIV_ID}", timeout=30000)
@@ -197,3 +299,11 @@ class ArchiveToday(HeadedBrowser):
                 ARCHIVE_TODAY_CONTENT_DIV_ID, page.url, snippet,
             )
         return None
+
+
+async def configure_archive_today_session(timeout: float = 300) -> bool:
+    """Opens Archive.today in scrapeMM's browser so that you can pass its access check
+    yourself, then stores the session for future retrievals. scrapeMM does not solve
+    captchas — you do, once, in the window that opens."""
+    from scrapemm.integrations import NAME_TO_INTEGRATION
+    return await NAME_TO_INTEGRATION["archive.today"].capture_session(timeout=timeout)

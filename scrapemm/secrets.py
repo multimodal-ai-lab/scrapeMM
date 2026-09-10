@@ -28,7 +28,12 @@ SECRETS = {
     "decodo_token": "Decodo Web Scraping API basic authentication token",
     "youtube_cookie": "YouTube cookie string",
     "facebook_cookie": "Facebook cookie string",
+    "archive_today_cookie": "Archive.today cookies (optional, only needed if the "
+                            "default ones stopped working)",
 }
+
+# Secrets that are (potentially long and) multi-line, hence needing a multiline input
+MULTILINE_SECRETS = ("youtube_cookie", "facebook_cookie", "archive_today_cookie")
 
 SALT = b'\xa4\x93\xf1\x88\x13\x88'
 SECRETS_PATH = CONFIG_DIR / "secrets"
@@ -144,7 +149,7 @@ def override_secret(key_name: str):
     """Prompts the user to enter a new value for the given secret key. Does nothing
     when nothing entered."""
     description = SECRETS[key_name]
-    if key_name in ["youtube_cookie", "facebook_cookie"]:
+    if key_name in MULTILINE_SECRETS:
         user_input = get_user_input(f"Please enter the {description} (Alt+Enter to submit):", multiline=True)
     else:
         user_input = get_user_input(f"Please enter the {description} (leave empty to skip):")

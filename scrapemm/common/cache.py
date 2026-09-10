@@ -7,13 +7,15 @@ from .scraping_response import ScrapingResponse, OutputFormat
 
 DEFAULT_CACHE_TTL = 24 * 60 * 60  # 24 hours
 
-# A cache entry is identified by the URL, the requested output format, and the methods used
-CacheKey = tuple[str, str, tuple[str, ...]]
+# A cache entry is identified by all the parameters that influence the retrieved content:
+# the URL, the requested output format, the methods used, and the video size limit
+CacheKey = tuple[str, str, tuple[str, ...], Optional[int]]
 
 
-def cache_key(url: str, output_format: OutputFormat, methods: list[str]) -> CacheKey:
+def cache_key(url: str, output_format: OutputFormat, methods: list[str],
+              max_video_size: Optional[int] = None) -> CacheKey:
     """Constructs the cache key identifying a particular retrieval request."""
-    return url, output_format, tuple(methods)
+    return url, output_format, tuple(methods), max_video_size
 
 
 class ScrapeCache:

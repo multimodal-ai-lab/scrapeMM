@@ -19,7 +19,8 @@ from scrapemm.common.exceptions import RetrievalFailed, UnsupportedDomainError, 
 from scrapemm.download import download_image, download_video
 from scrapemm.download.common import HEADERS
 from scrapemm.download.util import looks_like_image_file_url, looks_like_video_file_url, looks_like_hls_url
-from scrapemm.integrations import retrieve_via_integration, fire, decodo, get_integrations_for_url, INTEGRATION_NAMES
+from scrapemm.integrations import (retrieve_via_integration, fire, decodo, get_integrations_for_url,
+                                   INTEGRATION_NAMES, DOMAIN_TO_INTEGRATION)
 from scrapemm.util import run_with_semaphore, get_domain, normalize_video, preprocess_url
 
 logger = logging.getLogger("scrapeMM")
@@ -201,7 +202,7 @@ async def _retrieve_single(
         return _failure(url, output_format, dict(scrapeMM=e), start_time)
 
     # Re-use a recent, successful retrieval of the same URL, if there is any
-    key = cache_key(url, output_format, methods)
+    key = cache_key(url, output_format, methods, max_video_size)
     if use_cache:
         cached = cache.get(key)
         if cached is not None:
@@ -230,11 +231,13 @@ async def _retrieve_single(
 
         def map_method_to_retrieval_routine(m: str) -> Coroutine:
             if m.lower() == "firecrawl":
-                return fire.scrape(url, session=session, output_format=output_format, actions=actions)
+                return fire.scrape(url, session=session, output_format=output_format,
+                                   actions=actions, max_video_size=max_video_size)
             elif m.lower() == "decodo":
                 return decodo.scrape(url, session, output_format=output_format,
                                      timeout=15 if prioritize == "speed" else 60,
-                                     max_retries=1 if prioritize == "speed" else 5)
+                                     max_retries=1 if prioritize == "speed" else 5,
+                                     max_video_size=max_video_size)
             else:
                 return retrieve_via_integration(url, integration_name=m, session=session,
                                                 max_video_size=max_video_size,
@@ -295,13 +298,24 @@ async def _retrieve_single(
     logger.warning(f"All retrieval methods failed for URL: {url}")
 
     # Exclude CAPTCHA-protected domains from any future retrieval
-    for error in errors.values():
-        if isinstance(error, CaptchaEncounteredError):
-            blacklist.add(domain, captcha_reason(error, url))
-            break
+    _blacklist_if_captcha(domain, url, errors)
+
     if partial is not None and partial.multimodal is not None:
         postprocess_media(partial.multimodal)
     return _failure(url, output_format, errors, start_time, content=partial)
+
+
+def _blacklist_if_captcha(domain: str, url: str, errors: dict[str, Optional[Exception]]) -> None:
+    """Excludes the domain from any future retrieval if it turned out to be CAPTCHA-protected.
+    Domains that are served by an integration are never blacklisted: their CAPTCHA gates are
+    transient (e.g., Archive.today) and blacklisting would disable the integration for good."""
+    error = next((e for e in errors.values() if isinstance(e, CaptchaEncounteredError)), None)
+    if error is None:
+        return
+    if domain in DOMAIN_TO_INTEGRATION:
+        logger.debug(f"Not blacklisting '{domain}': it is served by an integration.")
+        return
+    blacklist.add(domain, captcha_reason(error, url))
 
 
 def _failure(url: str, output_format: OutputFormat, errors: dict[str, Optional[Exception]],

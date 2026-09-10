@@ -23,6 +23,7 @@ from scrapemm.download.images import image_from_binary
 from scrapemm.download.util import (
     looks_like_image_file_url,
     looks_like_vector_file_url,
+    looks_like_video_embed_url,
 )
 from scrapemm.download.videos import video_from_binary, download_hls_video, is_hls
 
@@ -131,6 +132,17 @@ MAX_MEDIA_PER_PAGE = 32
 URL_REGEX = r"https?:\/\/(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9@:%_\+.~#?&//=]*)"
 DATA_URI_REGEX = r"data:([\w/+.-]+/[\w.+-]+);base64,([A-Za-z0-9+/=]+)"
 MD_HYPERLINK_REGEX = rf'(!?\[([^]^[]*)\]\((.*?)(?: "[^"]*")?\))'
+
+# Marks HttpOnly cookies in the Netscape cookies.txt format
+HTTP_ONLY_PREFIX = "#HttpOnly_"
+
+# Maps the SameSite spellings found in cookie exports to Playwright's values
+SAME_SITE_VALUES = {
+    "strict": "Strict",
+    "lax": "Lax",
+    "none": "None",
+    "no_restriction": "None",  # Cookie-Editor's spelling
+}
 
 
 def preprocess_html(html: str) -> str:
@@ -247,6 +259,15 @@ def _extract_media_elements(soup: BeautifulSoup) -> list[Tag]:
             element["src"] = bg_url
         _add(element)
 
+    # Embedded players (YouTube, Vimeo, ...) carry the page's video content just as much
+    # as a <video> tag does, they just need yt-dlp to be downloaded.
+    for element in soup.find_all("iframe"):
+        # Lazy-loading plugins park the real URL in a data attribute
+        src = element.get("src") or element.get("data-src") or element.get("data-litespeed-src")
+        if src and looks_like_video_embed_url(str(src)):
+            element["src"] = str(src)
+            _add(element)
+
     # For videos, include either the src attribute (higher precedence) or the first source element
     for video in soup.find_all("video"):
         if video.has_attr("src"):
@@ -278,6 +299,26 @@ def _resolve_base64_media(
                     continue
         resolved.append(None)
     return resolved
+
+
+async def download_embedded_video(
+        url: str,
+        session: Union[aiohttp.ClientSession, "APIRequestContext"],
+        max_video_size: Optional[int] = None,
+        **kwargs
+) -> Optional[Video]:
+    """Downloads the video behind an embedded player with yt-dlp. Returns None if that
+    fails: an embedded video is a bonus, so it must never fail the whole page."""
+    from scrapemm.integrations.ytdlp import download_video_with_ytdlp
+
+    try:
+        video, _thumbnail, _metadata = await download_video_with_ytdlp(
+            url, session=session, max_video_size=max_video_size)
+        return video
+    except Exception as e:
+        logger.info(f"Could not download the video embedded from {url}: "
+                    f"{type(e).__name__}: {e}")
+        return None
 
 
 async def resolve_media(
@@ -316,7 +357,9 @@ async def resolve_media(
     # Create retrieval tasks for URL elements
     for element, uri in zip(media_elements, media_uris):
         if uri and is_url(uri) and uri not in unique_urls:
-            if element.name in ["video", "source"]:
+            if element.name == "iframe":
+                tasks.append(download_embedded_video(uri, session=session, **kwargs))
+            elif element.name in ["video", "source"]:
                 if source_element:
                     tasks.append(fetch_video_via_page(source_element, uri))
                 else:
@@ -693,38 +736,120 @@ def run_command(cmd: list[str]) -> subprocess.CompletedProcess | None:
 
 
 def parse_netscape_cookies(cookie_file: Path) -> list[dict]:
-    """Parse the Netscape-format cookie file and return cookie dicts.
-
-    Netscape format fields (tab-separated):
-        domain  include_subdomains  path  is_secure  expiry  name  value
-    """
+    """Reads the given cookie file and returns the contained cookies as dicts."""
     if not cookie_file.exists():
         return []
+    return parse_cookies(cookie_file.read_text(encoding="utf-8", errors="replace"))
 
-    cookies = []
-    with open(cookie_file) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            parts = line.split("\t")
-            if len(parts) < 7:
-                continue
-            domain, _include_subdomains, path, is_secure, expiry, name, value = parts[:7]
-            try:
-                cookies.append({
-                    "name": name,
-                    "value": value,
-                    "domain": domain,
-                    "path": path,
-                    "expires": int(expiry),
-                    "httpOnly": False,
-                    "secure": is_secure.upper() == "TRUE",
-                    "sameSite": "None",
-                })
-            except ValueError:
-                continue
-    return cookies
+
+def parse_cookies(cookies: str) -> list[dict]:
+    """Parses cookies exported from a browser into Playwright cookie dicts. Accepts
+    both formats offered by the common cookie extensions: the Netscape cookies.txt
+    format and JSON."""
+    cookies = cookies.strip()
+    if not cookies:
+        return []
+    return _parse_json_cookies(cookies) if cookies[0] in "[{" else _parse_netscape_cookies(cookies)
+
+
+def _parse_netscape_cookies(cookies: str) -> list[dict]:
+    """Parses the Netscape cookies.txt format. Fields are tab-separated:
+        domain  include_subdomains  path  is_secure  expiry  name  value
+    """
+    parsed = []
+    for line in cookies.splitlines():
+        line = line.strip()
+        # Curl and friends mark HttpOnly cookies by prefixing the line
+        http_only = line.startswith(HTTP_ONLY_PREFIX)
+        if http_only:
+            line = line[len(HTTP_ONLY_PREFIX):]
+        elif line.startswith("#"):
+            continue
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) < 7:
+            continue
+        domain, _include_subdomains, path, is_secure, expiry, name, value = parts[:7]
+        try:
+            expires = int(float(expiry))
+        except ValueError:
+            continue
+        secure = is_secure.upper() == "TRUE"
+        parsed.append(_as_cookie(name, value, domain, path, expires, secure, http_only=http_only))
+    return parsed
+
+
+def to_netscape_cookies(cookies: list[dict], header: str = "") -> str:
+    """Serializes cookies into the Netscape cookies.txt format, the counterpart of
+    `parse_cookies()`. SameSite has no place in that format and is lost; HttpOnly is
+    preserved through the '#HttpOnly_' line prefix that curl established."""
+    lines = ["# Netscape HTTP Cookie File"]
+    lines += [f"# {line}" for line in header.splitlines() if header]
+    lines.append("")
+    for cookie in cookies:
+        domain = cookie.get("domain", "")
+        expires = int(cookie.get("expires") or 0)
+        line = "\t".join([
+            domain,
+            "TRUE" if domain.startswith(".") else "FALSE",  # Include subdomains
+            cookie.get("path") or "/",
+            "TRUE" if cookie.get("secure") else "FALSE",
+            str(max(expires, 0)),  # Playwright marks session cookies with -1
+            cookie.get("name", ""),
+            cookie.get("value", ""),
+        ])
+        lines.append(HTTP_ONLY_PREFIX + line if cookie.get("httpOnly") else line)
+    return "\n".join(lines) + "\n"
+
+
+def _parse_json_cookies(cookies: str) -> list[dict]:
+    """Parses the JSON format, as exported by extensions like Cookie-Editor."""
+    try:
+        data = json.loads(cookies)
+    except json.JSONDecodeError:
+        logger.warning("⚠️ Could not parse the provided cookies: Invalid JSON.")
+        return []
+
+    if isinstance(data, dict):  # Some exports wrap the list into an object
+        data = data.get("cookies", [])
+
+    parsed = []
+    for cookie in data:
+        if not isinstance(cookie, dict) or "name" not in cookie or "domain" not in cookie:
+            continue
+        expires = cookie.get("expires", cookie.get("expirationDate", 0))
+        parsed.append(_as_cookie(
+            name=cookie["name"],
+            value=cookie.get("value", ""),
+            domain=cookie["domain"],
+            path=cookie.get("path", "/"),
+            expires=int(float(expires)) if expires else 0,
+            secure=bool(cookie.get("secure")),
+            http_only=bool(cookie.get("httpOnly")),
+            same_site=cookie.get("sameSite"),
+        ))
+    return parsed
+
+
+def _as_cookie(name: str, value: str, domain: str, path: str, expires: int,
+               secure: bool, http_only: bool = False, same_site: str | None = None) -> dict:
+    """Assembles a Playwright cookie dict, normalizing the SameSite attribute."""
+    same_site = SAME_SITE_VALUES.get(str(same_site).lower())
+    if same_site is None or (same_site == "None" and not secure):
+        # Browsers reject SameSite=None on insecure cookies, so fall back to their
+        # default (Lax) whenever the export doesn't tell us better.
+        same_site = "Lax"
+    return {
+        "name": name,
+        "value": value,
+        "domain": domain,
+        "path": path or "/",
+        "expires": expires,
+        "httpOnly": http_only,
+        "secure": secure,
+        "sameSite": same_site,
+    }
 
 
 async def unshorten(url: str, session: aiohttp.ClientSession) -> Optional[str]:

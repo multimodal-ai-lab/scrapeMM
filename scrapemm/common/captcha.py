@@ -40,7 +40,11 @@ CAPTCHA_WIDGETS: tuple[Signature, ...] = (
                               "cdn-cgi/challenge-platform")),
     ("Arkose FunCaptcha", ("funcaptcha", "arkoselabs")),
     ("GeeTest CAPTCHA", ("geetest",)),
-    ("CAPTCHA", ("captcha",)),
+    # Markup of unknown CAPTCHA implementations. The bare word "captcha" is deliberately
+    # not a marker: it also occurs in ordinary page text (a false positive once got
+    # perma.cc blacklisted).
+    ("CAPTCHA", ('"captcha"', "'captcha'", "captcha-container", "captcha-form",
+                 "captcha_form", "/captcha/", "captcha challenge", "captcha required")),
 )
 
 # Challenge pages show hardly any text. Anything longer is considered actual content.

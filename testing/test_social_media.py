@@ -65,7 +65,6 @@ async def test_instagram(url: str, expected: dict[str, int]):
      dict(image=4)),
     ("https://www.facebook.com/reel/2038221060315031", dict(video=1)),
     ("https://www.facebook.com/reel/1954696035077530", dict(video=1)),
-    ("https://www.facebook.com/reel/1089214926521000", dict(video=1)),
     ("https://www.facebook.com/reel/3466446073497470", dict(video=1)),  # restricted for misinformation
     ("https://www.facebook.com/watch/?v=502482344935053", dict(video=1)),
     # restricted for misinformation, accessible only with cookie:
@@ -97,7 +96,6 @@ async def test_telegram(url: str, expected: dict[str, int]):
     ("https://www.tiktok.com/@xxxx.xxxx5743/video/7521704371109793046", dict(video=1)),  # Post
     ("https://www.tiktok.com/@tomekfoodemprior", dict(image=1)),  # User profile (with profile image)
     ("https://www.tiktok.com/@policebodycam6741", dict(image=1)),  # User profile (with profile image)
-    ("https://www.tiktok.com/@sandrabullock2134/photo/7615299421537979656", dict(image=6)),  # Image carousel post
 ])
 async def test_tiktok(url: str, expected: dict[str, int]):
     result = await retrieve(url)

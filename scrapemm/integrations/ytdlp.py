@@ -14,10 +14,33 @@ from scrapemm.download import download_image
 
 logger = logging.getLogger("scrapeMM")
 
+# Cap on the video resolution. Keeps the downloads small; higher resolutions rarely add
+# information that matters for our purposes.
+MAX_VIDEO_HEIGHT = 720
+
 # Add yt-dlp-specific logger to print warnings to console
 logger_yt_dlp = logging.getLogger("yt_dlp")
 logger_yt_dlp.setLevel(logging.CRITICAL)
 logger_yt_dlp.addHandler(logging.StreamHandler(sys.stdout))
+
+
+def _format_selector() -> str:
+    """Builds the yt-dlp format selector.
+
+    Neither YouTube nor Facebook serve progressive formats (video and audio muxed into a
+    single file) any longer, so selectors like 'best[ext=mp4]' — which only ever match
+    progressive formats — cannot resolve at all. Video and audio have to be downloaded
+    separately and merged, which needs FFmpeg. Without FFmpeg, we take the video-only
+    stream, i.e. the video comes without sound.
+    """
+    from scrapemm import ffmpeg_available
+
+    capped, uncapped = f"[height<={MAX_VIDEO_HEIGHT}]", ""
+    if ffmpeg_available:
+        # Prefer mp4+m4a, which merge into a clean mp4 without re-encoding
+        return "/".join([f"bv*{capped}[ext=mp4]+ba[ext=m4a]", f"bv*{capped}+ba", f"b{capped}",
+                         f"bv*{uncapped}+ba", "b"])
+    return "/".join([f"b{capped}", "b", f"bv*{capped}[ext=mp4]", f"bv*{capped}", "bv*"])
 
 
 def _run_ytdlp_sync(
@@ -61,7 +84,8 @@ async def download_video_with_ytdlp(
 
         ydl_opts: dict[str, Any] = dict(
             outtmpl=f'{temp_path}.%(ext)s',  # Output filename format
-            format='best[ext=mp4]/best',  # Download the best video/audio quality
+            format=_format_selector(),
+            merge_output_format="mp4",  # Keep the container predictable when merging
             max_filesize=max_video_size,
             quiet=True,  # Silence logs in console
             logger=logger_yt_dlp,  # Reroute logs to dedicated logger
@@ -72,13 +96,14 @@ async def download_video_with_ytdlp(
         )
 
         if "youtube" in url or "youtu.be" in url:
-            # YouTube delivers video and audio separately when downloaded above 720p.
-            # This would require FFmpeg to merge them. Restrict to 720p to avoid that.
-            ydl_opts['format'] = 'best[height<=720]'
             ydl_opts['extractor_args'] = dict(youtube=dict(player_client=["default"]))
 
         # Run blocking yt-dlp work in a thread pool to avoid stalling the event loop.
         video, metadata = await asyncio.to_thread(_run_ytdlp_sync, url, temp_path, ydl_opts)
+
+        if video and metadata.get("acodec") in (None, "none"):
+            logger.info(f"⚠️ Downloaded {video.reference} without audio. Install FFmpeg to "
+                        f"enable merging the separate video and audio streams.")
 
         if video and max_video_size and video.size > max_video_size:
             logger.info(f"Removing video {video.reference} because it exceeds the maximum size "

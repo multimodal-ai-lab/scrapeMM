@@ -45,12 +45,12 @@ async def test_html_retrieval(url, method):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url, max_video_size, download_expected", [
-    ("https://www.facebook.com/reel/1089214926521000", None, True),
-    ("https://www.facebook.com/reel/1089214926521000", 128_000_000, True),
-    ("https://www.facebook.com/reel/1089214926521000", 1_000_000, False),
-    ("https://www.youtube.com/shorts/cE0zgN6pYOc", None, True),
+    ("https://www.facebook.com/reel/2038221060315031", None, True),  # ~12 MB
+    ("https://www.facebook.com/reel/2038221060315031", 128_000_000, True),
+    ("https://www.facebook.com/reel/2038221060315031", 1_000_000, False),
+    ("https://www.youtube.com/shorts/cE0zgN6pYOc", None, True),  # ~1.2 MB
     ("https://www.youtube.com/shorts/cE0zgN6pYOc", 6_000_000, True),
-    ("https://www.youtube.com/shorts/cE0zgN6pYOc", 3_000_000, False),
+    ("https://www.youtube.com/shorts/cE0zgN6pYOc", 500_000, False),
 ])
 async def test_max_video_size(url, max_video_size, download_expected):
     result = await retrieve(url, max_video_size=max_video_size)
@@ -71,7 +71,7 @@ async def test_max_video_size(url, max_video_size, download_expected):
          "YouTube"
      ]),
     ([
-         "https://www.facebook.com/reel/1089214926521000",
+         "https://www.facebook.com/reel/2038221060315031",
          "https://www.zeit.de/politik/deutschland/2025-07/spionage-iran-festnahme-anschlag-juden-berlin-daenemark",
      ], [
          ["Facebook"],
@@ -93,7 +93,7 @@ async def test_max_video_size(url, max_video_size, download_expected):
     ([
          "https://factuel.afp.com/doc.afp.com.43ZN7NP",
          "https://x.com/realDonaldTrump",
-         "https://www.facebook.com/reel/1089214926521000",
+         "https://www.facebook.com/reel/2038221060315031",
      ],
      "auto"
     ),

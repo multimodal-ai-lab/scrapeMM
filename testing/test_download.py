@@ -44,7 +44,6 @@ async def download_img(url):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url",[
-    "https://media.snopes.com/2021/05/comparison-biden-psaki.jpg",
     "https://media.cnn.com/api/v1/images/stellar/prod/02-overview-of-kursk-training-area-15april2025-wv2.jpg?q=w_1110,c_fill",
     "https://factly.in/wp-content/uploads/2025/02/Train-fire-in-Prayagraj-Claim.jpg",
     "https://www.washingtonpost.com/wp-apps/imrs.php?src=https://arc-anglerfish-washpost-prod-washpost.s3.amazonaws.com/public/MBWA4LJ5XLVC6CJLZG2OQFMGWE.JPG&w=1440&impolicy=high_res",
@@ -53,6 +52,7 @@ async def download_img(url):
     "https://mediaproxy.snopes.com/width/1200/https://media.snopes.com/2024/01/origin_of_gauze.jpg",
     "https://storage.verify-sy.com/images/articles/691f227ff49091ec373a9cdd/68bf2c6fe5df49b4404c038f.png",
     "https://storage.verify-sy.com/1784109845089-pn1nam.jpg",
+    "https://mediaproxy.snopes.com/width/1200/https://media.snopes.com/2026/09/walmart_shoppers_shelves_getty.jpg"
 ])
 async def test_download_image(url):
     img = await download_img(url)

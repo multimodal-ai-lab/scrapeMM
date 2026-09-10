@@ -5,8 +5,10 @@ This library aims to help developers and researchers to easily access multimodal
 
 ## Setup
 * **If you want to download videos**: Then, the installation of [ffmpeg](https://ffmpeg.org/) is highly recommended.
-In Conda, you can install it with `conda install -c conda-forge ffmpeg`.
-* **If you want to scrape Perma.cc archive records or Facebook photos**, you'll need to install playwright with `pip install playwright` and running `playwright install` (add `--force` if an already installed version needs an update).
+In Conda, you can install it with `conda install -c conda-forge ffmpeg`. Platforms like YouTube and
+Facebook serve video and audio as separate streams, and merging them needs ffmpeg. Without it,
+videos are downloaded **without sound**.
+* **Install Playwright dependencies** (used by multiple integrations) running `playwright install` (add `--force` if an already installed version needs an update).
 
 ## Configure
 To set the API secrets, run
@@ -20,6 +22,25 @@ To set the Firecrawl URL, run
 from scrapemm import update_config
 update_config(firecrawl_url="your_url")
 ```
+
+### Archive.today Access
+Archive.today guards its snapshots with strong anti-bot protection. You can circumvent it by setting cookies of sessions where you manually solved a CAPTCHA. scrapeMM does **not** solve CAPTCHAs.
+
+To establish a session, run
+```bash
+python scripts/configure_archive_today.py
+```
+This opens a snapshot of each mirror (archive.today, archive.is, archive.ph, …) in
+scrapeMM's own browser, one after another for all 6 different archive.today domains. Pass the check in that window each time; the
+resulting cookies are stored and re-used automatically. 
+
+Alternatively, paste a cookie export (`cookies.txt` or JSON, from any cookie extension)
+directly:
+```python
+from scrapemm import override_secret
+override_secret("archive_today_cookie")  # Paste the export, then press Alt+Enter
+```
+Your cookies replace the ones shipped with scrapeMM.
 
 ## Usage
 
@@ -96,6 +117,10 @@ A domain gets blacklisted only if *all* retrieval methods failed, so a CAPTCHA o
 not exclude a domain that another method can still scrape. Blacklisting applies to the registrable
 domain, i.e., including all of its subdomains.
 
+Domains that are served by an integration (`perma.cc`, `archive.today`, `x.com`, ...) are never
+blacklisted automatically: their CAPTCHA gates are transient, so blacklisting would disable the
+respective integration for good.
+
 ## How it works
 ```
 Input:                                  Output:
@@ -112,10 +137,10 @@ Web scraping is done with [Firecrawl](https://github.com/mendableai/firecrawl) a
 - ✅ Bluesky
 - ✅ TikTok
 - ✅ YouTube
-- (✅️) Instagram: works for most content
+- ✅️ Instagram: works for most content
 - ✅️ Facebook
 - ✅ Threads: posts only (profiles TBD)
-- ✅ Reddit: posts only (needs a Reddit app, see https://www.reddit.com/prefs/apps)
+- ✅ Reddit: posts only
 
 ### Archiving Services
 - ✅ Perma.cc

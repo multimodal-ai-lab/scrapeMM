@@ -1,7 +1,7 @@
 import logging
 from typing import Optional
 
-from playwright.async_api import TimeoutError, Page
+from playwright.async_api import TimeoutError, Page, Response
 
 from scrapemm.integrations.headed_browser import HeadedBrowser, ContentTarget
 
@@ -12,7 +12,8 @@ class AwesomeScreenshot(HeadedBrowser):
     name = "AwesomeScreenshot"
     domains = ["awesomescreenshot.com"]
 
-    async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
+    async def _extract_content(self, page: Page,
+                               response: Optional[Response] = None) -> Optional[ContentTarget]:
         """The platform shows either an image or a video. Wait for the matching wrapper."""
         try:
             element = await page.wait_for_selector(

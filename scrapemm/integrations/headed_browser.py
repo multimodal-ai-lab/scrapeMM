@@ -4,12 +4,13 @@ import sys
 from typing import Optional, ClassVar
 
 from playwright.async_api import async_playwright, Page, Frame, ElementHandle, Playwright, \
-    BrowserContext, Error as PlaywrightError
+    BrowserContext, Response, Error as PlaywrightError
 from playwright._impl._errors import TargetClosedError
 from seleniumbase import cdp_driver
 from seleniumbase.undetected.cdp_driver.browser import Browser
 
 from scrapemm import RetrievalFailed
+from scrapemm.common import get_config_var
 from scrapemm.common.retrieval_integration import RetrievalIntegration
 from scrapemm.common.scraping_response import ScrapedContent
 from scrapemm.util import get_domain
@@ -17,6 +18,35 @@ from scrapemm.util import get_domain
 logger = logging.getLogger("scrapeMM")
 
 ContentTarget = Page | Frame | ElementHandle
+
+# Flags passed to the shared browser. Archives frequently serve snapshots with expired or
+# mismatching certificates, which must not stop the retrieval.
+BROWSER_ARGS = ["--ignore-certificate-errors"]
+
+
+def _resolve_browser_executable(playwright: Optional[Playwright]) -> Optional[str]:
+    """Returns the path of the browser binary to run the shared browser with. Prefers
+    Playwright's bundled Chromium over any locally installed Chrome because it is pinned:
+    the browser version is then the same on every machine, and it is a build the scraped
+    sites already know. Bot detection tends to distrust the newest Chrome release —
+    Archive.today, for instance, answers Chrome 153 with a decoy page (nginx' default
+    page) while serving the bundled Chromium normally.
+
+    Returns None if no specific binary could be determined, leaving the choice to
+    SeleniumBase (which picks the locally installed Chrome).
+    """
+    if configured := get_config_var("browser_executable_path"):
+        return configured
+
+    if playwright is None:
+        return None
+
+    try:
+        return playwright.chromium.executable_path
+    except Exception:
+        logger.debug("Could not locate Playwright's bundled Chromium. Falling back to "
+                     "the locally installed browser.", exc_info=True)
+        return None
 
 # Substrings indicating the shared browser process itself died (not just a page-level
 # issue), seen in Playwright error messages when the underlying Chrome process crashes
@@ -61,10 +91,12 @@ class HeadedBrowser(RetrievalIntegration):
         """Establishes a connection to a persistent, shared UC browser. Playwright connects
         over CDP per request. Not used to gate `get()` (see override above); kept so the
         shared browser can be pre-warmed explicitly if desired."""
-        browser, _ = await self._ensure_browser()
+        async with async_playwright() as p:
+            browser, _ = await self._ensure_browser(playwright=p)
         self.connected = browser is not None
 
-    async def _ensure_browser(self, bad_generation: Optional[int] = None) -> tuple[Optional[Browser], int]:
+    async def _ensure_browser(self, bad_generation: Optional[int] = None,
+                              playwright: Optional[Playwright] = None) -> tuple[Optional[Browser], int]:
         """Returns a live shared browser and its generation number, starting or restarting
         it as needed.
 
@@ -80,14 +112,16 @@ class HeadedBrowser(RetrievalIntegration):
             superseded = bad_generation is not None and bad_generation == HeadedBrowser._generation
             if stale or superseded:
                 self._cleanup_resources()
-                await self._start_browser_locked()
+                await self._start_browser_locked(playwright)
                 HeadedBrowser._generation += 1
             return HeadedBrowser._browser, HeadedBrowser._generation
 
-    async def _start_browser_locked(self):
+    async def _start_browser_locked(self, playwright: Optional[Playwright] = None):
         """Starts the shared UC browser. Caller must already hold `_lock`."""
         try:
             xvfb_metrics = "1920,1080" if sys.platform.startswith("linux") else None
+            executable_path = _resolve_browser_executable(playwright)
+            logger.debug(f"Starting headed browser: {executable_path or 'system default'}")
             HeadedBrowser._browser = await cdp_driver.start_async(
                 headless=False,
                 uc=True,
@@ -96,7 +130,11 @@ class HeadedBrowser(RetrievalIntegration):
                 start_maximized=True,
                 xvfb_metrics=xvfb_metrics,
                 timeout=30,
-                chromium_arg="--ignore-certificate-errors",
+                # Note: `cdp_driver.start_async()` has no 'chromium_arg' parameter. Passing
+                # browser flags any other way makes them end up in **kwargs, where they are
+                # silently dropped.
+                browser_args=BROWSER_ARGS,
+                browser_executable_path=executable_path,
             )
             if HeadedBrowser._browser:
                 logger.debug("cdp_driver started successfully.")
@@ -117,7 +155,7 @@ class HeadedBrowser(RetrievalIntegration):
         browser generation it was opened on, so callers can report a crash precisely."""
         bad_generation = None
         for attempt in range(attempts):
-            browser, generation = await self._ensure_browser(bad_generation)
+            browser, generation = await self._ensure_browser(bad_generation, playwright=p)
             if browser is None:
                 if attempt < attempts - 1:
                     logger.debug(f"Shared browser unavailable, attempt {attempt + 1} failed, retrying...")
@@ -174,8 +212,9 @@ class HeadedBrowser(RetrievalIntegration):
 
                     # domcontentloaded: return as soon as the DOM is parseable. Waiting for "load"
                     # often burns many seconds on archive/analytics assets after content is ready.
+                    response = None
                     try:
-                        await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+                        response = await page.goto(url, timeout=60000, wait_until="domcontentloaded")
                     except PlaywrightError as e:
                         if not self._is_client_redirect_abort(e):
                             raise
@@ -189,7 +228,7 @@ class HeadedBrowser(RetrievalIntegration):
                             pass
                     await self._settle_after_goto(page)
 
-                    if target := await self._extract_content(page):
+                    if target := await self._extract_content(page, response):
                         html, source = await self._html_and_source(target, page)
                         if html:
                             # Media must be resolved while the page is still open
@@ -240,7 +279,12 @@ class HeadedBrowser(RetrievalIntegration):
             HeadedBrowser._browser = None
         self.connected = False
 
-    async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
+    async def _extract_content(self, page: Page,
+                               response: Optional[Response] = None) -> Optional[ContentTarget]:
         """Change this function as needed to make it work for specific platforms.
-        Returns the page, frame, or element expected to contain the content."""
+        Returns the page, frame, or element expected to contain the content.
+
+        `response` is the response of the navigation to the target URL, which lets
+        subclasses react to the status code. It is None if the navigation was superseded
+        by a client-side redirect."""
         return page

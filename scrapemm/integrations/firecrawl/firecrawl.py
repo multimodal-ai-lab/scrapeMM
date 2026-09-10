@@ -75,6 +75,7 @@ class Firecrawl:
                      session: aiohttp.ClientSession,
                      output_format: OutputFormat = "multimodal",
                      max_attempts: int = 3,
+                     max_video_size: int | None = None,
                      **kwargs) -> ScrapedContent:
         """Scrapes the given URL with Firecrawl. Returns the scraped HTML along with
         the requested output format. Media is downloaded only for the "multimodal"
@@ -89,7 +90,7 @@ class Firecrawl:
 
         # Throw an exception for unavailable URLs which would otherwise cause Firecrawl
         # to get stuck in an infinite loop.
-        await self._ensure_availability(url, session)
+        # await self._ensure_availability(url, session)
 
         document = None
         for attempt in range(max_attempts):
@@ -128,7 +129,8 @@ class Firecrawl:
         if not html:
             raise RuntimeError("No HTML content found in Firecrawl response.")
 
-        return await to_scraped_content(html, session=session, output_format=output_format, url=url)
+        return await to_scraped_content(html, session=session, output_format=output_format,
+                                        url=url, max_video_size=max_video_size)
 
     async def _ensure_availability(self, url: str, session: aiohttp.ClientSession):
         """Probe if the URL is reachable. If an HTTP error >= 400 occurs, raise an exception."""

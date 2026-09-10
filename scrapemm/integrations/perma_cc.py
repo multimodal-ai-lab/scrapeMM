@@ -3,7 +3,7 @@ import logging
 import time
 from typing import Optional
 
-from playwright.async_api import TimeoutError, Page, Frame
+from playwright.async_api import TimeoutError, Page, Frame, Response
 
 from scrapemm.integrations.headed_browser import HeadedBrowser, ContentTarget
 
@@ -24,7 +24,8 @@ class PermaCC(HeadedBrowser):
 
     # TODO: Implement PDF support, e.g., https://perma.cc/83VA-LTH9
 
-    async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
+    async def _extract_content(self, page: Page,
+                               response: Optional[Response] = None) -> Optional[ContentTarget]:
         # Check for Cloudflare challenge (passive check)
         body_text = await page.content()
         if "Just a moment" in body_text or "Performing security verification" in body_text:
