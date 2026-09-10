@@ -34,6 +34,14 @@ This opens a snapshot of each mirror (archive.today, archive.is, archive.ph, …
 scrapeMM's own browser, one after another for all 6 different archive.today domains. Pass the check in that window each time; the
 resulting cookies are stored and re-used automatically. 
 
+**Running headless (e.g. on a server)?** The browser has to stay on that machine — the
+clearance you earn is bound to the browser *and* IP address that earned it — but its
+window can be brought to your screen. While waiting, the script prints an SSH command and
+a URL for exactly that: it tunnels Chrome's debugging port and opens the page in your
+local browser through Chrome's own DevTools frontend, where your clicks reach the remote
+page. Nothing needs to be installed on the server. Give yourself enough time to set the
+tunnel up: `python scripts/configure_archive_today.py 900`.
+
 Alternatively, paste a cookie export (`cookies.txt` or JSON, from any cookie extension)
 directly:
 ```python

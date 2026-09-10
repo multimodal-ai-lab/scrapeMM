@@ -18,7 +18,7 @@ CONCLUSIVE_MARKERS: tuple[Signature, ...] = (
 
 # Phrases typical for CAPTCHA and bot-check interstitials
 CHALLENGE_PHRASES: tuple[Signature, ...] = (
-    ("Cloudflare challenge", ("just a moment...", "attention required! | cloudflare",
+    ("Cloudflare challenge", ("attention required! | cloudflare",
                               "checking if the site connection is secure",
                               "enable javascript and cookies to continue",
                               "verify you are human", "verifying you are human")),

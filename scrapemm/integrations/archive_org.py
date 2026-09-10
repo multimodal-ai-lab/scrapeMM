@@ -3,7 +3,7 @@ import logging
 import time
 from typing import Optional
 
-from playwright.async_api import TimeoutError, Page, Frame, Error as PlaywrightError, Response
+from playwright.async_api import TimeoutError, Page, Frame, Error as PlaywrightError
 
 from scrapemm import RetrievalFailed
 from scrapemm.common.exceptions import TargetUnavailableError
@@ -142,8 +142,7 @@ class ArchiveOrg(HeadedBrowser):
         logger.debug("Archive.org primary video did not appear before timeout; continuing.")
         return fallback
 
-    async def _extract_content(self, page: Page,
-                               response: Optional[Response] = None) -> Optional[ContentTarget]:
+    async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
         if "503 Service Unavailable".lower() in (await page.content()).lower():
             raise TargetUnavailableError("Archive.org is currently unavailable (Error 503).")
 

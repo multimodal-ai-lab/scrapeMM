@@ -158,7 +158,7 @@ async def test_get_recovers_from_browser_crash_and_retries_once():
         new_page_calls += 1
         return page, generation
 
-    async def fake_extract_content(_page, _response=None):
+    async def fake_extract_content(_page):
         return _page
 
     async def fake_html_and_source(_target, _page):
@@ -236,7 +236,7 @@ async def test_transient_connect_failure_does_not_permanently_block_future_calls
 
         # Second call: browser starts fine now. Must succeed, proving the earlier failure
         # (which left self.connected as None, not False) did not permanently disable retries.
-        with patch.object(PermaCC, "_extract_content", side_effect=lambda page, response=None: page), \
+        with patch.object(PermaCC, "_extract_content", side_effect=lambda page: page), \
              patch.object(HeadedBrowser, "_html_and_source", side_effect=lambda _t, _p: ("<html>ok</html>", _t)), \
              patch("scrapemm.util.to_multimodal_sequence", side_effect=lambda html, **_kw: html), \
              patch.object(HeadedBrowser, "_new_page", side_effect=lambda _p, attempts=3: (FakePage(), 1)):
@@ -275,7 +275,7 @@ async def test_get_survives_client_side_redirect_abort():
     page = FakePage()
 
     with patch.object(HeadedBrowser, "_new_page", side_effect=lambda _p, attempts=3: (page, 1)), \
-         patch.object(PermaCC, "_extract_content", side_effect=lambda _page, _response=None: _page), \
+         patch.object(PermaCC, "_extract_content", side_effect=lambda _page: _page), \
          patch.object(HeadedBrowser, "_html_and_source", side_effect=lambda _t, _p: ("<html>ok</html>", _t)), \
          patch("scrapemm.util.to_multimodal_sequence", side_effect=lambda html, **_kw: html):
         result = await integration.get("https://perma.cc/AAAA-BBBB")

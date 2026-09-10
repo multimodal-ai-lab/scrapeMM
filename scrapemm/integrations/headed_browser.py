@@ -1,10 +1,14 @@
 import asyncio
+import json
 import logging
+import os
 import sys
+import urllib.request
 from typing import Optional, ClassVar
+from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright, Page, Frame, ElementHandle, Playwright, \
-    BrowserContext, Response, Error as PlaywrightError
+    BrowserContext, Error as PlaywrightError
 from playwright._impl._errors import TargetClosedError
 from seleniumbase import cdp_driver
 from seleniumbase.undetected.cdp_driver.browser import Browser
@@ -47,6 +51,52 @@ def _resolve_browser_executable(playwright: Optional[Playwright]) -> Optional[st
         logger.debug("Could not locate Playwright's bundled Chromium. Falling back to "
                      "the locally installed browser.", exc_info=True)
         return None
+
+
+async def remote_view_hint(page: Page) -> Optional[str]:
+    """Returns instructions for watching and clicking the given page from another
+    machine. Needed when scrapeMM runs on a headless server but a human has to interact
+    with the browser, e.g. to pass an access check. The browser has to stay where it is:
+    anti-bot clearances are bound to the browser and the IP address that earned them.
+
+    Chrome serves its own DevTools frontend on the debugging port and accepts connections
+    whose Host header is localhost, which an SSH tunnel satisfies — so nothing needs to be
+    installed on the server.
+    """
+    browser = HeadedBrowser._browser
+    if browser is None:
+        return None
+
+    try:
+        port = urlparse(browser.get_endpoint_url()).port
+        target_id = await asyncio.to_thread(_devtools_target_id, port, page.url)
+    except Exception:
+        logger.debug("Could not determine the browser's debugging endpoint.", exc_info=True)
+        return None
+
+    if not target_id:
+        return None
+
+    hint = (f"🖥 No screen on this machine? Reach the browser window from your local one:\n"
+            f"   1. Locally:  ssh -N -L 9222:127.0.0.1:{port} <user>@<this host>\n"
+            f"   2. Open   :  http://localhost:9222/devtools/inspector.html"
+            f"?ws=localhost:9222/devtools/page/{target_id}\n"
+            f"   The page renders there and your clicks reach it.")
+    if display := os.environ.get("DISPLAY"):
+        hint += (f"\n   Alternative with plain X input (needs x11vnc on this machine): "
+                 f"x11vnc -display {display} -localhost, then tunnel port 5900.")
+    return hint
+
+
+def _devtools_target_id(port: int, page_url: str) -> Optional[str]:
+    """Looks up the debugging target id of the page showing `page_url`."""
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list", timeout=5) as response:
+        targets = json.load(response)
+    for target in targets:
+        if target.get("type") == "page" and target.get("url") == page_url:
+            return target.get("id")
+    return None
+
 
 # Substrings indicating the shared browser process itself died (not just a page-level
 # issue), seen in Playwright error messages when the underlying Chrome process crashes
@@ -212,9 +262,8 @@ class HeadedBrowser(RetrievalIntegration):
 
                     # domcontentloaded: return as soon as the DOM is parseable. Waiting for "load"
                     # often burns many seconds on archive/analytics assets after content is ready.
-                    response = None
                     try:
-                        response = await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+                        await page.goto(url, timeout=60000, wait_until="domcontentloaded")
                     except PlaywrightError as e:
                         if not self._is_client_redirect_abort(e):
                             raise
@@ -228,7 +277,7 @@ class HeadedBrowser(RetrievalIntegration):
                             pass
                     await self._settle_after_goto(page)
 
-                    if target := await self._extract_content(page, response):
+                    if target := await self._extract_content(page):
                         html, source = await self._html_and_source(target, page)
                         if html:
                             # Media must be resolved while the page is still open
@@ -279,12 +328,7 @@ class HeadedBrowser(RetrievalIntegration):
             HeadedBrowser._browser = None
         self.connected = False
 
-    async def _extract_content(self, page: Page,
-                               response: Optional[Response] = None) -> Optional[ContentTarget]:
+    async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
         """Change this function as needed to make it work for specific platforms.
-        Returns the page, frame, or element expected to contain the content.
-
-        `response` is the response of the navigation to the target URL, which lets
-        subclasses react to the status code. It is None if the navigation was superseded
-        by a client-side redirect."""
+        Returns the page, frame, or element expected to contain the content."""
         return page

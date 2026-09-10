@@ -5,16 +5,15 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import ClassVar, Optional
+from typing import Optional
 from urllib.parse import urlparse
 
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError, Page, Response
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError, Page
 
 from scrapemm import CaptchaEncounteredError
-from scrapemm.common.exceptions import (RetrievalFailed, TargetUnavailableError, AccessBlockedError,
-                                        RateLimitError)
-from scrapemm.integrations.headed_browser import HeadedBrowser, ContentTarget
-from scrapemm.common.scraping_response import ScrapedContent
+from scrapemm.common.exceptions import (RetrievalFailed, TargetUnavailableError,
+                                        AccessBlockedError)
+from scrapemm.integrations.headed_browser import HeadedBrowser, ContentTarget, remote_view_hint
 from scrapemm.secrets import get_secret, set_secret
 from scrapemm.util import parse_cookies, parse_netscape_cookies
 
@@ -58,10 +57,15 @@ def _session_cookies(cookies: list[dict]) -> list[dict]:
     return [{k: v for k, v in cookie.items() if k != "expires"} for cookie in cookies]
 
 
+# Archive.today serves its access check on every snapshot URL — including ids that do not
+# exist, and regardless of the client's IP address — with status 429, while its landing
+# page stays at 200. So the status says "too many requests", but what it actually demands
+# is a session that passed the check.
 GATE_HINT = (
     "Archive.today asks to solve a captcha. Cannot access archived content. scrapeMM does "
     "not solve captchas. Run scrapemm.configure_archive_today_session() to pass the check "
-    "yourself once in scrapeMM's own browser; the resulting session is then re-used."
+    "yourself once in scrapeMM's own browser, for each mirror domain you need; the "
+    "resulting session is then re-used."
 )
 
 # The session has to be established on the kind of URL that retrieval uses: a snapshot
@@ -70,18 +74,6 @@ GATE_HINT = (
 # sense of access. Which id is used does not matter — the access check precedes the
 # lookup, so even an unknown id brings it up.
 VERIFICATION_SNAPSHOT = "Ubqsd"
-
-# Archive.today serves its access check with status 429 on every snapshot URL — including
-# ids that do not exist, and regardless of the client's IP address — while its landing page
-# stays at 200. So the status says "too many requests", but what it actually demands is a
-# session that passed the check.
-RATE_LIMIT_HINT = (
-    "Archive.today answered with HTTP 429 and its access check instead of the snapshot. It "
-    "serves that response to clients without an established session. Run "
-    "scrapemm.configure_archive_today_session() to pass the check once in scrapeMM's own "
-    "browser. If a passed check does not help either, Archive.today is throttling and only "
-    "waiting helps; raise ArchiveToday.MIN_REQUEST_INTERVAL to space out future requests."
-)
 
 
 def _mirror_to_uncovered_domains(cookies: list[dict], domains: list[str]) -> list[dict]:
@@ -118,12 +110,6 @@ class ArchiveToday(HeadedBrowser):
     The headed UC stack already works for the other archive integrations on that host.
     """
     name = "Archive.today"
-
-    # Archive.today rate-limits bursts, so requests are serialized and spaced out
-    MIN_REQUEST_INTERVAL: ClassVar[float] = 3.0
-    _request_lock: ClassVar[asyncio.Lock] = asyncio.Lock()
-    _last_request_at: ClassVar[float] = 0.0
-
     domains = [
         "archive.today",
         "archive.is",
@@ -135,6 +121,7 @@ class ArchiveToday(HeadedBrowser):
     ]
 
     _cookies: Optional[list[dict]] = None
+    _remote_hint_shown: bool = False  # The remote-view instructions are logged only once
 
     def _load_cookies(self) -> list[dict]:
         """Returns the cookies to use, preferring the user-configured ones over the
@@ -159,20 +146,6 @@ class ArchiveToday(HeadedBrowser):
             await context.add_cookies(_session_cookies(self._load_cookies()))
         except Exception:
             logger.warning("Could not add Archive.today cookies to browser context.", exc_info=True)
-
-    async def _get(self, url: str, **kwargs) -> ScrapedContent:
-        """Retrieves the snapshot, one request at a time. Archive.today answers bursts of
-        requests with its access check (HTTP 429), so requests are serialized and spaced
-        out by `MIN_REQUEST_INTERVAL`."""
-        async with ArchiveToday._request_lock:
-            pause = ArchiveToday.MIN_REQUEST_INTERVAL - (time.time() - ArchiveToday._last_request_at)
-            if pause > 0:
-                logger.debug(f"Waiting {pause:.1f}s before the next Archive.today request.")
-                await asyncio.sleep(pause)
-            try:
-                return await super()._get(url, **kwargs)
-            finally:
-                ArchiveToday._last_request_at = time.time()
 
     async def capture_session(self, timeout: float = 300,
                               domains: Optional[list[str]] = None) -> bool:
@@ -234,6 +207,9 @@ class ArchiveToday(HeadedBrowser):
 
         logger.info(f"{prefix}: 👉 please pass the access check in the browser window "
                     f"(waiting up to {timeout:.0f}s)...")
+        if not self._remote_hint_shown and (hint := await remote_view_hint(page)):
+            ArchiveToday._remote_hint_shown = True
+            logger.info(hint)
         deadline = time.time() + timeout
         while time.time() < deadline:
             await asyncio.sleep(2)
@@ -259,8 +235,7 @@ class ArchiveToday(HeadedBrowser):
         logger.info(f"Stored {len(cookies)} Archive.today cookies covering "
                     f"{len(captured)} mirror(s). They are used automatically from now on.")
 
-    async def _extract_content(self, page: Page,
-                               response: Optional[Response] = None) -> Optional[ContentTarget]:
+    async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
         try:
             body_text = (await page.locator("body").inner_text()).lower()
         except Exception:
@@ -274,10 +249,6 @@ class ArchiveToday(HeadedBrowser):
         # Detect the decoy page, see DECOY_HINT
         if "welcome to nginx" in body_text:
             raise RetrievalFailed(DECOY_HINT)
-
-        # A rate limit and the captcha gate render the same page, so check the status first
-        if response is not None and response.status == 429:
-            raise RateLimitError(RATE_LIMIT_HINT)
 
         # Detect the access check
         if _looks_like_gate(body_text):
