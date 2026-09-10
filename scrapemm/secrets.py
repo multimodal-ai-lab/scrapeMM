@@ -23,6 +23,8 @@ SECRETS = {
     "bluesky_password": "Bluesky password",
     "tiktok_client_key": "TikTok client key",
     "tiktok_client_secret": "TikTok client secret",
+    "reddit_client_id": "Reddit app client ID",
+    "reddit_client_secret": "Reddit app client secret",
     "decodo_token": "Decodo Web Scraping API basic authentication token",
     "youtube_cookie": "YouTube cookie string",
     "facebook_cookie": "Facebook cookie string",

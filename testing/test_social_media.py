@@ -8,7 +8,7 @@ from scrapemm.common import ScrapingResponse
 def assert_expectations(response: ScrapingResponse, expected: dict[str, int]):
     """Assert that the content has the expected number of images and videos."""
     assert isinstance(response, ScrapingResponse)
-    content = response.content
+    content = response.get()
     print(content or response.errors)
     assert isinstance(content, MultimodalSequence)
     for medium, count in expected.items():
@@ -130,5 +130,32 @@ async def test_x(url: str, expected: dict[str, int]):
     ("https://bsky.app/profile/acyn.bsky.social/post/3mqspt2uqxz22", dict(video=1)),
 ])
 async def test_bluesky(url: str, expected: dict[str, int]):
+    result = await retrieve(url)
+    assert_expectations(result, expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url, expected", [
+    ("https://www.threads.com/@leckerundliebe/post/DdFMDaeGPC3", dict()),  # Text only
+    ("https://www.threads.com/@thefilmforyou/post/DdElcfgE9zu", dict(video=1)),
+    ("https://www.threads.com/@moritz_koerner/post/DdEP-ZtDdg1", dict(image=1)),
+    ("https://www.threads.com/@stefan.naas/post/DdEJ6gWiIb3", dict(image=3, video=1)),  # Carousel
+])
+async def test_threads(url: str, expected: dict[str, int]):
+    result = await retrieve(url)
+    assert_expectations(result, expected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url, expected", [
+    ("https://www.reddit.com/r/KeineDummenFragen/comments/1wce00w/was_bringt_der_notfallalarm/", dict()),
+    ("https://www.reddit.com/r/mildlyinfuriating/comments/1wc3gkx/furniture_shopping_in_2026/", dict(image=2)),
+    ("https://www.reddit.com/r/interestingasfuck/comments/1wc1pwf/this_bus_driver_joined_the_passengers_after_the/",
+     dict(video=1)),
+    # Gallery containing 5 photos and one GIF (retrieved as video)
+    ("https://www.reddit.com/r/TopCharacterTropes/comments/1wbxea7/the_moral_dilemma_that_wasnt/",
+     dict(image=5, video=1)),
+])
+async def test_reddit(url: str, expected: dict[str, int]):
     result = await retrieve(url)
     assert_expectations(result, expected)

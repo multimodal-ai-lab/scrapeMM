@@ -16,6 +16,7 @@ from scrapemm.common.exceptions import AccessBlockedError, TargetUnavailableErro
 from scrapemm.download import download_image
 from scrapemm.download.common import HEADERS
 from scrapemm.common.retrieval_integration import RetrievalIntegration
+from scrapemm.common.scraping_response import ScrapedContent
 from scrapemm.integrations.ytdlp import get_content_with_ytdlp
 from scrapemm.secrets import get_secret
 from scrapemm.util import parse_netscape_cookies, postprocess_markdown
@@ -90,7 +91,7 @@ class Facebook(RetrievalIntegration):
         logger.info("✅ Facebook integration ready (yt-dlp only mode).")
         self.connected = True
 
-    async def _get(self, url: str, **kwargs) -> MultimodalSequence:
+    async def _get(self, url: str, **kwargs) -> ScrapedContent:
         """Retrieves content from a Facebook post URL."""
         url = self._normalize_url(url)
 
@@ -120,25 +121,25 @@ class Facebook(RetrievalIntegration):
         content = []
         try:
             video = await self._get_video(url, **kwargs)
-            content.append(video)
+            content.append(video.multimodal)
         except Exception:
             pass
 
         try:
             image = await self._get_photo(url, **kwargs)
-            content.append(image)
+            content.append(image.multimodal)
         except Exception:
             pass
 
         try:
             from scrapemm.integrations.decodo import decodo
-            text = await decodo.scrape(url, session=kwargs.get("session"), format="markdown", include_media=False)
-            content.append(text)
+            scraped = await decodo.scrape(url, session=kwargs.get("session"), output_format="markdown")
+            content.append(scraped.markdown)
         except Exception:
             pass
 
         if content:
-            return MultimodalSequence(content)
+            return ScrapedContent(multimodal=MultimodalSequence(content))
 
         try:
             return await self._get_user_profile(url, **kwargs)
@@ -147,22 +148,23 @@ class Facebook(RetrievalIntegration):
 
         raise RetrievalFailed("Unable to retrieve content from Facebook URL.")
 
-    async def _get_video(self, url: str, **kwargs) -> MultimodalSequence:
+    async def _get_video(self, url: str, **kwargs) -> ScrapedContent:
         """Retrieves content from a Facebook video URL."""
         if self.api_available:
             raise NotImplementedError(
                 "Facebook video retrieval through API not yet supported."
             )
         else:
-            return await get_content_with_ytdlp(
+            sequence = await get_content_with_ytdlp(
                 url,
                 platform="Facebook",
                 # cookiefile=self.cookie_file.as_posix(),
                 impersonate=ImpersonateTarget("chrome", "146"),
                 **kwargs,
             )
+            return ScrapedContent(multimodal=sequence)
 
-    async def _get_photo(self, url: str, **kwargs) -> MultimodalSequence:
+    async def _get_photo(self, url: str, **kwargs) -> ScrapedContent:
         """Retrieves content from a Facebook photo URL using Playwright with session cookies."""
         cookies = parse_netscape_cookies(self.cookie_file)
 
@@ -170,9 +172,10 @@ class Facebook(RetrievalIntegration):
             photos = await self._get_photos_from_post_permalink(
                 url, cookies, **kwargs
             )
-            return MultimodalSequence(photos)
+            return ScrapedContent(multimodal=MultimodalSequence(photos))
 
-        return await self._get_photo_from_regular_post(url, cookies)
+        sequence = await self._get_photo_from_regular_post(url, cookies)
+        return ScrapedContent(multimodal=sequence)
 
     async def _get_photo_from_regular_post(
             self, url, cookies: list[dict[str, str]]
@@ -267,7 +270,7 @@ class Facebook(RetrievalIntegration):
         hrefs = re.findall(FB_PHOTO_HREF_REGEX, html)
         return hrefs
 
-    async def _get_user_profile(self, url: str, **kwargs) -> MultimodalSequence:
+    async def _get_user_profile(self, url: str, **kwargs) -> ScrapedContent:
         """Retrieves content from a Facebook user profile URL."""
         raise NotImplementedError("No method available to retrieve Facebook profiles.")
 

@@ -5,6 +5,7 @@ from ezmm import MultimodalSequence
 
 from scrapemm.integrations.ytdlp import get_content_with_ytdlp
 from scrapemm.common.retrieval_integration import RetrievalIntegration
+from scrapemm.common.scraping_response import ScrapedContent
 from scrapemm.secrets import get_secret
 from ..common import CONFIG_DIR
 
@@ -34,11 +35,12 @@ class YouTube(RetrievalIntegration):
         else:
             logger.warning(f"⚠️ Missing YouTube cookie. Won't be able to download videos, only thumbnails and metadata.")
 
-    async def _get(self, url: str, **kwargs) -> MultimodalSequence:
+    async def _get(self, url: str, **kwargs) -> ScrapedContent:
         """Downloads YouTube video or short using yt-dlp."""
         cookie = get_secret("youtube_cookie")
         cookie_file_path = self.cookie_file.as_posix() if cookie else None
-        return await get_content_with_ytdlp(url,
-                                            platform="YouTube",
-                                            cookiefile=cookie_file_path,
-                                            **kwargs)
+        sequence = await get_content_with_ytdlp(url,
+                                                platform="YouTube",
+                                                cookiefile=cookie_file_path,
+                                                **kwargs)
+        return ScrapedContent(multimodal=sequence)

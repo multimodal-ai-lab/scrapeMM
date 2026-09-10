@@ -24,6 +24,11 @@ class AccessBlockedError(Exception):
     access for specific user groups or regions. Typical case of a 403 error."""
 
 
+class CaptchaEncounteredError(Exception):
+    """The target could be reached, but the content is protected by a CAPTCHA
+    that needs to be solved before it can be accessed."""
+
+
 class TargetUnavailableError(Exception):
     """The target cannot be reached at all, e.g., because the DNS
     did not resolve or the target's server is down. Typical case of

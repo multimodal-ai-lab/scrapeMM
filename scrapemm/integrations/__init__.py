@@ -1,7 +1,4 @@
-from typing import Optional
-
-from ezmm import MultimodalSequence
-
+from scrapemm.common.scraping_response import ScrapedContent
 from scrapemm.util import get_domain
 from .archive_org import ArchiveOrg
 from .bluesky import Bluesky
@@ -9,7 +6,9 @@ from .decodo import Decodo, decodo
 from .fb import Facebook
 from .firecrawl import Firecrawl, fire
 from .instagram import Instagram
+from .reddit import Reddit
 from .telegram import Telegram
+from .threads import Threads
 from .tiktok import TikTok
 from .x import X
 from .youtube import YouTube
@@ -26,6 +25,8 @@ RETRIEVAL_INTEGRATIONS = [
     TikTok(),
     Instagram(),
     Facebook(),
+    Threads(),
+    Reddit(),
     YouTube(),
     PermaCC(),
     ArchiveToday(),
@@ -46,10 +47,9 @@ NAME_TO_INTEGRATION = {integration.name.lower(): integration for integration in 
 INTEGRATION_NAMES = [integration.name for integration in RETRIEVAL_INTEGRATIONS]
 
 
-async def retrieve_via_integration(url: str, integration_name: str, **kwargs) -> Optional[MultimodalSequence]:
+async def retrieve_via_integration(url: str, integration_name: str, **kwargs) -> ScrapedContent:
     integration = NAME_TO_INTEGRATION[integration_name.lower()]
-    if integration.connected or integration.connected is None:
-        return await integration.get(url, **kwargs)
+    return await integration.get(url, **kwargs)
 
 
 def get_integrations_for_url(url: str) -> list[str]:

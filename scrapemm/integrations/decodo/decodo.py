@@ -3,11 +3,11 @@ import logging
 
 import aiohttp
 from aiohttp import ClientConnectorError
-from ezmm import MultimodalSequence
 
 from scrapemm import RateLimitError, RetrievalFailed
+from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
 from scrapemm.secrets import get_secret
-from scrapemm.util import get_domain, to_multimodal_sequence, html2md
+from scrapemm.util import get_domain, to_scraped_content
 
 logger = logging.getLogger("scrapeMM")
 
@@ -43,24 +43,27 @@ class Decodo:
     async def scrape(
             self, url: str,
             session: aiohttp.ClientSession,
-            format: str,
+            output_format: OutputFormat = "multimodal",
             enable_js: bool = True,
             timeout: int = 30,
             max_retries: int = 5,
-            include_media: bool = True,
-    ) -> MultimodalSequence | str:
+    ) -> ScrapedContent:
         """Downloads the contents of the specified webpage using Decodo's API.
 
         Args:
             url: The URL to scrape
             session: The aiohttp ClientSession to use
+            output_format: The format the content is needed in (default: "multimodal").
+                Media is downloaded only for the "multimodal" format.
             enable_js: Whether to enable JavaScript rendering (default: True)
             timeout: Request timeout in seconds (default: 30)
             max_retries: Maximum number of retries for failed requests (default: 5)
-            include_media: Whether to download and embed images/videos (default: True)
 
         Returns:
-            MultimodalSequence containing the scraped content, or None if scraping failed
+            ScrapedContent holding the scraped HTML along with the requested output format
+
+        Raises:
+            An exception if the scraping failed
         """
         if not self._has_token():
             self._load_token()
@@ -76,12 +79,7 @@ class Decodo:
         html = await self._call_decodo(url, session, enable_js, timeout=timeout, max_retries=max_retries,
                                        use_premium_proxy=use_premium_proxy)
 
-        if format == "html":
-            return html
-        elif not include_media:
-            return html2md(html)
-        else:
-            return await to_multimodal_sequence(html, session=session, url=url)
+        return await to_scraped_content(html, session=session, output_format=output_format, url=url)
 
     async def _call_decodo(
             self, url: str,

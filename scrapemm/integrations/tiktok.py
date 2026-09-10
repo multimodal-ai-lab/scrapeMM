@@ -15,7 +15,8 @@ from scrapemm.common.retrieval_integration import RetrievalIntegration
 from scrapemm.integrations import decodo
 from scrapemm.integrations.ytdlp import download_video_with_ytdlp
 from scrapemm.secrets import get_secret
-from scrapemm.util import to_multimodal_sequence, preprocess_html
+from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
+from scrapemm.util import to_scraped_content, preprocess_html
 
 logger = logging.getLogger("scrapeMM")
 
@@ -60,7 +61,7 @@ class TikTok(RetrievalIntegration):
         logger.info(f"✅ TikTok integration ready ({mode} mode).")
         self.connected = True
 
-    async def _get(self, url: str, **kwargs) -> MultimodalSequence:
+    async def _get(self, url: str, **kwargs) -> ScrapedContent:
         session = kwargs['session']
         max_video_size = kwargs.get('max_video_size')
 
@@ -69,7 +70,7 @@ class TikTok(RetrievalIntegration):
             if self._is_video_url(url):
                 return await self._get_video(url, session, max_video_size)
             elif self._is_photo_url(url):
-                return await self._get_photo(url, session)
+                return await self._get_photo(url, session, kwargs.get('output_format', 'multimodal'))
             else:
                 return await self._get_user_profile(url, session)
         except Exception as e:
@@ -81,7 +82,7 @@ class TikTok(RetrievalIntegration):
                 raise e
 
     async def _get_video(self, url: str, session: aiohttp.ClientSession,
-                         max_video_size=None) -> MultimodalSequence:
+                         max_video_size=None) -> ScrapedContent:
         """Retrieves video using TikTok Research API and yt-dlp."""
         video_id = self._extract_video_id(url)
         if not video_id:
@@ -120,15 +121,17 @@ class TikTok(RetrievalIntegration):
             # Download the video using yt-dlp
             video, thumbnail, metadata = await download_video_with_ytdlp(url, session, max_video_size=max_video_size)
 
-            return await self._create_video_sequence_from_api(video_data or metadata, video, thumbnail)
+            sequence = await self._create_video_sequence_from_api(video_data or metadata, video, thumbnail)
+            return ScrapedContent(multimodal=sequence)
 
         except Exception as e:
             raise RuntimeError(f"Error retrieving TikTok video: {e}")
 
-    async def _get_photo(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence:
-        html = await decodo.scrape(url, session, format="html")
-        html = self._prepare_photo_html(html)
-        return await to_multimodal_sequence(html, session=session, url=url)
+    async def _get_photo(self, url: str, session: aiohttp.ClientSession,
+                         output_format: OutputFormat = "multimodal") -> ScrapedContent:
+        content = await decodo.scrape(url, session, output_format="html")
+        html = self._prepare_photo_html(content.html)
+        return await to_scraped_content(html, session=session, output_format=output_format, url=url)
 
     @staticmethod
     def _prepare_photo_html(html: str) -> str:
@@ -159,7 +162,7 @@ class TikTok(RetrievalIntegration):
 
         return str(soup)
 
-    async def _get_user_profile(self, url: str, session: aiohttp.ClientSession) -> MultimodalSequence:
+    async def _get_user_profile(self, url: str, session: aiohttp.ClientSession) -> ScrapedContent:
         """Retrieves profile using TikTok Research API."""
         username = self._extract_username(url)
         if not username:
@@ -174,7 +177,8 @@ class TikTok(RetrievalIntegration):
         if not user_info:
             raise TargetUnavailableError(f"TikTok user @{username} not available.")
 
-        return await self._create_profile_sequence_from_api(username, user_info, url, session)
+        sequence = await self._create_profile_sequence_from_api(username, user_info, url, session)
+        return ScrapedContent(multimodal=sequence)
 
     async def _create_video_sequence_from_api(self, metadata: dict, video: Video | None,
                                               thumbnail: Image | None) -> MultimodalSequence:

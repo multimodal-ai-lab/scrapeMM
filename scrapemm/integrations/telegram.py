@@ -10,6 +10,7 @@ from telethon.errors import FloodWaitError
 from telethon.tl.types import Channel, User
 
 from scrapemm.common.exceptions import TargetUnavailableError, RateLimitError
+from scrapemm.common.scraping_response import ScrapedContent
 from scrapemm.secrets import get_secret
 from scrapemm.common.retrieval_integration import RetrievalIntegration
 
@@ -43,7 +44,7 @@ class Telegram(RetrievalIntegration):
             self.connected = False
             logger.warning("❌ Telegram integration not configured: Missing API keys.")
 
-    async def _get(self, url: str, **kwargs) -> MultimodalSequence:
+    async def _get(self, url: str, **kwargs) -> ScrapedContent:
         """Retrieves content from a Telegram post URL."""
         # Parse the URL to get channel/group name and post ID
         parsed = urlparse(url)
@@ -105,7 +106,7 @@ Forwards: {message.forwards}{reactions_text}
 {' '.join(m.reference for m in media)}
 {message.text}"""
 
-        return MultimodalSequence(text)
+        return ScrapedContent(multimodal=MultimodalSequence(text))
 
     async def _get_media_from_message(self, chat, original_post, max_amp=10, max_video_size=None) -> list[Item]:
         """

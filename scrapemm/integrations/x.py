@@ -12,6 +12,7 @@ from tweepy.asynchronous import AsyncClient
 import scrapemm.common
 from scrapemm import RetrievalFailed
 from scrapemm.common.exceptions import RateLimitError, TargetUnavailableError, QuotaExceededError
+from scrapemm.common.scraping_response import ScrapedContent
 from scrapemm.download import download_image, download_video
 from scrapemm.common.retrieval_integration import RetrievalIntegration
 from scrapemm.secrets import get_secret
@@ -52,7 +53,7 @@ class X(RetrievalIntegration):
             self.connected = False
             logger.warning("❌ X (Twitter) integration not configured: Missing bearer token.")
 
-    async def _get(self, url: str, **kwargs) -> MultimodalSequence:
+    async def _get(self, url: str, **kwargs) -> ScrapedContent:
         session = kwargs["session"]
         max_video_size = kwargs.get("max_video_size")
         url = await self._normalize(url, session)
@@ -62,18 +63,18 @@ class X(RetrievalIntegration):
             raise ValueError("X search URLs are not supported by the X integration.")
 
         tweet_id, media_number = extract_tweet_id_from_url(url)
+        sequence = None
         try:
             if tweet_id:
-                tweet_content = await self._get_tweet(tweet_id, session, max_video_size)
+                sequence = await self._get_tweet(tweet_id, session, max_video_size)
                 if media_number is not None:
-                    media = list(tweet_content.unique_items())
-                    return MultimodalSequence(media[media_number - 1])
-                else:
-                    return tweet_content
+                    # The URL points at one specific medium of the tweet
+                    media = list(sequence.unique_items())
+                    sequence = MultimodalSequence(media[media_number - 1])
             else:
                 username = extract_username_from_url(url)
                 if username:
-                    return await self._get_user(username, session)
+                    sequence = await self._get_user(username, session)
         except TooManyRequests:
             raise RateLimitError("X API rate limit reached.")
         except HTTPException as e:
@@ -87,7 +88,10 @@ class X(RetrievalIntegration):
             logger.debug(f"Error retrieving X content from {url}: {e}", exc_info=True)
             raise RuntimeError(f"Error retrieving X content: {e}")
 
-        raise RetrievalFailed(f"Could not retrieve content from X.")
+        if sequence is None:
+            raise RetrievalFailed(f"Could not retrieve content from X.")
+
+        return ScrapedContent(multimodal=sequence)
 
     async def _normalize(self, url: str, session: aiohttp.ClientSession) -> str:
         """Turns URLs of the form https://publish.twitter.com/?query=...

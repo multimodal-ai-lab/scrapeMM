@@ -2,15 +2,16 @@ import asyncio
 
 import aiohttp
 
-from scrapemm.download import download_medium
+from scrapemm.download import download_medium, download_image
 from scrapemm.download.common import HEADERS
 
 
 async def download(url):
     async with aiohttp.ClientSession(headers=HEADERS) as session:
-        return await download_medium(url, session)
+        return await download_image(url, session)
 
 
 if __name__ == "__main__":
-    asyncio.run(download(
-        "https://media.cnn.com/api/v1/images/stellar/prod/ap22087057359494.jpg?c=16x9&q=h_653,w_1160,c_fill/f_webp"))
+    result = asyncio.run(download(
+        "https://p16-common-sign.tiktokcdn-us.com/tos-useast2a-avt-0068-euttp/7ca6a9e450cc618d8ca90a87e079ad23~tplv-tiktokx-cropcenter:168:168.jpeg?dr=9638&refresh_token=28a5c587&x-expires=1784646000&x-signature=00hQTVGshzNQVVd7V%2Bceb7v9qs8%3D&t=4d5b0474&ps=13740610&shp=a5d48078&shcp=7996dd0b&idc=useast5"))
+    print(result)

@@ -7,7 +7,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional, Awaitable, Iterable, Union
+from typing import Optional, Awaitable, Iterable, Union, TYPE_CHECKING
 from urllib.parse import unquote
 
 import aiohttp
@@ -25,6 +25,9 @@ from scrapemm.download.util import (
     looks_like_vector_file_url,
 )
 from scrapemm.download.videos import video_from_binary, download_hls_video, is_hls
+
+if TYPE_CHECKING:
+    from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
 
 logger = logging.getLogger("scrapeMM")
 
@@ -514,6 +517,30 @@ def decompose_data_uri(href: str) -> Optional[tuple[str, str]]:
         return match.group(1), match.group(2)
     else:
         return None
+
+
+async def to_scraped_content(
+        html: str,
+        session: Union[aiohttp.ClientSession, "APIRequestContext"],
+        output_format: "OutputFormat" = "multimodal",
+        **kwargs
+) -> "ScrapedContent":
+    """Turns the scraped HTML into a ScrapedContent object, converting it format by
+    format until the requested `output_format` is reached. That is, no work is done
+    beyond what the caller asked for: Markdown is converted only if more than the raw
+    HTML is needed and media is downloaded only for the 'multimodal' format."""
+    from scrapemm.common.scraping_response import ScrapedContent
+
+    content = ScrapedContent(html=html)
+    if output_format == "html":
+        return content
+
+    content.markdown = html2md(html)
+    if output_format == "markdown":
+        return content
+
+    content.multimodal = await to_multimodal_sequence(html, session=session, **kwargs)
+    return content
 
 
 async def to_multimodal_sequence(

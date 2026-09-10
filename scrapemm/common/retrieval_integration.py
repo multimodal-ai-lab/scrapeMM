@@ -1,9 +1,7 @@
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
 
-from ezmm import MultimodalSequence
-
+from scrapemm.common.scraping_response import ScrapedContent
 from scrapemm.util import get_domain
 
 logger = logging.getLogger("scrapeMM")
@@ -23,7 +21,7 @@ class RetrievalIntegration(ABC):
         Must set self.connect = True if connection was successful, else False."""
         raise NotImplementedError
 
-    async def get(self, url: str, **kwargs) -> MultimodalSequence:
+    async def get(self, url: str, **kwargs) -> ScrapedContent:
         """Executes the retrieval routine. Ensures connectivity before invoking the
          retrieval. Raises an exception if anything goes wrong during retrieval."""
         assert get_domain(url) in self.domains, f"Invalid domain {get_domain(url)} for integration {self.name}."
@@ -38,6 +36,9 @@ class RetrievalIntegration(ABC):
         return await self._get(url, **kwargs)
 
     @abstractmethod
-    async def _get(self, url: str, **kwargs) -> MultimodalSequence:
-        """Retrieves the contents present at the given URL."""
+    async def _get(self, url: str, **kwargs) -> ScrapedContent:
+        """Retrieves the contents present at the given URL. Integrations having access
+        to the source HTML construct the ScrapedContent with
+        `scrapemm.util.to_scraped_content()`, all others (e.g. API-based integrations)
+        wrap their MultimodalSequence via `ScrapedContent(multimodal=...)`."""
         raise NotImplementedError

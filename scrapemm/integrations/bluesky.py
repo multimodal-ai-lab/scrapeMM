@@ -6,6 +6,7 @@ from ezmm import MultimodalSequence
 
 from scrapemm.common.exceptions import TargetUnavailableError
 from scrapemm.common.retrieval_integration import RetrievalIntegration
+from scrapemm.common.scraping_response import ScrapedContent
 from scrapemm.download import download_video, download_image
 from scrapemm.secrets import get_secret
 
@@ -29,13 +30,14 @@ class Bluesky(RetrievalIntegration):
         self.client = AsyncClient()
         await self._authenticate()
 
-    async def _get(self, url: str, **kwargs) -> MultimodalSequence:
+    async def _get(self, url: str, **kwargs) -> ScrapedContent:
         session = kwargs["session"]
         max_video_size = kwargs.get("max_video_size")
         if "post" in url:
-            return await self._retrieve_post(url, session, max_video_size)
+            sequence = await self._retrieve_post(url, session, max_video_size)
         else:
-            return await self._retrieve_profile(url, session)
+            sequence = await self._retrieve_profile(url, session)
+        return ScrapedContent(multimodal=sequence)
 
     async def _retrieve_post(
             self,

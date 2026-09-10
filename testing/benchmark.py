@@ -18,7 +18,7 @@ async def main():
     total_time = time.time() - total_start
     
     # Print summary
-    successful = sum(1 for r in results if r.successful)
+    successful = sum(1 for r in results if r.success)
     print(f"\n{'=' * 80}")
     print(f"Total time:       {total_time:.2f}s")
     print(f"URLs retrieved:   {successful}/{len(results)}")
@@ -40,7 +40,7 @@ async def main():
     # Print per-URL results sorted by retrieval time (desc)
     sorted_results = sorted(results, key=lambda r: r.retrieval_time, reverse=True)
     for response in sorted_results:
-        status = "OK" if response.successful else "FAIL"
+        status = "OK" if response.success else "FAIL"
         errors_str = ""
         if response.errors:
             errors_str = " | Errors: " + "; ".join(f"{k}: {v}" for k, v in response.errors.items())

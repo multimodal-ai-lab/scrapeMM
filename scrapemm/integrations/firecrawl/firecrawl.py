@@ -4,14 +4,14 @@ from pathlib import Path
 
 import aiohttp
 from aiohttp import ClientResponseError, ClientConnectorError
-from ezmm import MultimodalSequence
 from requests import ConnectionError, ReadTimeout
 from requests.exceptions import RetryError
 
 from scrapemm.common import get_config_var, update_config
 from scrapemm.common.exceptions import UnsupportedDomainError, TargetUnavailableError, AccessBlockedError
+from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
 from scrapemm.download.common import HEADERS
-from scrapemm.util import read_urls_from_file, get_domain, to_multimodal_sequence, html2md
+from scrapemm.util import read_urls_from_file, get_domain, to_scraped_content
 
 logger = logging.getLogger("scrapeMM")
 
@@ -73,10 +73,12 @@ class Firecrawl:
     async def scrape(self,
                      url: str,
                      session: aiohttp.ClientSession,
-                     format: str,
+                     output_format: OutputFormat = "multimodal",
                      max_attempts: int = 3,
-                     include_media: bool = True,
-                     **kwargs) -> MultimodalSequence | str:
+                     **kwargs) -> ScrapedContent:
+        """Scrapes the given URL with Firecrawl. Returns the scraped HTML along with
+        the requested output format. Media is downloaded only for the "multimodal"
+        format. Raises an exception if the scraping failed."""
 
         domain = get_domain(url)
         if domain in NO_BOT_DOMAINS:
@@ -126,12 +128,7 @@ class Firecrawl:
         if not html:
             raise RuntimeError("No HTML content found in Firecrawl response.")
 
-        if format == "html":
-            return html
-        elif not include_media:
-            return html2md(html)
-        else:
-            return await to_multimodal_sequence(html, session=session, url=url)
+        return await to_scraped_content(html, session=session, output_format=output_format, url=url)
 
     async def _ensure_availability(self, url: str, session: aiohttp.ClientSession):
         """Probe if the URL is reachable. If an HTTP error >= 400 occurs, raise an exception."""

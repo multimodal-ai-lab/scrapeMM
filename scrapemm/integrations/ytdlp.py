@@ -52,6 +52,10 @@ async def download_video_with_ytdlp(
     """Downloads a video and (if not available or exceeds max. duration) its thumbnail, and the metadata using yt-dlp.
     @param max_video_size: Maximum video size in bytes. If the video is larger, the download will be aborted."""
     try:
+        # Remove scrapeMM-specific kwargs which yt-dlp does not understand
+        for key in ("format", "output_format", "include_media"):
+            kwargs.pop(key, None)
+
         with tempfile.NamedTemporaryFile() as temp_file:
             temp_path = temp_file.name
 

@@ -1,28 +1,39 @@
+import io
 import logging
 import os
 import sys
-from pathlib import Path
 
 import yaml
-from platformdirs import user_config_dir
 
-from .exceptions import RateLimitError, RetrievalFailed
-from .scraping_response import ScrapingResponse
-
-APP_NAME = "scrapeMM"
-
-# Set up config directory
-CONFIG_DIR = Path(user_config_dir(APP_NAME))
-os.makedirs(CONFIG_DIR, exist_ok=True)
-CONFIG_PATH = CONFIG_DIR / "config.yaml"
+from .blacklist import (blacklist, blacklist_domain, unblacklist_domain,
+                        get_blacklisted_domains)
+from .cache import (cache, cache_key, set_cache_ttl, clear_cache, DEFAULT_CACHE_TTL)
+from .captcha import detect_captcha
+from .exceptions import RateLimitError, RetrievalFailed, CaptchaEncounteredError
+from .paths import APP_NAME, CONFIG_DIR, CONFIG_PATH, BLACKLIST_PATH
+from .scraping_response import (ScrapingResponse, ScrapedContent,
+                                OutputFormat, OUTPUT_FORMATS)
 
 # Set up logger
 logger = logging.getLogger(APP_NAME)
 logger.setLevel(logging.DEBUG)
 
+
+def _utf8_stdout():
+    """Returns stdout as a UTF-8 stream. Needed because log messages contain emojis
+    which consoles with another default encoding (e.g. cp1252 on Windows) cannot print."""
+    if (getattr(sys.stdout, "encoding", None) or "").lower().replace("-", "") == "utf8":
+        return sys.stdout
+    try:
+        return io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace",
+                                line_buffering=True)
+    except (AttributeError, ValueError):
+        return sys.stdout  # stdout has no underlying binary buffer, e.g. when captured
+
+
 # Only add handler if none exists (avoid duplicate logs on rerun)
 if not logger.hasHandlers():
-    handler = logging.StreamHandler(sys.stdout)
+    handler = logging.StreamHandler(_utf8_stdout())
     formatter = logging.Formatter('[%(levelname)s]: %(message)s')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
@@ -42,10 +53,16 @@ def load_config() -> dict:
 def update_config(**kwargs):
     _config.update(kwargs)
     yaml.dump(_config, open(CONFIG_PATH, "w"))
+    _apply_config()
 
 
 def get_config_var(name: str, default=None) -> str:
     return _config.get(name, default)
+
+
+def _apply_config():
+    """Applies the config values that configure runtime behavior."""
+    set_cache_ttl(get_config_var("cache_ttl", DEFAULT_CACHE_TTL))
 
 
 def set_wait_on_rate_limit(wait: bool):
@@ -57,3 +74,4 @@ def set_wait_on_rate_limit(wait: bool):
 
 # Load config
 _config = load_config()
+_apply_config()
