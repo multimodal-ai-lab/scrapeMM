@@ -23,9 +23,30 @@ logger = logging.getLogger("scrapeMM")
 
 ContentTarget = Page | Frame | ElementHandle
 
-# Flags passed to the shared browser. Archives frequently serve snapshots with expired or
-# mismatching certificates, which must not stop the retrieval.
-BROWSER_ARGS = ["--ignore-certificate-errors"]
+# Local port through which the browser window is reached when scrapeMM runs on a machine
+# without a screen, see `remote_view_hint()`. Override with
+# `update_config(devtools_local_port=...)` if that port is taken on your machine.
+DEFAULT_DEVTOOLS_LOCAL_PORT = 9222
+
+
+def _devtools_local_port() -> int:
+    return int(get_config_var("devtools_local_port") or DEFAULT_DEVTOOLS_LOCAL_PORT)
+
+
+def _browser_args() -> list[str]:
+    """Flags for the shared browser.
+
+    Archives frequently serve snapshots with expired or mismatching certificates, which
+    must not stop the retrieval. The origin allowlist lets the DevTools frontend attach
+    through an SSH tunnel: since M111, Chrome answers DevTools WebSocket handshakes whose
+    Origin is not allowlisted with 403, which the frontend reports as "WebSocket
+    disconnected". Automation is unaffected (it sends no Origin at all), so only the
+    single origin the frontend is served from is allowed, not every origin.
+    """
+    return [
+        "--ignore-certificate-errors",
+        f"--remote-allow-origins=http://localhost:{_devtools_local_port()}",
+    ]
 
 
 def _resolve_browser_executable(playwright: Optional[Playwright]) -> Optional[str]:
@@ -77,11 +98,13 @@ async def remote_view_hint(page: Page) -> Optional[str]:
     if not target_id:
         return None
 
+    local_port = _devtools_local_port()
     hint = (f"🖥 No screen on this machine? Reach the browser window from your local one:\n"
-            f"   1. Locally:  ssh -N -L 9222:127.0.0.1:{port} <user>@<this host>\n"
-            f"   2. Open   :  http://localhost:9222/devtools/inspector.html"
-            f"?ws=localhost:9222/devtools/page/{target_id}\n"
-            f"   The page renders there and your clicks reach it.")
+            f"   1. Locally:  ssh -N -L {local_port}:127.0.0.1:{port} <user>@<this host>\n"
+            f"   2. Open   :  http://localhost:{local_port}/devtools/inspector.html"
+            f"?ws=localhost:{local_port}/devtools/page/{target_id}\n"
+            f"   The page renders there and your clicks reach it. Keep the local port: the "
+            f"browser only accepts the DevTools connection from that exact origin.")
     if display := os.environ.get("DISPLAY"):
         hint += (f"\n   Alternative with plain X input (needs x11vnc on this machine): "
                  f"x11vnc -display {display} -localhost, then tunnel port 5900.")
@@ -183,7 +206,7 @@ class HeadedBrowser(RetrievalIntegration):
                 # Note: `cdp_driver.start_async()` has no 'chromium_arg' parameter. Passing
                 # browser flags any other way makes them end up in **kwargs, where they are
                 # silently dropped.
-                browser_args=BROWSER_ARGS,
+                browser_args=_browser_args(),
                 browser_executable_path=executable_path,
             )
             if HeadedBrowser._browser:
