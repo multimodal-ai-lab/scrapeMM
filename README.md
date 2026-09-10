@@ -130,6 +130,11 @@ The `MultimodalSequence` is a sequence of Markdown-formatted text and media prov
 
 Web scraping is done with [Firecrawl](https://github.com/mendableai/firecrawl) and [Decodo](https://decodo.com/).
 
+Media is collected from `<img>` and `<video>` tags, from CSS background images, and from
+embedded players of the common video platforms (an `<iframe>` pointing at YouTube, Vimeo,
+Dailymotion, …), which are downloaded with yt-dlp. `max_video_size` caps those downloads
+just like it caps the ones of the platform integrations.
+
 ## Supported Platforms
 ### Social Media
 - ✅ X/Twitter

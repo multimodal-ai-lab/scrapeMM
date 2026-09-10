@@ -326,6 +326,7 @@ async def resolve_media(
         session: Union[aiohttp.ClientSession, "APIRequestContext"],
         url: str | None = None,
         source_element: Union[Frame, Page, None] = None,
+        max_video_size: Optional[int] = None,
         **kwargs
 ) -> MultimodalSequence:
     """Downloads all media that are contained in the provided HTML.
@@ -358,7 +359,8 @@ async def resolve_media(
     for element, uri in zip(media_elements, media_uris):
         if uri and is_url(uri) and uri not in unique_urls:
             if element.name == "iframe":
-                tasks.append(download_embedded_video(uri, session=session, **kwargs))
+                tasks.append(download_embedded_video(uri, session=session,
+                                                     max_video_size=max_video_size))
             elif element.name in ["video", "source"]:
                 if source_element:
                     tasks.append(fetch_video_via_page(source_element, uri))

@@ -31,3 +31,21 @@ def looks_like_hls_url(url: str) -> bool:
 
 def looks_like_video_file_url(url: str) -> bool:
     return urlparse(url).path.lower().endswith(VIDEO_FILE_EXTENSIONS)
+
+
+# Hosts whose iframes embed a video that yt-dlp can download. Deliberately a short
+# allowlist of actual video platforms: pages carry plenty of other iframes (ads, comment
+# widgets, maps), and running yt-dlp on each of them would cost a lot of time for nothing.
+VIDEO_EMBED_HOSTS = (
+    "youtube.com/embed/",
+    "youtube-nocookie.com/embed/",
+    "youtu.be/",
+    "player.vimeo.com/video/",
+    "dailymotion.com/embed/",
+    "facebook.com/plugins/video",
+)
+
+
+def looks_like_video_embed_url(url: str) -> bool:
+    """True if the URL embeds a video player of a known video platform."""
+    return any(host in url.lower() for host in VIDEO_EMBED_HOSTS)

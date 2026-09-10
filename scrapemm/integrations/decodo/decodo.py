@@ -47,6 +47,7 @@ class Decodo:
             enable_js: bool = True,
             timeout: int = 30,
             max_retries: int = 5,
+            max_video_size: int | None = None,
     ) -> ScrapedContent:
         """Downloads the contents of the specified webpage using Decodo's API.
 
@@ -58,6 +59,7 @@ class Decodo:
             enable_js: Whether to enable JavaScript rendering (default: True)
             timeout: Request timeout in seconds (default: 30)
             max_retries: Maximum number of retries for failed requests (default: 5)
+            max_video_size: Maximum size of videos embedded in the page, in bytes
 
         Returns:
             ScrapedContent holding the scraped HTML along with the requested output format
@@ -79,7 +81,8 @@ class Decodo:
         html = await self._call_decodo(url, session, enable_js, timeout=timeout, max_retries=max_retries,
                                        use_premium_proxy=use_premium_proxy)
 
-        return await to_scraped_content(html, session=session, output_format=output_format, url=url)
+        return await to_scraped_content(html, session=session, output_format=output_format,
+                                        url=url, max_video_size=max_video_size)
 
     async def _call_decodo(
             self, url: str,
