@@ -44,7 +44,7 @@ async def test_youtube(url):
     ("https://www.instagram.com/p/DMuOe6th94D", dict(video=1)),  # Yes, this is a video, marked as misinfo
     ("https://www.instagram.com/reel/DRKtWnhAI0j", dict(video=1)),
     ("https://www.instagram.com/reel/DRE38jKDIYb", dict(video=1)),
-    ("https://www.instagram.com/reel/DKqPQqpTDW4", dict(video=1)),  # Age-restricted content, works only with cookie
+    # ("https://www.instagram.com/reel/DKqPQqpTDW4", dict(video=1)),  # Age-restricted content, works only with cookie
 ])
 async def test_instagram(url: str, expected: dict[str, int]):
     result = await retrieve(url)

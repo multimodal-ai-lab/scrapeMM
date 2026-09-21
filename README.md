@@ -46,19 +46,46 @@ that yt-dlp cannot read. scrapeMM falls back to reading the video straight out o
 source in that case, so flagged posts stay retrievable.
 
 ### Archive.today Access
-Archive.today guards its snapshot pages with a Google reCAPTCHA. scrapeMM does **not**
-solve CAPTCHAs: when a retrieval hits the check, it opens the snapshot in its own browser
-and waits for you to pass it, then reuses that session for the rest of the run. The
-session lasts only about **five minutes**, so retrieve a batch of archive.today URLs together
-after one solve. You can also pass the check up front with
-`python scripts/configure_archive_today.py` (add a number of seconds to wait, e.g. `900`,
-when running headless — it prints an SSH command to reach the browser window). All mirrors
-(`archive.is`, `archive.ph`, …) share one session.
+Archive.today guards its snapshot pages with a Google reCAPTCHA, and a solved one unlocks
+them for only about **five minutes**. scrapeMM does **not** solve CAPTCHAs, so instead of
+waiting for you at the moment of each request it **collects work for your next solve**:
 
-To run unattended, either disable the prompt with
-`update_config(archive_today_interactive_solve=False)`, or enable the **screenshot
-fallback** with `update_config(archive_today_screenshot_fallback=True)`, which serves the
-snapshot's screenshot and metadata (not its text) when there is no session.
+1. A snapshot that was retrieved before is served from a **permanent cache** — a capture
+   never changes, and only its page is gated, so retrieving it once settles it for good.
+2. Otherwise scrapeMM fetches the page with the stored session. Media comes from ungated
+   subdomains, so images and videos download with no session at all.
+3. If the page is gated, the request **fails immediately** with a `CaptchaEncounteredError`
+   and the URL goes into a **buffer**. Nothing blocks.
+4. When you solve the CAPTCHA, everything buffered is retrieved and cached within those
+   five minutes:
+   ```bash
+   python scripts/configure_archive_today.py
+   ```
+   (add a number of seconds to wait, e.g. `900`, when running headless — it prints an SSH
+   command to reach the browser window)
+
+So the working rhythm is: let a batch run and collect misses, solve one CAPTCHA, then run
+the batch again — the second time it is served from the cache. All mirrors (`archive.is`,
+`archive.ph`, …) share one session and one cache.
+
+```python
+from scrapemm import (get_archive_today_buffer, clear_archive_today_buffer,
+                      retrieve_buffered_archive_today, count_cached_archive_today_pages)
+
+get_archive_today_buffer()          # URLs waiting for the next solve
+count_cached_archive_today_pages()  # how many pages are cached
+retrieve_buffered_archive_today()   # resume a drain the gate interrupted, session permitting
+clear_archive_today_buffer()        # forget the backlog
+```
+The buffer lives in `archive_today_buffer.json` and the pages in `archive_today_pages/`,
+both in scrapeMM's config directory.
+
+Two opt-ins sit beside this. `update_config(archive_today_interactive_solve=True)` restores
+the old behaviour of opening the browser and waiting for you at the moment of a gated
+request — reasonable for a one-off, attended retrieval, not for batches. And
+`update_config(archive_today_screenshot_fallback=True)` serves the snapshot's screenshot
+and metadata (not its text) when there is no session, so an unattended run gets *something*
+rather than an error.
 
 ## Usage
 

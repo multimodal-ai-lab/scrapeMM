@@ -5,22 +5,30 @@ HTTP 429). Passing it yields a `cf_clearance` cookie that unlocks the page for *
 five minutes** — activity does not extend it, and nothing but solving the CAPTCHA again
 renews it (measured 2026-09-21). scrapeMM does not solve CAPTCHAs.
 
-Given that, retrieval works like this:
+Five minutes is far less often than anyone will sit down to solve a CAPTCHA, so retrieval
+is built around collecting work for the next session rather than waiting for one:
 
-1. **Fetch the replay page over plain HTTP** with the stored `cf_clearance`. The page's
-   media lives on ungated `*.archive.ph` subdomains, so once the HTML is in hand the
-   images and videos download without any session. No browser is involved.
-2. **If the page is gated** and interactive solving is enabled (default), open the
-   snapshot in scrapeMM's own browser and wait for a human to pass the check, then store
-   the fresh session and retry step 1. On a headless machine the browser window is
-   reachable through an SSH tunnel, see `remote_view_hint()`.
-3. **Otherwise**, if the screenshot fallback is enabled, serve what Archive.today offers
-   without the check: the snapshot's full-page screenshot plus its original URL, capture
-   time and title (resolved through the ungated `cse.js` and capture-listing endpoints).
-4. **Otherwise**, raise, with a hint on how to establish a session.
+1. **Serve from the permanent page cache** if the snapshot was ever retrieved before. A
+   capture never changes and only its replay page is gated, so one retrieval settles that
+   URL for good -- no session needed again, ever.
+2. **Otherwise fetch the replay page over plain HTTP** with the stored `cf_clearance`.
+   The page's media lives on ungated `*.archive.ph` subdomains, so once the HTML is in
+   hand the images and videos download without any session. No browser is involved.
+3. **If the page is gated**, buffer the URL and fail immediately. The caller is not kept
+   waiting for a human who may be hours away.
+4. **When a session is established** (`capture_session()`), the whole buffer is retrieved
+   and cached within those five minutes. One solved CAPTCHA therefore clears a batch, and
+   every URL in it is answered from the cache from then on.
+
+Two opt-ins sit beside this: `archive_today_interactive_solve` restores asking a human at
+the moment of the request (sensible only for one-off, attended retrievals), and
+`archive_today_screenshot_fallback` serves what Archive.today offers without the check --
+the snapshot's full-page screenshot plus its original URL, capture time and title
+(resolved through the ungated `cse.js` and capture-listing endpoints).
 """
 
 import asyncio
+import hashlib
 import html as html_lib
 import json
 import logging
@@ -82,9 +90,21 @@ LONG_FORM_REGEX = re.compile(r"^/(\d{4})\.?(\d{2})\.?(\d{2})-?(\d{2})(\d{2})(\d{
 # Resolved snapshots never change, so they are kept forever
 SNAPSHOT_CACHE_PATH = CONFIG_DIR / "archive_today_snapshots.json"
 
+# Retrieved snapshot pages, likewise kept forever, and the URLs still waiting to be
+# retrieved once a session exists
+PAGE_CACHE_DIR = CONFIG_DIR / "archive_today_pages"
+BUFFER_PATH = CONFIG_DIR / "archive_today_buffer.json"
+
+# How many buffered pages are fetched at once. A session lasts only about five minutes,
+# so the buffer has to be worked through briskly -- but not so briskly that the burst
+# itself brings the gate back up.
+DRAIN_CONCURRENCY = 4
+
 # Whether a gated snapshot is opened in scrapeMM's browser for a human to solve the access
-# check on the spot. On by default; disable for unattended runs with
-# `update_config(archive_today_interactive_solve=False)`.
+# check on the spot. Off by default: a session lasts about five minutes, so asking for a
+# captcha at the moment of each request does not scale past a handful of URLs. Gated
+# requests are buffered instead (see `_RequestBuffer`). Turn it back on for one-off,
+# attended retrievals with `update_config(archive_today_interactive_solve=True)`.
 INTERACTIVE_SOLVE_CONFIG_KEY = "archive_today_interactive_solve"
 SOLVE_TIMEOUT_CONFIG_KEY = "archive_today_solve_timeout"
 DEFAULT_SOLVE_TIMEOUT = 300
@@ -113,9 +133,10 @@ LOOKUP_HEADERS = {"Accept-Language": "en-US,en;q=0.9"}
 
 GATE_HINT = (
     "Archive.today asks to solve a captcha. Cannot access the archived page's text. "
-    "scrapeMM does not solve captchas. Run scrapemm.configure_archive_today_session() to "
-    "pass the check yourself once in scrapeMM's own browser; the resulting session lasts "
-    "about five minutes. Alternatively, "
+    "scrapeMM does not solve captchas. The URL was buffered: run "
+    "scrapemm.configure_archive_today_session() to pass the check yourself once in "
+    "scrapeMM's own browser, and everything buffered so far is retrieved and cached right "
+    "after, so asking for it again succeeds without a session. Alternatively, "
     "update_config(archive_today_screenshot_fallback=True) makes scrapeMM serve the "
     "snapshot's screenshot and metadata instead of failing."
 )
@@ -127,7 +148,7 @@ def _looks_like_gate(body_text: str) -> bool:
 
 
 def _interactive_solve_enabled() -> bool:
-    return bool(get_config_var(INTERACTIVE_SOLVE_CONFIG_KEY, True))
+    return bool(get_config_var(INTERACTIVE_SOLVE_CONFIG_KEY, False))
 
 
 def _solve_timeout() -> float:
@@ -194,6 +215,117 @@ class _SnapshotCache:
 
 
 _snapshots = _SnapshotCache()
+
+
+def _page_cache_key(url: str) -> str:
+    """Deterministic, filesystem-safe name for a canonicalized snapshot URL. Short-id
+    URLs keep their id so that the store stays readable; long-form ones are hashed."""
+    path = urlparse(url).path
+    if match := SHORT_ID_REGEX.match(path):
+        return match.group(1)
+    return "u" + hashlib.sha1(path.encode("utf-8")).hexdigest()[:16]
+
+
+class _PageCache:
+    """Permanently stored snapshot content, one file per snapshot.
+
+    Only the replay page is behind the access check, and a capture never changes, so a
+    page retrieved once never has to be retrieved again -- which is what lets a single
+    solved captcha keep paying off long after its session expired. One file per snapshot
+    keeps a new entry a single small write instead of a rewrite of the whole store.
+    """
+
+    def __init__(self, directory: Path = PAGE_CACHE_DIR):
+        self.directory = directory
+
+    def _file(self, url: str) -> Path:
+        return self.directory / f"{_page_cache_key(url)}.html"
+
+    def get(self, url: str) -> Optional[str]:
+        try:
+            return self._file(url).read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+    def put(self, url: str, content_html: str) -> None:
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            self._file(url).write_text(content_html, encoding="utf-8")
+        except OSError:
+            logger.debug(f"Could not cache the Archive.today page for {url}.", exc_info=True)
+
+    def __contains__(self, url: str) -> bool:
+        return self._file(url).exists()
+
+    def __len__(self) -> int:
+        try:
+            return len(list(self.directory.glob("*.html")))
+        except OSError:
+            return 0
+
+
+class _RequestBuffer:
+    """Snapshot URLs that were asked for while the access check was up.
+
+    Waiting for a human at the moment of the request is hopeless for batch work -- the
+    session lasts about five minutes, nobody solves a captcha that often. So a gated
+    request fails right away and its URL is remembered here; the next time a session is
+    established, everything that piled up is fetched in one go.
+    """
+
+    def __init__(self, path: Path = BUFFER_PATH):
+        self.path = path
+        self._urls: Optional[list[str]] = None
+
+    def _load(self) -> list[str]:
+        if self._urls is None:
+            try:
+                loaded = json.loads(self.path.read_text(encoding="utf-8"))
+                self._urls = [u for u in loaded if isinstance(u, str)]
+            except (OSError, ValueError):
+                self._urls = []
+        return self._urls
+
+    def _save(self) -> None:
+        try:
+            self.path.write_text(json.dumps(self._load(), indent=1), encoding="utf-8")
+        except OSError:
+            logger.debug(f"Could not persist the Archive.today buffer at {self.path}.",
+                         exc_info=True)
+
+    def urls(self) -> list[str]:
+        """The buffered URLs, oldest first."""
+        return list(self._load())
+
+    def add(self, url: str) -> None:
+        urls = self._load()
+        if url in urls:
+            return
+        urls.append(url)
+        self._save()
+        logger.info(f"📥 Buffered {url} for the next Archive.today session "
+                    f"({len(urls)} waiting).")
+
+    def discard_many(self, done: set[str]) -> None:
+        urls = self._load()
+        remaining = [url for url in urls if url not in done]
+        if len(remaining) != len(urls):
+            self._urls = remaining
+            self._save()
+
+    def discard(self, url: str) -> None:
+        self.discard_many({url})
+
+    def clear(self) -> None:
+        self._urls = []
+        self._save()
+
+    def __len__(self) -> int:
+        return len(self._load())
+
+
+_pages = _PageCache()
+_buffer = _RequestBuffer()
 
 
 async def _fetch_text(url: str, session: Optional[aiohttp.ClientSession]) -> Optional[str]:
@@ -371,12 +503,26 @@ class ArchiveToday(HeadedBrowser):
         session: aiohttp.ClientSession = kwargs["session"]
         output_format = kwargs.get("output_format", "multimodal")
 
+        # A capture never changes and only its page is gated, so a page retrieved once
+        # serves every later request -- no session needed.
+        if cached := _pages.get(url):
+            logger.debug(f"Serving the cached Archive.today page for {url}.")
+            return await to_scraped_content(cached, session=session,
+                                            output_format=output_format, url=url)
+
         content_html = await self._retrieve_content(session, url)
         if content_html is not None:
+            _pages.put(url, content_html)
+            _buffer.discard(url)
             return await to_scraped_content(content_html, session=session,
                                             output_format=output_format, url=url)
 
-        # Still gated: fall back to the ungated screenshot and metadata, if enabled.
+        # Gated. Remember the URL so the next session picks it up, and do not make the
+        # caller wait for a human: five-minute sessions make that pointless at any scale.
+        _buffer.add(url)
+
+        # Fall back to the ungated screenshot and metadata, if enabled. Not cached: it is
+        # a stand-in, and caching it would keep the real page from ever being served.
         if _screenshot_fallback_enabled():
             snapshot = await identify_snapshot(url, session)
             if snapshot is not None:
@@ -405,8 +551,64 @@ class ArchiveToday(HeadedBrowser):
                 return content
             if await self._solve_in_browser(url, _solve_timeout()):
                 content, _ = await self._try_fetch_content(session, url)
+                # The session is live now and short-lived: spend it on the backlog too
+                await self._drain_buffer(session, skip={url})
                 return content
         return None
+
+    async def _drain_buffer(self, session: aiohttp.ClientSession,
+                            skip: Optional[set[str]] = None) -> int:
+        """Retrieves everything the buffer holds and caches it. Returns how many pages
+        were fetched.
+
+        Called right after a session is established, because that session lasts about
+        five minutes -- so this is the one window in which the backlog can be cleared.
+        If the gate comes back mid-way (the session expired, or the burst itself tripped
+        it), what is left stays buffered for the next round.
+        """
+        urls = [url for url in _buffer.urls() if url not in (skip or set())]
+        if not urls:
+            return 0
+
+        logger.info(f"📤 Retrieving {len(urls)} buffered Archive.today page(s)...")
+        semaphore = asyncio.Semaphore(DRAIN_CONCURRENCY)
+        done: set[str] = set()
+        gated_again = False
+
+        async def fetch(url: str) -> None:
+            nonlocal gated_again
+            if gated_again:
+                return
+            async with semaphore:
+                if gated_again:
+                    return
+                try:
+                    content, gated = await self._try_fetch_content(session, url)
+                except Exception:
+                    logger.debug(f"Buffered Archive.today page {url} could not be "
+                                 f"retrieved.", exc_info=True)
+                    return
+                if content is not None:
+                    _pages.put(url, content)
+                    done.add(url)
+                elif gated:
+                    gated_again = True
+                else:
+                    # No such capture -- retrying it in every future round is pointless
+                    logger.debug(f"Dropping {url} from the buffer: no such capture.")
+                    done.add(url)
+
+        await asyncio.gather(*(fetch(url) for url in urls))
+        _buffer.discard_many(done)
+
+        if gated_again:
+            logger.warning(f"⚠️ Archive.today asks for a captcha again after "
+                           f"{len(done)} page(s); {len(_buffer)} still buffered. Solve it "
+                           f"once more to continue.")
+        else:
+            logger.info(f"✅ Cached {len(done)} Archive.today page(s). They are served "
+                        f"from the cache from now on, no session needed.")
+        return len(done)
 
     async def _try_fetch_content(self, session: aiohttp.ClientSession,
                                  url: str) -> tuple[Optional[str], bool]:
@@ -471,6 +673,9 @@ class ArchiveToday(HeadedBrowser):
         you established manually, which Archive.today binds to the browser that obtained
         it (hence this very window) and keeps valid for about five minutes.
 
+        Every URL that was requested while the check was up is then retrieved and cached
+        on the spot, so that those five minutes buy more than a single page.
+
         Returns whether the check was passed.
         """
         passed = await self._solve_in_browser(
@@ -478,7 +683,11 @@ class ArchiveToday(HeadedBrowser):
         if not passed:
             logger.warning("⚠️ No session established. Snapshot pages stay behind the access "
                            "check until you run this again.")
-        return passed
+            return False
+
+        async with aiohttp.ClientSession() as session:
+            await self._drain_buffer(session)
+        return True
 
     async def _await_gate_passed(self, page: Page, timeout: float) -> bool:
         """Waits until the page in front of us is no longer Archive.today's access check."""
@@ -531,6 +740,38 @@ class ArchiveToday(HeadedBrowser):
 async def configure_archive_today_session(timeout: float = 300) -> bool:
     """Opens Archive.today in scrapeMM's browser so that you can pass its access check
     yourself, then stores the session for future retrievals. scrapeMM does not solve
-    captchas — you do, once, in the window that opens."""
+    captchas — you do, once, in the window that opens.
+
+    Everything that was requested while the check was up is retrieved and cached right
+    after, so one solved captcha clears the whole backlog."""
     from scrapemm.integrations import NAME_TO_INTEGRATION
     return await NAME_TO_INTEGRATION["archive.today"].capture_session(timeout=timeout)
+
+
+def get_archive_today_buffer() -> list[str]:
+    """The snapshot URLs that were requested while the access check was up, oldest first.
+    They are retrieved and cached the next time a session is established."""
+    return _buffer.urls()
+
+
+def clear_archive_today_buffer() -> None:
+    """Forgets every buffered snapshot URL without retrieving it."""
+    _buffer.clear()
+    logger.info("Cleared the Archive.today buffer.")
+
+
+async def retrieve_buffered_archive_today() -> int:
+    """Retrieves and caches every buffered snapshot URL using the session that is already
+    stored, without asking for a new captcha. Returns how many pages were cached.
+
+    `configure_archive_today_session()` does this for you; use this directly only to
+    resume a drain that the gate interrupted while the session is still valid."""
+    from scrapemm.integrations import NAME_TO_INTEGRATION
+    integration = NAME_TO_INTEGRATION["archive.today"]
+    async with aiohttp.ClientSession() as session:
+        return await integration._drain_buffer(session)
+
+
+def count_cached_archive_today_pages() -> int:
+    """How many Archive.today pages are held in the permanent cache."""
+    return len(_pages)
