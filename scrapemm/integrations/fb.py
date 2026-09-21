@@ -1,3 +1,4 @@
+import html as html_lib
 import logging
 import re
 from urllib.parse import parse_qs, urlparse
@@ -13,7 +14,7 @@ from yt_dlp.networking.impersonate import ImpersonateTarget
 from scrapemm import RateLimitError, RetrievalFailed
 from scrapemm.common import CONFIG_DIR
 from scrapemm.common.exceptions import AccessBlockedError, TargetUnavailableError
-from scrapemm.download import download_image
+from scrapemm.download import download_image, download_video
 from scrapemm.download.common import HEADERS
 from scrapemm.common.retrieval_integration import RetrievalIntegration
 from scrapemm.common.scraping_response import ScrapedContent
@@ -28,6 +29,25 @@ LIKE_COMMENT_SHARE_SVG_REGEX = (
     r"['\"]?%[0-9A-Fa-f]{2}.*?(?:%3C/svg%3E|%3C%2Fsvg%3E)['\"]?"
 )
 FB_PHOTO_HREF_REGEX = r'href="(https://www\.facebook\.com/photo/[^"]*)"'
+
+# Facebook wraps posts that fact-checkers flagged as false information in an
+# interstitial. yt-dlp's extractor cannot parse those pages ("Cannot parse data"),
+# yet the CDN URLs of the video are still embedded in them. Since flagged posts are
+# exactly the material this library exists to collect, we dig them out ourselves.
+# Keys are ordered best-quality first.
+FB_VIDEO_URL_KEYS = (
+    "browser_native_hd_url", "playable_url_quality_hd", "hd_src",  # HD
+    "browser_native_sd_url", "playable_url", "sd_src",  # SD
+)
+
+# The page embeds JSON inside <script> tags, so the URL may be backslash-escaped
+FB_VIDEO_URL_REGEXES = tuple(
+    (key, re.compile(key + r'\\?"\s*:\s*\\?"((?:[^"\\]|\\.)*?)\\?"'))
+    for key in FB_VIDEO_URL_KEYS
+)
+FB_OG_DESCRIPTION_REGEX = re.compile(
+    r'<meta\s+property="og:description"\s+content="(.*?)"', re.DOTALL
+)
 
 JS_GET_PHOTO_IMAGE = """
     () => {
@@ -67,6 +87,33 @@ JS_GET_PHOTO_IMAGE = """
         return null;
     }
 """.strip()
+
+
+def _unescape_json_url(raw: str) -> str:
+    """Undoes the backslash escaping Facebook applies to URLs inside embedded JSON."""
+    return raw.replace("\\/", "/").replace("\\u0025", "%")
+
+
+def _extract_video_urls(html: str) -> list[str]:
+    """Returns the video CDN URLs found in a Facebook page, best quality first
+    and without duplicates."""
+    urls: list[str] = []
+    seen: set[str] = set()
+    for _, regex in FB_VIDEO_URL_REGEXES:
+        for match in regex.findall(html):
+            candidate = _unescape_json_url(match)
+            if candidate.startswith("http") and candidate not in seen:
+                seen.add(candidate)
+                urls.append(candidate)
+    return urls
+
+
+def _extract_post_text(html: str) -> str:
+    """Returns the post's caption, taken from the og:description meta tag."""
+    match = FB_OG_DESCRIPTION_REGEX.search(html)
+    if not match:
+        return ""
+    return postprocess_markdown(html_lib.unescape(match.group(1)))
 
 
 class Facebook(RetrievalIntegration):
@@ -154,7 +201,8 @@ class Facebook(RetrievalIntegration):
             raise NotImplementedError(
                 "Facebook video retrieval through API not yet supported."
             )
-        else:
+
+        try:
             sequence = await get_content_with_ytdlp(
                 url,
                 platform="Facebook",
@@ -163,6 +211,63 @@ class Facebook(RetrievalIntegration):
                 **kwargs,
             )
             return ScrapedContent(multimodal=sequence)
+        except RetrievalFailed as e:
+            if "unable to parse" not in str(e):
+                raise
+            # Most likely a fact-check interstitial, whose page yt-dlp cannot read
+            logger.debug(f"yt-dlp could not parse {url}; reading the video off the page.")
+            return await self._get_video_from_page(url, **kwargs)
+
+    async def _get_video_from_page(self, url: str, **kwargs) -> ScrapedContent:
+        """Extracts the video straight out of the post's HTML.
+
+        Fallback for posts that yt-dlp's extractor chokes on -- in practice, those
+        that Facebook covered with a fact-check interstitial. The player is hidden
+        behind the warning, but the CDN URLs remain in the page source.
+        """
+        html = await self._fetch_page(url)
+        if not html:
+            raise RetrievalFailed(f"Could not load the Facebook page for {url}.")
+
+        video_urls = _extract_video_urls(html)
+        if not video_urls:
+            raise RetrievalFailed(f"No video found in the Facebook page for {url}.")
+
+        session = kwargs.get("session")
+        max_video_size = kwargs.get("max_video_size")
+
+        # Best quality first; fall back to the next candidate if one is unavailable
+        # or exceeds the size limit.
+        video = None
+        for video_url in video_urls:
+            video = await download_video(video_url, session=session,
+                                         max_video_size=max_video_size)
+            if video:
+                break
+
+        if not video:
+            raise RetrievalFailed(f"Could not download the video of {url}.")
+
+        text = _extract_post_text(html)
+        items: list = [f"**Facebook Video**\n\n{text}" if text else "**Facebook Video**"]
+        items.append(video)
+        return ScrapedContent(multimodal=MultimodalSequence(items))
+
+    async def _fetch_page(self, url: str) -> str | None:
+        """Downloads the post's HTML with the stored session cookies, impersonating a
+        real browser. Facebook serves aiohttp's TLS fingerprint a login wall."""
+        from curl_cffi.requests import AsyncSession
+
+        cookies = {c["name"]: c["value"]
+                   for c in parse_netscape_cookies(self.cookie_file)}
+        try:
+            async with AsyncSession() as session:
+                response = await session.get(url, cookies=cookies,
+                                             impersonate="chrome124", timeout=30)
+                return response.text if response.status_code == 200 else None
+        except Exception:
+            logger.debug(f"Could not fetch the Facebook page {url}.", exc_info=True)
+            return None
 
     async def _get_photo(self, url: str, **kwargs) -> ScrapedContent:
         """Retrieves content from a Facebook photo URL using Playwright with session cookies."""
@@ -244,6 +349,13 @@ class Facebook(RetrievalIntegration):
                 try:
                     await page.goto(url, timeout=30000)
                     await page.wait_for_load_state("domcontentloaded")
+                    # The post's photo links are rendered by JS, so the markup right
+                    # after domcontentloaded still lacks them. Let the page settle.
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=10000)
+                    except PlaywrightTimeoutError:
+                        pass
+                    await page.wait_for_timeout(2000)
 
                 except PlaywrightTimeoutError:
                     raise RuntimeError("Timed out loading Facebook photo page.")
@@ -254,21 +366,28 @@ class Facebook(RetrievalIntegration):
             finally:
                 await browser.close()
 
-            photos = [
-                await self._get_photo_from_regular_post(href, cookies)
-                for href in photo_hrefs
-            ]
+            photos = []
+            for href in photo_hrefs:
+                # One unavailable photo must not cost us the remaining ones
+                try:
+                    photos.append(await self._get_photo_from_regular_post(href, cookies))
+                except Exception:
+                    logger.debug(f"Could not retrieve the Facebook photo {href}.",
+                                 exc_info=True)
 
-            return [photo.images[0] for photo in photos if photo]
+            return [photo.images[0] for photo in photos if photo and photo.images]
 
     def _is_post_permalink(self, url: str) -> bool:
         """Checks if the URL is a Facebook post permalink URL."""
         return re.search(r"facebook\.com/.+/posts/.+", url) is not None
 
     def _collect_photo_hrefs_from_html(self, html: str) -> list[str]:
-        """Collects all photo hrefs from the given HTML string."""
-        hrefs = re.findall(FB_PHOTO_HREF_REGEX, html)
-        return hrefs
+        """Collects all photo hrefs from the given HTML string, in page order and
+        without duplicates. The hrefs are HTML-escaped in the markup ('&amp;'), which
+        would turn the query parameters into garbage if left as is."""
+        hrefs = (html_lib.unescape(href)
+                 for href in re.findall(FB_PHOTO_HREF_REGEX, html))
+        return list(dict.fromkeys(hrefs))
 
     async def _get_user_profile(self, url: str, **kwargs) -> ScrapedContent:
         """Retrieves content from a Facebook user profile URL."""

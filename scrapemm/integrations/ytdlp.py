@@ -95,6 +95,13 @@ async def download_video_with_ytdlp(
             **kwargs
         )
 
+        # Tell yt-dlp where FFmpeg is. It only searches PATH on its own, so a binary
+        # found via FFMPEG_PATH or an imageio-ffmpeg install would stay invisible to
+        # it -- and yt-dlp would silently skip merging the video and audio streams.
+        from scrapemm.download.videos import _resolve_ffmpeg_path
+        if ffmpeg := _resolve_ffmpeg_path():
+            ydl_opts["ffmpeg_location"] = ffmpeg
+
         if "youtube" in url or "youtu.be" in url:
             ydl_opts['extractor_args'] = dict(youtube=dict(player_client=["default"]))
 

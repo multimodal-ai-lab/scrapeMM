@@ -1,13 +1,14 @@
 import asyncio
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 import aiohttp
 from ezmm import MultimodalSequence, Item
 from ezmm.common.items import Video, Image
-from tiktok_research_api import TikTokResearchAPI, QueryVideoRequest, QueryUserInfoRequest, Criteria, Query
+from tiktok_research_api import (TikTokResearchAPI, QueryUserInfoRequest, Criteria, Query,
+                                 APIErrorResponse)
 
 from scrapemm.common.exceptions import AccessBlockedError, TargetUnavailableError
 from scrapemm.download import download_image
@@ -19,6 +20,19 @@ from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
 from scrapemm.util import to_scraped_content, preprocess_html
 
 logger = logging.getLogger("scrapeMM")
+
+# Earliest plausible TikTok upload date, used to sanity-check timestamps decoded
+# from video IDs.
+TIKTOK_LAUNCH = datetime(2016, 1, 1, tzinfo=timezone.utc)
+
+# Metadata fields requested from the Research API's video query endpoint.
+VIDEO_FIELDS = ("id,create_time,username,region_code,video_description,video_duration,"
+                "hashtag_names,view_count,like_count,comment_count,share_count,music_id,"
+                "voice_to_text")
+
+# Error codes worth a second attempt. Everything else (a malformed query, an exhausted
+# quota) fails the same way no matter how often we ask.
+RETRYABLE_ERROR_CODES = (APIErrorResponse.ACCESS_TOKEN_INVALID, APIErrorResponse.TIMEOUT)
 
 
 class TikTok(RetrievalIntegration):
@@ -42,6 +56,7 @@ class TikTok(RetrievalIntegration):
 
         self.api_available = False
         self.api = None
+        self.api_semaphore = asyncio.Semaphore(5)
 
         if client_key and client_secret:
             try:
@@ -89,43 +104,105 @@ class TikTok(RetrievalIntegration):
             raise TargetUnavailableError("TikTok video not available.")
 
         try:
-            # Create criteria to search for the specific video ID
-            query_criteria = Criteria(
-                operation="EQ",
-                field_name="video_id",
-                field_values=[video_id]
+            # The API metadata only enriches what yt-dlp returns anyway, so fetch both
+            # at once instead of making the download wait for the query.
+            video_data, (video, thumbnail, metadata) = await asyncio.gather(
+                self._query_video_metadata(video_id, session),
+                download_video_with_ytdlp(url, session, max_video_size=max_video_size),
             )
-            query = Query(and_criteria=[query_criteria])
-
-            # Define the fields we want to retrieve
-            video_fields = "id,create_time,username,region_code,video_description,video_duration,hashtag_names,view_count,like_count,comment_count,share_count,music_id,voice_to_text"
-
-            # Create the video request
-            video_request = QueryVideoRequest(
-                fields=video_fields,
-                query=query,
-                max_count=1,
-                start_date="20200101",
-                end_date=datetime.now().strftime("%Y%m%d"),
-            )
-
-            # Execute the query asynchronously (API call is synchronous/blocking)
-            videos, search_id, cursor, has_more, start_date, end_date = await asyncio.to_thread(
-                self.api.query_videos,
-                video_request,
-                fetch_all_pages=False,
-            )
-
-            video_data = videos[0] if videos else None
-
-            # Download the video using yt-dlp
-            video, thumbnail, metadata = await download_video_with_ytdlp(url, session, max_video_size=max_video_size)
 
             sequence = await self._create_video_sequence_from_api(video_data or metadata, video, thumbnail)
             return ScrapedContent(multimodal=sequence)
 
         except Exception as e:
             raise RuntimeError(f"Error retrieving TikTok video: {e}")
+
+    async def _query_video_metadata(self, video_id: str,
+                                    session: aiohttp.ClientSession) -> dict | None:
+        """Looks up a single video's metadata in the TikTok Research API.
+
+        Returns None if the API is unavailable, the query fails, or the video is not
+        indexed -- the caller then falls back to the yt-dlp metadata.
+
+        The endpoint requires a date range and the client library splits that range
+        into 30-day chunks, firing one blocking request per chunk and continuing even
+        after the video was found. Querying the full TikTok era therefore cost ~80
+        requests and over three minutes per video. Since TikTok video IDs are
+        Snowflake-like, we decode the upload time from the ID and query just that day.
+
+        We post to the endpoint ourselves rather than going through the client library,
+        which sleeps a second and retries up to 60 times on *any* error -- turning a
+        malformed query or an exhausted quota into a minute-long stall -- and which does
+        its waiting with a blocking `time.sleep` on shared, unsynchronized state.
+        """
+        if not self.api_available:
+            return None
+
+        created_at = self._created_at(video_id)
+        if created_at is None:
+            logger.debug(f"Could not decode the upload date of TikTok video {video_id}; "
+                         f"skipping the Research API query and using yt-dlp metadata only.")
+            return None
+
+        query = Query(and_criteria=[Criteria(
+            operation="EQ",
+            field_name="video_id",
+            field_values=[video_id],
+        )])
+        body = {
+            "query": query.to_dict(),
+            # One day of slack on either side absorbs whatever timezone the API applies.
+            "start_date": (created_at - timedelta(days=1)).strftime("%Y%m%d"),
+            "end_date": (created_at + timedelta(days=1)).strftime("%Y%m%d"),
+            "max_count": 1,
+        }
+        endpoint = f"{self.api.url}/v2/research/video/query/?fields={VIDEO_FIELDS}"
+
+        error = {}
+        # Cap how many of these queries run at once: bypassing the client library also
+        # bypasses its (blocking) rate limiter, and a batch retrieval runs up to 40 URLs
+        # in parallel.
+        async with self.api_semaphore:
+            for attempt in range(2):
+                try:
+                    async with session.post(endpoint, json=body, headers=self.api.headers()) as response:
+                        payload = await response.json()
+                except Exception as e:
+                    logger.warning(f"TikTok Research API query for video {video_id} failed: {e}")
+                    return None
+
+                error = payload.get("error") or {}
+                if error.get("code") == APIErrorResponse.OK:
+                    videos = (payload.get("data") or {}).get("videos") or []
+                    return videos[0] if videos else None
+
+                if error.get("code") not in RETRYABLE_ERROR_CODES or attempt:
+                    break
+
+                if error.get("code") == APIErrorResponse.ACCESS_TOKEN_INVALID:
+                    # The client fetches its access token once on connect and never renews it.
+                    await asyncio.to_thread(self.api.refresh_token)
+
+        logger.warning(f"TikTok Research API query for video {video_id} failed: "
+                       f"{error.get('code')}: {error.get('message')}")
+        return None
+
+    @staticmethod
+    def _created_at(video_id: str) -> datetime | None:
+        """Decodes the upload time from a TikTok video ID, or None if it does not fit.
+
+        TikTok IDs are Snowflake-like: the upper 32 bits hold the Unix timestamp. Short
+        links (vm.tiktok.com) carry an opaque slug instead, hence the plausibility check.
+        """
+        if not video_id.isdigit():
+            return None
+        try:
+            created_at = datetime.fromtimestamp(int(video_id) >> 32, timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+        if not TIKTOK_LAUNCH <= created_at <= datetime.now(timezone.utc) + timedelta(days=1):
+            return None
+        return created_at
 
     async def _get_photo(self, url: str, session: aiohttp.ClientSession,
                          output_format: OutputFormat = "multimodal") -> ScrapedContent:
@@ -168,9 +245,14 @@ class TikTok(RetrievalIntegration):
         if not username:
             raise TargetUnavailableError("TikTok user not available.")
 
+        if not self.api_available:
+            raise RuntimeError("Retrieving TikTok profiles requires TikTok Research API credentials.")
+
         try:
             user_info_request = QueryUserInfoRequest(username=username)
-            user_info = self.api.query_user_info(user_info_request)
+            # The API call is synchronous/blocking, so keep it off the event loop --
+            # otherwise it stalls every other URL being retrieved in parallel.
+            user_info = await asyncio.to_thread(self.api.query_user_info, user_info_request)
         except Exception as e:
             raise RuntimeError(f"Error retrieving TikTok user profile with API: {e}")
 
@@ -186,7 +268,7 @@ class TikTok(RetrievalIntegration):
         # Extract relevant metadata (coming from either TikTok Research API or yt-dlp)
         username = metadata.get('username') or metadata.get('uploader', 'Unknown')
         description = metadata.get('video_description') or metadata.get('description', '')
-        create_time = metadata.get('create_time') or metadata.get('upload_date', 'Unknown')
+        create_time = self._format_post_date(metadata)
         duration = metadata.get('video_duration') or metadata.get('duration', 0)
         view_count = metadata.get('view_count', 0)
         like_count = metadata.get('like_count', 0)
@@ -250,6 +332,28 @@ Metrics:
 - Videos: {video_count:,}"""
 
         return MultimodalSequence(text)
+
+    @staticmethod
+    def _format_post_date(metadata: dict) -> str:
+        """Renders the upload date as YYYY-MM-DD.
+
+        The Research API reports `create_time` as a Unix timestamp, yt-dlp reports
+        `upload_date` as a YYYYMMDD string.
+        """
+        if create_time := metadata.get('create_time'):
+            try:
+                return datetime.fromtimestamp(int(create_time), timezone.utc).strftime('%Y-%m-%d')
+            except (TypeError, ValueError, OverflowError, OSError):
+                logger.debug(f"Could not parse TikTok create_time: {create_time!r}")
+
+        if upload_date := metadata.get('upload_date'):
+            try:
+                return datetime.strptime(str(upload_date), '%Y%m%d').strftime('%Y-%m-%d')
+            except ValueError:
+                logger.debug(f"Could not parse yt-dlp upload_date: {upload_date!r}")
+                return str(upload_date)
+
+        return 'Unknown'
 
     def _is_video_url(self, url: str) -> bool:
         """Determines if the URL is a TikTok video URL."""

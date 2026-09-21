@@ -1,13 +1,8 @@
 import logging
-from typing import Optional
-
-from ezmm import MultimodalSequence
 
 from scrapemm.integrations.ytdlp import get_content_with_ytdlp
 from scrapemm.common.retrieval_integration import RetrievalIntegration
 from scrapemm.common.scraping_response import ScrapedContent
-from scrapemm.secrets import get_secret
-from ..common import CONFIG_DIR
 
 logger = logging.getLogger("scrapeMM")
 
@@ -21,26 +16,11 @@ class YouTube(RetrievalIntegration):
         "youtube.com",
         "youtu.be",
     ]
-    cookie_file = CONFIG_DIR / "youtube_cookie.txt"
 
     async def _connect(self):
         self.connected = True  # Connect always by default
 
-        cookie = get_secret("youtube_cookie")
-        if cookie:
-            # Save the cookie in a .txt file next to the secrets file
-            with open(self.cookie_file, "w") as f:
-                f.write(cookie)
-            logger.info(f"✅ Using cookie to connect to YouTube.")
-        else:
-            logger.warning(f"⚠️ Missing YouTube cookie. Won't be able to download videos, only thumbnails and metadata.")
-
     async def _get(self, url: str, **kwargs) -> ScrapedContent:
         """Downloads YouTube video or short using yt-dlp."""
-        cookie = get_secret("youtube_cookie")
-        cookie_file_path = self.cookie_file.as_posix() if cookie else None
-        sequence = await get_content_with_ytdlp(url,
-                                                platform="YouTube",
-                                                cookiefile=cookie_file_path,
-                                                **kwargs)
+        sequence = await get_content_with_ytdlp(url, platform="YouTube", **kwargs)
         return ScrapedContent(multimodal=sequence)

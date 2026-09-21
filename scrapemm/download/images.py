@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from io import BytesIO
 from typing import Optional, Union, TYPE_CHECKING
@@ -33,7 +34,12 @@ async def download_image(
     content = await request_static(image_url, session, get_text=False, **kwargs)
     if content:
         assert isinstance(content, bytes)
-        return image_from_binary(content, image_url, ignore_small_images=ignore_small_images, max_size=max_size)
+        # Decoding and rescaling are CPU-bound and would otherwise stall every other
+        # retrieval running on this event loop.
+        return await asyncio.to_thread(
+            image_from_binary, content, image_url,
+            ignore_small_images=ignore_small_images, max_size=max_size,
+        )
 
 
 def image_from_binary(
@@ -62,7 +68,7 @@ async def is_maybe_image_url(url: str, session: Union[aiohttp.ClientSession, "AP
     """Returns True iff the URL points at an accessible _pixel_ image file
     or if the content type is a binary download stream."""
     try:
-        headers = await fetch_headers(url, session, timeout=3000, allow_redirects=True)
+        headers = await fetch_headers(url, session, allow_redirects=True)
         content_type = headers.get('Content-Type') or headers.get('content-type') or ''
         if content_type.startswith("image/"):
             # Surely an image

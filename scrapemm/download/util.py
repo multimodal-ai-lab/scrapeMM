@@ -1,13 +1,45 @@
+import logging
+from typing import Optional
 from urllib.parse import urlparse
 
 import aiohttp
 
+logger = logging.getLogger("scrapeMM")
 
-async def stream(response: aiohttp.ClientResponse, chunk_size: int = 1024) -> bytes:
+# Read bodies in large chunks. Media files are routinely tens of megabytes, where a
+# small chunk size costs one event-loop round trip per few kilobytes.
+DEFAULT_CHUNK_SIZE = 256 * 1024
+
+
+class MediaTooLarge(Exception):
+    """Raised when a download exceeds the permitted size and was therefore aborted."""
+
+
+async def stream(response: aiohttp.ClientResponse,
+                 chunk_size: int = DEFAULT_CHUNK_SIZE,
+                 max_size: Optional[int] = None) -> bytes:
+    """Reads the response body. If `max_size` is given, the download is aborted as
+    soon as it exceeds that many bytes, raising `MediaTooLarge`."""
     data = bytearray()
     async for chunk in response.content.iter_chunked(chunk_size):
         data.extend(chunk)
+        if max_size is not None and len(data) > max_size:
+            raise MediaTooLarge(
+                f"Download from {response.url} exceeds the limit of {max_size} bytes."
+            )
     return bytes(data)  # Convert to immutable bytes if needed
+
+
+def exceeds_max_size(headers: dict, max_size: Optional[int]) -> bool:
+    """True iff the Content-Length header announces a body larger than `max_size`.
+    Lets us skip oversized media without downloading a single byte of it."""
+    if max_size is None:
+        return False
+    length = headers.get("Content-Length") or headers.get("content-length")
+    try:
+        return length is not None and int(length) > max_size
+    except (TypeError, ValueError):
+        return False
 
 
 IMAGE_FILE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")  # Only pixel images

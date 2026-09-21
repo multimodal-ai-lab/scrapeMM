@@ -26,14 +26,15 @@ SECRETS = {
     "reddit_client_id": "Reddit app client ID",
     "reddit_client_secret": "Reddit app client secret",
     "decodo_token": "Decodo Web Scraping API basic authentication token",
-    "youtube_cookie": "YouTube cookie string",
     "facebook_cookie": "Facebook cookie string",
-    "archive_today_cookie": "Archive.today cookies (optional, only needed if the "
-                            "default ones stopped working)",
+    "instagram_cookie": "Instagram cookie string (needed for age-restricted content)",
+    "archive_today_cookie": "Archive.today session cookies (skip this and run "
+                            "scripts/configure_archive_today.py instead, which "
+                            "establishes and stores the session for you)",
 }
 
 # Secrets that are (potentially long and) multi-line, hence needing a multiline input
-MULTILINE_SECRETS = ("youtube_cookie", "facebook_cookie", "archive_today_cookie")
+MULTILINE_SECRETS = ("facebook_cookie", "instagram_cookie", "archive_today_cookie")
 
 SALT = b'\xa4\x93\xf1\x88\x13\x88'
 SECRETS_PATH = CONFIG_DIR / "secrets"

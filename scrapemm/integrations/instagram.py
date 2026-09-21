@@ -8,6 +8,8 @@ from scrapemm.common.exceptions import RateLimitError, TargetUnavailableError, A
 from scrapemm.common.retrieval_integration import RetrievalIntegration
 from scrapemm.common.scraping_response import ScrapedContent
 from scrapemm.integrations.ytdlp import get_content_with_ytdlp
+from scrapemm.secrets import get_secret
+from ..common import CONFIG_DIR
 
 logger = logging.getLogger("scrapeMM")
 
@@ -15,9 +17,21 @@ logger = logging.getLogger("scrapeMM")
 class Instagram(RetrievalIntegration):
     name = "Instagram"
     domains = ["instagram.com", "www.instagram.com"]
+    cookie_file = CONFIG_DIR / "instagram_cookie.txt"
 
     async def _connect(self):
         self.api_available = False
+
+        cookie = get_secret("instagram_cookie")
+        if cookie:
+            # Save the cookie in a .txt file next to the secrets file
+            with open(self.cookie_file, "w") as f:
+                f.write(cookie)
+            logger.info("✅ Using cookie to connect to Instagram.")
+        else:
+            logger.warning("⚠️ Missing Instagram cookie. Won't be able to download "
+                           "age-restricted content.")
+
         logger.info(f"✅ Instagram integration ready (yt-dlp only mode).")
         self.connected = True
 
@@ -51,7 +65,11 @@ class Instagram(RetrievalIntegration):
         if self.api_available:
             raise NotImplementedError
         else:
-            sequence = await get_content_with_ytdlp(url, platform="Instagram", **kwargs)
+            # Age-restricted posts ("can't be seen by certain audiences") are only
+            # served to a logged-in session.
+            cookie_file_path = self.cookie_file.as_posix() if get_secret("instagram_cookie") else None
+            sequence = await get_content_with_ytdlp(url, platform="Instagram",
+                                                    cookiefile=cookie_file_path, **kwargs)
             return ScrapedContent(multimodal=sequence)
 
     async def _get_photo(self, url: str, **kwargs) -> ScrapedContent:

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import sqlite3
 import time
@@ -12,7 +13,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError, Error a
 
 from scrapemm import RateLimitError
 from scrapemm.common import (ScrapingResponse, ScrapedContent, OutputFormat, OUTPUT_FORMATS,
-                             cache, cache_key, blacklist, detect_captcha)
+                             cache, cache_key, blacklist, detect_captcha, get_config_var)
 from scrapemm.common.blacklist import captcha_reason
 from scrapemm.common.exceptions import RetrievalFailed, UnsupportedDomainError, DiskFull, \
     TargetUnavailableError, QuotaExceededError, AccessBlockedError, CaptchaEncounteredError
@@ -24,6 +25,10 @@ from scrapemm.integrations import (retrieve_via_integration, fire, decodo, get_i
 from scrapemm.util import run_with_semaphore, get_domain, normalize_video, preprocess_url
 
 logger = logging.getLogger("scrapeMM")
+
+# Hedging duplicates work to save latency, so it stays opt-in: None disables it.
+DEFAULT_HEDGING_DELAY = None
+
 METHODS = ["integrations", "firecrawl", "decodo"]
 ALL_METHODS = METHODS + INTEGRATION_NAMES
 
@@ -73,7 +78,8 @@ async def retrieve(
         include_media: bool = True,
         max_video_size: int | None = None,
         prioritize: Literal["completeness", "speed"] = "completeness",
-        use_cache: bool = True
+        use_cache: bool = True,
+        hedging_delay: float | None = None
 ) -> ScrapingResponse | list[ScrapingResponse]:
     """Main function of this repository. Downloads the contents present at the given URL(s).
     For each URL, returns a ScrapingResponse containing the retrieved content, error, and method.
@@ -111,12 +117,22 @@ async def retrieve(
     :param use_cache: If True, successful retrievals from the last 24 hours (see
         `set_cache_ttl()` to change that duration) are re-used instead of scraping
         the URL again. The cache is in-memory only, i.e., not persisted.
+    :param hedging_delay: Seconds of head start each retrieval method gets before the
+        next one is launched alongside it instead of after it. The first method to
+        succeed wins and the others are cancelled, so a merely slow method no longer
+        makes every later method wait for its full timeout budget. Costs duplicated
+        work (and, for paid methods, duplicated requests), hence disabled by default.
+        Pass a number to enable it for this call, or set it process-wide via
+        `update_config(hedging_delay=5)`. None or 0 runs the methods one after another.
     """
     # Ensure URLs are string or list
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
 
     assert output_format in OUTPUT_FORMATS, \
         f"Unknown output format '{output_format}'. Allowed: {list(OUTPUT_FORMATS)}"
+
+    if hedging_delay is None:
+        hedging_delay = get_config_var("hedging_delay", DEFAULT_HEDGING_DELAY)
 
     if not include_media:
         logger.warning("The 'include_media' parameter is deprecated. Use output_format='markdown' instead.")
@@ -154,7 +170,8 @@ async def retrieve(
     async with aiohttp.ClientSession(headers=HEADERS) as session:
         # Retrieve URLs concurrently
         tasks = [_retrieve_single(url, session, url_to_methods[url], actions,
-                                  output_format, max_video_size, prioritize, use_cache) for url in
+                                  output_format, max_video_size, prioritize, use_cache,
+                                  hedging_delay) for url in
                  urls_unique]
         results = await run_with_semaphore(tasks, limit=40, show_progress=show_progress and len(urls_unique) > 1,
                                            progress_description="Retrieving URLs...")
@@ -175,7 +192,8 @@ async def _retrieve_single(
         output_format: OutputFormat = "multimodal",
         max_video_size: int | None = None,
         prioritize: Literal["completeness", "speed"] = "completeness",
-        use_cache: bool = True
+        use_cache: bool = True,
+        hedging_delay: float | None = None
 ) -> ScrapingResponse:
     logger.debug(f"Retrieving {url}")
     start_time = time.time()
@@ -220,7 +238,8 @@ async def _retrieve_single(
             if looks_like_image_file_url(url):
                 medium = await download_image(url, session=session)
             elif looks_like_video_file_url(url) or looks_like_hls_url(url):
-                medium = await download_video(url, session=session)
+                medium = await download_video(url, session=session,
+                                              max_video_size=max_video_size)
             if medium:
                 content = ScrapedContent(multimodal=MultimodalSequence(medium))
                 response = ScrapingResponse(url=url, content=content, method="Direct download",
@@ -247,52 +266,51 @@ async def _retrieve_single(
         logger.error(f"Error while preparing retrieval for '{url}'.\n" + format_exc())
         return _failure(url, output_format, dict(scrapemm=e), start_time)
 
-    # Try each method in the specified order until one succeeds
-    errors = {}
-    partial = None  # Content that was retrieved, but not in the requested format
+    # Try the methods until one succeeds
     logger.debug(f"Trying methods in order: {', '.join(methods)}")
-    for method_name in methods:
-        logger.debug(f"Now executing {method_name}...")
 
+    async def evaluate(method_name: str) -> tuple[str, object]:
+        """Runs one method and classifies its outcome."""
+        logger.debug(f"Now executing {method_name}...")
         content = await _execute(url, map_method_to_retrieval_routine, method_name, session)
 
         if isinstance(content, Exception):
-            errors[method_name] = content
-            if isinstance(content, TargetUnavailableError):
-                break  # Not worth trying other methods
-            continue
+            return "error", content
 
         if not content:
             # Methods are expected to raise instead of returning empty-handed
             logger.info(f"Method {method_name} returned no content for url: {url}.")
-            errors[method_name] = RetrievalFailed(f"Method {method_name} returned no content.")
-            continue
+            return "error", RetrievalFailed(f"Method {method_name} returned no content.")
 
         # Ensure the method returned the actual content and not a CAPTCHA challenge
         if captcha := detect_captcha(content):
             logger.warning(f"🤖 Method {method_name} encountered a {captcha} at {url}.")
-            errors[method_name] = CaptchaEncounteredError(
-                f"Method {method_name} encountered a {captcha}."
-            )
-            continue
+            return "error", CaptchaEncounteredError(f"Method {method_name} encountered a {captcha}.")
 
         if content.get(output_format) is not None:
-            logger.info(f"🎉 Successfully retrieved with method: {method_name}")
-            if content.multimodal is not None:
-                postprocess_media(content.multimodal)
-            response = ScrapingResponse(url=url, content=content, method=method_name, errors=errors,
-                                        output_format=output_format,
-                                        retrieval_time=time.time() - start_time)
-            cache.put(key, response)
-            return response
-        else:
-            # The method retrieved something, just not in the requested format (e.g. the X API
-            # has no HTML page to offer). Keep it, but continue with the remaining methods.
-            logger.info(f"Method {method_name} could not provide the content of {url} as {output_format}.")
-            errors[method_name] = RetrievalFailed(
-                f"Method {method_name} did not provide the content as {output_format}."
-            )
-            partial = partial or content
+            return "success", content
+
+        # The method retrieved something, just not in the requested format (e.g. the X API
+        # has no HTML page to offer). Keep it, but continue with the remaining methods.
+        logger.info(f"Method {method_name} could not provide the content of {url} as {output_format}.")
+        return "partial", content
+
+    if hedging_delay and hedging_delay > 0 and len(methods) > 1:
+        winner, errors, partial = await _run_methods_hedged(methods, evaluate, hedging_delay,
+                                                            output_format)
+    else:
+        winner, errors, partial = await _run_methods_sequentially(methods, evaluate, output_format)
+
+    if winner is not None:
+        method_name, content = winner
+        logger.info(f"🎉 Successfully retrieved with method: {method_name}")
+        if content.multimodal is not None:
+            await postprocess_media(content.multimodal)
+        response = ScrapingResponse(url=url, content=content, method=method_name, errors=errors,
+                                    output_format=output_format,
+                                    retrieval_time=time.time() - start_time)
+        cache.put(key, response)
+        return response
 
     # All methods failed
     logger.warning(f"All retrieval methods failed for URL: {url}")
@@ -301,8 +319,105 @@ async def _retrieve_single(
     _blacklist_if_captcha(domain, url, errors)
 
     if partial is not None and partial.multimodal is not None:
-        postprocess_media(partial.multimodal)
+        await postprocess_media(partial.multimodal)
     return _failure(url, output_format, errors, start_time, content=partial)
+
+
+def _record_outcome(method_name: str, status: str, payload, errors: dict, partial,
+                    output_format: OutputFormat):
+    """Files one method's outcome into the error dict / partial content.
+    Returns the (possibly updated) partial content."""
+    if status == "partial":
+        errors[method_name] = RetrievalFailed(
+            f"Method {method_name} did not provide the content as {output_format}."
+        )
+        return partial or payload
+    errors[method_name] = payload
+    return partial
+
+
+async def _run_methods_sequentially(
+        methods: list[str],
+        evaluate: Callable[[str], Coroutine],
+        output_format: OutputFormat,
+) -> tuple[Optional[tuple[str, ScrapedContent]], dict, Optional[ScrapedContent]]:
+    """Runs the methods strictly one after another, stopping at the first success."""
+    errors: dict[str, Optional[Exception]] = {}
+    partial = None
+
+    for method_name in methods:
+        status, payload = await evaluate(method_name)
+        if status == "success":
+            return (method_name, payload), errors, partial
+        partial = _record_outcome(method_name, status, payload, errors, partial, output_format)
+        if isinstance(payload, TargetUnavailableError):
+            break  # Not worth trying other methods
+
+    return None, errors, partial
+
+
+async def _run_methods_hedged(
+        methods: list[str],
+        evaluate: Callable[[str], Coroutine],
+        delay: float,
+        output_format: OutputFormat,
+) -> tuple[Optional[tuple[str, ScrapedContent]], dict, Optional[ScrapedContent]]:
+    """Runs the methods with hedging: each method gets `delay` seconds of head start
+    before the next one is launched alongside it, and a method that fails early hands
+    over immediately. The first success wins and the remaining methods are cancelled.
+
+    This trades duplicated work for latency: a method that is merely slow no longer
+    forces every later method to wait for its full timeout budget.
+    """
+    errors: dict[str, Optional[Exception]] = {}
+    partial = None
+    winner = None
+    remaining = list(methods)
+    pending: dict[asyncio.Task, str] = {}
+
+    try:
+        while remaining or pending:
+            if remaining:
+                method_name = remaining.pop(0)
+                pending[asyncio.create_task(evaluate(method_name))] = method_name
+
+            # Wait for the head start to elapse, or indefinitely once everything is running
+            done, _ = await asyncio.wait(
+                pending, timeout=delay if remaining else None,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            for task in done:
+                method_name = pending.pop(task)
+                try:
+                    status, payload = task.result()
+                except asyncio.CancelledError:
+                    continue
+                except (DiskFull, sqlite3.OperationalError):
+                    raise  # Fatal, just as it is when the methods run sequentially
+                except Exception as e:  # Should not happen: evaluate() catches its own
+                    errors[method_name] = e
+                    continue
+
+                if status == "success":
+                    winner = (method_name, payload)
+                    break
+
+                partial = _record_outcome(method_name, status, payload, errors, partial,
+                                          output_format)
+                if isinstance(payload, TargetUnavailableError):
+                    remaining.clear()  # Not worth launching further methods
+
+            if winner is not None:
+                break
+
+    finally:
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    return winner, errors, partial
 
 
 def _blacklist_if_captcha(domain: str, url: str, errors: dict[str, Optional[Exception]]) -> None:
@@ -413,15 +528,23 @@ def resolve_best_methods(url: str, allowed_methods: Literal["auto"] | list[str])
     return methods_resolved
 
 
-def postprocess_media(result: MultimodalSequence):
+async def postprocess_media(result: MultimodalSequence):
     """Ensure all media are located in the default ezmm directory (no temp files)
-    and transcode all videos into a format suitable for browser playback."""
-    for item in result.unique_items():
-        item.relocate(move_not_copy=True)
+    and transcode all videos into a format suitable for browser playback.
+
+    Both steps touch the file system and run FFmpeg, so they are kept off the event
+    loop: otherwise one video would stall every retrieval running concurrently.
+    """
+    await asyncio.to_thread(_relocate_items, result)
     from scrapemm import ffmpeg_available
     if ffmpeg_available:
-        for video in result.videos:
-            normalize_video(video)
+        await asyncio.gather(*(normalize_video(video) for video in result.videos))
+
+
+def _relocate_items(result: MultimodalSequence):
+    """Moves every item into the ezmm registry directory."""
+    for item in result.unique_items():
+        item.relocate(move_not_copy=True)
 
 
 def get_optimal_methods(url: str) -> list[str]:

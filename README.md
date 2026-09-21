@@ -7,7 +7,9 @@ This library aims to help developers and researchers to easily access multimodal
 * **If you want to download videos**: Then, the installation of [ffmpeg](https://ffmpeg.org/) is highly recommended.
 In Conda, you can install it with `conda install -c conda-forge ffmpeg`. Platforms like YouTube and
 Facebook serve video and audio as separate streams, and merging them needs ffmpeg. Without it,
-videos are downloaded **without sound**.
+videos are downloaded **without sound**. scrapeMM also normalizes downloaded videos into a format
+browsers can play; that step additionally needs `ffprobe`, which ships with a full ffmpeg install
+(the `imageio-ffmpeg` package provides `ffmpeg` only).
 * **Install Playwright dependencies** (used by multiple integrations) running `playwright install` (add `--force` if an already installed version needs an update).
 
 ## Configure
@@ -23,32 +25,40 @@ from scrapemm import update_config
 update_config(firecrawl_url="your_url")
 ```
 
-### Archive.today Access
-Archive.today guards its snapshots with strong anti-bot protection. You can circumvent it by setting cookies of sessions where you manually solved a CAPTCHA. scrapeMM does **not** solve CAPTCHAs.
-
-To establish a session, run
-```bash
-python scripts/configure_archive_today.py
-```
-This opens a snapshot of each mirror (archive.today, archive.is, archive.ph, …) in
-scrapeMM's own browser, one after another for all 6 different archive.today domains. Pass the check in that window each time; the
-resulting cookies are stored and re-used automatically. 
-
-**Running headless (e.g. on a server)?** The browser has to stay on that machine — the
-clearance you earn is bound to the browser *and* IP address that earned it — but its
-window can be brought to your screen. While waiting, the script prints an SSH command and
-a URL for exactly that: it tunnels Chrome's debugging port and opens the page in your
-local browser through Chrome's own DevTools frontend, where your clicks reach the remote
-page. Nothing needs to be installed on the server. Give yourself enough time to set the
-tunnel up: `python scripts/configure_archive_today.py 900`.
-
-Alternatively, paste a cookie export (`cookies.txt` or JSON, from any cookie extension)
-directly:
+A single Firecrawl instance is the throughput ceiling of the whole pipeline, so you can point
+scrapeMM at **several** of them. It probes all of them at startup, spreads its scrapes across
+those that respond, and retries a busy instance on another one instead of waiting:
 ```python
-from scrapemm import override_secret
-override_secret("archive_today_cookie")  # Paste the export, then press Alt+Enter
+update_config(firecrawl_urls=["http://host-a:3002", "http://host-b:3002"])
 ```
-Your cookies replace the ones shipped with scrapeMM.
+
+### Platform Cookies
+Some content is only served to a logged-in session. Set the respective cookie via
+`configure_secrets()` (or `override_secret("<name>")`) to reach it:
+
+| Secret | Unlocks |
+|---|---|
+| `facebook_cookie` | Facebook posts that require login |
+| `instagram_cookie` | Age-restricted Instagram posts ("can't be seen by certain audiences") |
+
+Facebook hides posts that fact-checkers flagged as false information behind an interstitial
+that yt-dlp cannot read. scrapeMM falls back to reading the video straight out of the page
+source in that case, so flagged posts stay retrievable.
+
+### Archive.today Access
+Archive.today guards its snapshot pages with a Google reCAPTCHA. scrapeMM does **not**
+solve CAPTCHAs: when a retrieval hits the check, it opens the snapshot in its own browser
+and waits for you to pass it, then reuses that session for the rest of the run. The
+session lasts only about **five minutes**, so retrieve a batch of archive.today URLs together
+after one solve. You can also pass the check up front with
+`python scripts/configure_archive_today.py` (add a number of seconds to wait, e.g. `900`,
+when running headless — it prints an SSH command to reach the browser window). All mirrors
+(`archive.is`, `archive.ph`, …) share one session.
+
+To run unattended, either disable the prompt with
+`update_config(archive_today_interactive_solve=False)`, or enable the **screenshot
+fallback** with `update_config(archive_today_screenshot_fallback=True)`, which serves the
+snapshot's screenshot and metadata (not its text) when there is no session.
 
 ## Usage
 
@@ -125,9 +135,32 @@ A domain gets blacklisted only if *all* retrieval methods failed, so a CAPTCHA o
 not exclude a domain that another method can still scrape. Blacklisting applies to the registrable
 domain, i.e., including all of its subdomains.
 
+Automatic blacklistings **expire after 7 days**: CAPTCHA gates are often transient (a burst of
+parallel requests can trigger one on a domain that is perfectly retrievable an hour later), so
+excluding a domain forever would quietly erode coverage over time. Change the duration with
+```python
+update_config(blacklist_ttl=24 * 60 * 60)  # Retry blacklisted domains after a day
+update_config(blacklist_ttl=0)  # Never expire
+```
+Domains you blacklist yourself via `blacklist_domain()` are **permanent** — they express a
+decision, not an observation — and stay excluded until you call `unblacklist_domain()`.
+
 Domains that are served by an integration (`perma.cc`, `archive.today`, `x.com`, ...) are never
 blacklisted automatically: their CAPTCHA gates are transient, so blacklisting would disable the
 respective integration for good.
+
+## Speeding Up Retrieval
+By default, scrapeMM tries its retrieval methods strictly one after another, so a slow method
+delays every method behind it by its full timeout budget. **Hedging** gives each method only a
+head start instead: once the delay elapses, the next method is launched *alongside* it, the first
+success wins, and the rest are cancelled. A method that fails early hands over immediately,
+without waiting out the delay.
+
+```python
+result = asyncio.run(retrieve(url, hedging_delay=5))  # 5 s head start per method
+```
+Use `update_config(hedging_delay=5)` to enable it process-wide. Hedging is **disabled by default**
+because it duplicates work — and, for paid methods such as Decodo, duplicates billable requests.
 
 ## How it works
 ```
@@ -140,8 +173,15 @@ Web scraping is done with [Firecrawl](https://github.com/mendableai/firecrawl) a
 
 Media is collected from `<img>` and `<video>` tags, from CSS background images, and from
 embedded players of the common video platforms (an `<iframe>` pointing at YouTube, Vimeo,
-Dailymotion, …), which are downloaded with yt-dlp. `max_video_size` caps those downloads
-just like it caps the ones of the platform integrations.
+Dailymotion, …), which are downloaded with yt-dlp. `max_video_size` caps every one of those
+downloads just like it caps the ones of the platform integrations; oversized videos are skipped
+without downloading a byte whenever the server announces a `Content-Length`.
+
+Images are taken at their highest available resolution: `srcset` candidates are compared, and
+lazy-loading attributes (`data-src`, `data-lazy-src`, `data-original`, …) are honoured, so pages
+that ship a placeholder in `src` still yield their real media. Media references are resolved
+against the page URL, no matter whether they are absolute, protocol-relative (`//cdn/x.jpg`),
+root-relative (`/x.jpg`) or document-relative (`img/x.jpg`).
 
 ## Supported Platforms
 ### Social Media

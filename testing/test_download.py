@@ -142,7 +142,7 @@ async def test_download_video_octet_stream_with_mp4_suffix_downloads_file(monkey
     async def fake_fetch_headers(url, session, timeout=3):
         return {"Content-Type": "binary/octet-stream"}
 
-    async def fake_download_video_file(video_url, session):
+    async def fake_download_video_file(video_url, session, max_video_size=None, **kwargs):
         return expected_video
 
     monkeypatch.setattr("scrapemm.download.videos.fetch_headers", fake_fetch_headers)

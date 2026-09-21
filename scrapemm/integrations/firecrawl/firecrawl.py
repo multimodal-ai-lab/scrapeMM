@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from pathlib import Path
+from typing import Optional
 
 import aiohttp
 from aiohttp import ClientResponseError, ClientConnectorError
@@ -15,13 +16,49 @@ from scrapemm.util import read_urls_from_file, get_domain, to_scraped_content
 
 logger = logging.getLogger("scrapeMM")
 
-FIRECRAWL_URLS = [
+DEFAULT_FIRECRAWL_URLS = [
     "http://localhost:3002",
     "http://firecrawl:3002",
     "http://0.0.0.0:3002",
 ]
-if config_url := get_config_var("firecrawl_url"):
-    FIRECRAWL_URLS = [config_url] + FIRECRAWL_URLS
+
+
+def _normalize_firecrawl_url(url: str) -> str:
+    url = str(url).strip()
+    if url and not url.startswith("http"):
+        url = "https://" + url
+    return url
+
+
+def configured_firecrawl_urls() -> list[str]:
+    """The Firecrawl instances to use, in order of preference: the configured ones
+    first, then the well-known defaults. Configuring several instances lets scrapeMM
+    spread its scrapes across them, which is what lifts the throughput ceiling of a
+    single self-hosted Firecrawl.
+
+    Set them with `update_config(firecrawl_urls=["http://host-a:3002", ...])`. The
+    older single-instance `firecrawl_url` setting keeps working.
+    """
+    configured: list[str] = []
+
+    urls = get_config_var("firecrawl_urls") or []
+    if isinstance(urls, str):  # Tolerate a single URL given to the plural setting
+        urls = [urls]
+    configured.extend(urls)
+
+    if single := get_config_var("firecrawl_url"):
+        configured.append(single)
+
+    # Preserve order while dropping duplicates
+    seen, ordered = set(), []
+    for url in [_normalize_firecrawl_url(u) for u in configured] + DEFAULT_FIRECRAWL_URLS:
+        if url and url not in seen:
+            seen.add(url)
+            ordered.append(url)
+    return ordered
+
+
+FIRECRAWL_URLS = configured_firecrawl_urls()
 
 NO_BOT_DOMAINS_FILE_PATH = Path(__file__).parent / "no_bot_domains.txt"
 NO_BOT_DOMAINS = read_urls_from_file(NO_BOT_DOMAINS_FILE_PATH)
@@ -30,45 +67,80 @@ NO_AD_BLOCKING_DOMAINS = {
     "snopes.com"
 }
 
-async def locate_firecrawl() -> str:
-    """Scans a list of URLs (included the user-specified one) to find a
-    running Firecrawl instance."""
-    firecrawl_url = await find_firecrawl(FIRECRAWL_URLS)
-    while not firecrawl_url:
-        current_url = get_config_var("firecrawl_url") or "any of " + ", ".join(FIRECRAWL_URLS)
-        firecrawl_url = input(f"❌ Unable to locate Firecrawl! It is not running "
-                              f"at {current_url}\n"
-                              f"Please enter the URL of your Firecrawl instance: ")
-        if firecrawl_url:
-            # Post-process input
-            firecrawl_url = firecrawl_url.strip()
-            if not firecrawl_url.startswith("http"):
-                firecrawl_url = "https://" + firecrawl_url
+async def locate_firecrawl() -> list[str]:
+    """Scans the configured and well-known URLs for running Firecrawl instances.
+    Returns every instance that responded, so that scrapes can be spread across them."""
+    urls = await find_all_firecrawls(configured_firecrawl_urls())
+    while not urls:
+        current = ", ".join(configured_firecrawl_urls())
+        entered = input(f"❌ Unable to locate Firecrawl! It is not running "
+                        f"at any of {current}\n"
+                        f"Please enter the URL of your Firecrawl instance: ")
+        if entered:
+            entered = _normalize_firecrawl_url(entered)
+            update_config(firecrawl_url=entered)
+            if await firecrawl_is_running(entered):
+                urls = [entered]
 
-            update_config(firecrawl_url=firecrawl_url)
+    return urls
 
-        if not await firecrawl_is_running(firecrawl_url):
-            firecrawl_url = None
 
-    return firecrawl_url
+async def find_all_firecrawls(urls: list[str]) -> list[str]:
+    """Probes all candidate URLs concurrently and returns those that are running,
+    keeping the given order of preference."""
+    states = await asyncio.gather(*(get_firecrawl_state(url) for url in urls))
+    return [url for url, state in zip(urls, states) if state == "running"]
 
 
 class Firecrawl:
-    """Wrapper around the AsyncFirecrawl class to handle pre- and post-processing."""
+    """Wrapper around the AsyncFirecrawl class to handle pre- and post-processing.
 
-    firecrawl_url: str
+    Holds one client per reachable Firecrawl instance and hands out scrapes in
+    round-robin order. A single self-hosted Firecrawl is the throughput ceiling of
+    the whole pipeline, so spreading the load across several of them is the cheapest
+    way to raise it.
+    """
 
     def __init__(self):
         self.n_scrapes = 0
-        self._firecrawl = None
+        self.firecrawl_urls: list[str] = []
+        self._clients: list = []
+        self._next_client = 0
+
+    @property
+    def firecrawl_url(self) -> Optional[str]:
+        """The primary instance. Kept for backwards compatibility."""
+        return self.firecrawl_urls[0] if self.firecrawl_urls else None
 
     async def connect(self):
         from firecrawl import AsyncFirecrawl
         logging.getLogger("firecrawl").setLevel(logging.WARNING)
-        self.firecrawl_url = await locate_firecrawl()
-        if self.firecrawl_url:
-            logger.info(f"✅ Detected Firecrawl running at {self.firecrawl_url}.")
-        self._firecrawl = AsyncFirecrawl(api_url=self.firecrawl_url)
+
+        urls = await locate_firecrawl()
+        if self._clients:
+            return  # Another coroutine connected while we were probing
+
+        self.firecrawl_urls = urls
+        if urls:
+            logger.info(f"✅ Detected {len(urls)} Firecrawl instance(s) "
+                        f"running at {', '.join(urls)}.")
+        self._clients = [AsyncFirecrawl(api_url=url) for url in urls]
+
+    def _pick_client(self) -> tuple[object, str]:
+        """Returns the next client in round-robin order, along with its URL."""
+        index = self._next_client % len(self._clients)
+        self._next_client += 1
+        return self._clients[index], self.firecrawl_urls[index]
+
+    def _drop_instance(self, url: str) -> None:
+        """Stops using an instance that went away, so that the remaining ones take over."""
+        if url not in self.firecrawl_urls:
+            return
+        index = self.firecrawl_urls.index(url)
+        del self.firecrawl_urls[index]
+        del self._clients[index]
+        logger.warning(f"Dropped Firecrawl instance {url}. "
+                       f"{len(self._clients)} instance(s) left.")
 
     async def scrape(self,
                      url: str,
@@ -85,7 +157,7 @@ class Firecrawl:
         if domain in NO_BOT_DOMAINS:
             raise UnsupportedDomainError(f"Firecrawl cannot scrape sites from {domain}")
 
-        if not self._firecrawl:
+        if not self._clients:
             await self.connect()
 
         # Throw an exception for unavailable URLs which would otherwise cause Firecrawl
@@ -94,8 +166,10 @@ class Firecrawl:
 
         document = None
         for attempt in range(max_attempts):
+            # Each attempt goes to the next instance, so a busy one is retried elsewhere
+            client, instance_url = self._pick_client()
             try:
-                document = await self._firecrawl.scrape(
+                document = await client.scrape(
                     url,
                     formats=["html"],
                     only_main_content=False,
@@ -109,15 +183,25 @@ class Firecrawl:
                 )
                 break
             except Exception as e:
-                # Ensure firecrawl is still running
-                state = await get_firecrawl_state(self.firecrawl_url)
+                # Ensure this instance is still running
+                state = await get_firecrawl_state(instance_url)
                 if state == "unavailable":
-                    logger.error(f"❌ Firecrawl stopped running at {self.firecrawl_url}.")
-                    raise RuntimeError("Firecrawl stopped running.")
+                    logger.error(f"❌ Firecrawl stopped running at {instance_url}.")
+                    if len(self._clients) == 1:
+                        raise RuntimeError("Firecrawl stopped running.")
+                    self._drop_instance(instance_url)
+                    if attempt >= max_attempts - 1:
+                        raise e
                 elif state == "busy":
                     if attempt < max_attempts - 1:
-                        logger.warning(f"⚠️ Firecrawl seems busy. Retrying in 10 seconds...")
-                        await asyncio.sleep(10)
+                        # With several instances the next attempt goes elsewhere, so
+                        # there is nothing to wait for.
+                        if len(self._clients) > 1:
+                            logger.debug(f"Firecrawl at {instance_url} is busy. "
+                                         f"Retrying on another instance...")
+                        else:
+                            logger.warning(f"⚠️ Firecrawl seems busy. Retrying in 10 seconds...")
+                            await asyncio.sleep(10)
                     else:
                         raise e
                 else:
@@ -152,13 +236,6 @@ class Firecrawl:
 
 
 fire = Firecrawl()
-
-
-async def find_firecrawl(urls):
-    for url in urls:
-        if await firecrawl_is_running(url):
-            return url
-    return None
 
 
 async def firecrawl_is_running(url: str) -> bool:

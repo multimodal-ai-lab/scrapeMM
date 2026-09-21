@@ -16,3 +16,4 @@ t.co
 perma.cc
 washingtonpost.com
 indiatoday.in
+zeit.de

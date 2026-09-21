@@ -3,12 +3,13 @@ import base64
 import binascii
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
 from pathlib import Path
 from typing import Optional, Awaitable, Iterable, Union, TYPE_CHECKING
-from urllib.parse import unquote
+from urllib.parse import unquote, urljoin
 
 import aiohttp
 import tqdm
@@ -25,7 +26,8 @@ from scrapemm.download.util import (
     looks_like_vector_file_url,
     looks_like_video_embed_url,
 )
-from scrapemm.download.videos import video_from_binary, download_hls_video, is_hls
+from scrapemm.download.videos import (video_from_binary, download_hls_video, is_hls,
+                                      _resolve_ffmpeg_path, _resolve_ffprobe_path)
 
 if TYPE_CHECKING:
     from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
@@ -228,6 +230,119 @@ def _strip_background_image_style(element: Tag) -> None:
         del element["src"]
 
 
+# Lazy-loading plugins park the real image URL in a data attribute and leave `src`
+# pointing at a placeholder. Ordered by how specific the attribute is.
+LAZY_SRC_ATTRS = ("data-src", "data-lazy-src", "data-original", "data-original-src",
+                  "data-image-src", "data-hi-res-src", "data-full-src", "data-echo",
+                  "data-litespeed-src")
+LAZY_SRCSET_ATTRS = ("srcset", "data-srcset", "data-lazy-srcset")
+
+# Placeholder `src` values that lazy loaders use until the real image is swapped in
+_PLACEHOLDER_HINTS = ("placeholder", "blank.gif", "blank.png", "spacer.gif",
+                      "lazy.gif", "loader.gif", "transparent.png", "grey.gif")
+
+
+def _largest_srcset_candidate(srcset: str) -> Optional[str]:
+    """Picks the highest-resolution URL out of a srcset attribute. Candidates are
+    'url [<n>w|<n>x]' pairs; the descriptor is optional."""
+    best_url, best_weight = None, -1.0
+    for candidate in srcset.split(","):
+        parts = candidate.strip().split()
+        if not parts:
+            continue
+        url, descriptor = parts[0], parts[1] if len(parts) > 1 else ""
+        if _is_placeholder_src(url):
+            continue  # Some lazy loaders fill srcset with placeholders too
+        try:
+            # 'w' describes pixel width, 'x' pixel density; both are "bigger is better"
+            weight = float(descriptor[:-1]) if descriptor[-1:] in ("w", "x") else 1.0
+        except ValueError:
+            weight = 1.0
+        if weight > best_weight:
+            best_url, best_weight = url, weight
+    return best_url
+
+
+def _is_placeholder_src(src: str) -> bool:
+    """True iff `src` looks like a stand-in that a lazy loader replaces at runtime."""
+    if not src:
+        return True
+    lowered = src.lower()
+    # Inline data URIs are the classic placeholder, but can also be the real image.
+    # Callers only prefer an alternative when one actually exists, so this is safe.
+    if lowered.startswith("data:"):
+        return True
+    return any(hint in lowered for hint in _PLACEHOLDER_HINTS)
+
+
+def _best_image_src(element: Tag) -> Optional[str]:
+    """Returns the best available source URL of an <img>.
+
+    Server-rendered HTML rarely carries the final image in `src`: lazy loaders keep it
+    in a data attribute until the element scrolls into view, and responsive images
+    offer several resolutions via srcset. Taking `src` alone therefore yields
+    placeholders or needlessly small variants.
+    """
+    src = element.get("src")
+    src = str(src).strip() if src else ""
+
+    # Highest-resolution responsive variant, if the element offers one
+    for attr in LAZY_SRCSET_ATTRS:
+        if srcset := element.get(attr):
+            if candidate := _largest_srcset_candidate(str(srcset)):
+                return candidate
+
+    # A real src beats any data attribute
+    if src and not _is_placeholder_src(src):
+        return src
+
+    # Otherwise fall back to whatever the lazy loader stashed away
+    for attr in LAZY_SRC_ATTRS:
+        if value := element.get(attr):
+            value = str(value).strip()
+            if value and not _is_placeholder_src(value):
+                return value
+
+    return src or None
+
+
+def _resolve_media_url(uri: str, page_url: Optional[str], domain_root: Optional[str]) -> str:
+    """Turns a media reference found in the page into an absolute URL.
+
+    Handles protocol-relative (`//cdn/x.jpg`), root-relative (`/x.jpg`) and
+    document-relative (`img/x.jpg`) references. Data URIs and already-absolute URLs
+    are returned unchanged.
+    """
+    uri = uri.strip()
+    if not uri or uri.startswith("data:"):
+        return uri
+    if uri.startswith("//"):
+        return _normalize_media_url(uri)
+    if is_url(uri):
+        return uri
+    if page_url:
+        # urljoin resolves every relative form against the page it was found on
+        return urljoin(page_url, uri)
+    if domain_root and is_root_relative_url(uri):
+        return f"{domain_root}{uri}"
+    return uri
+
+
+def _best_video_src(element: Tag) -> Optional[str]:
+    """Returns the best available source URL of a <video> or <source>. Players are
+    lazy-loaded just like images are, so `src` alone is not enough."""
+    src = element.get("src")
+    src = str(src).strip() if src else ""
+    if src and not _is_placeholder_src(src):
+        return src
+    for attr in LAZY_SRC_ATTRS:
+        if value := element.get(attr):
+            value = str(value).strip()
+            if value and not _is_placeholder_src(value):
+                return value
+    return src or None
+
+
 def _extract_media_elements(soup: BeautifulSoup) -> list[Tag]:
     """Identifies all potential media elements and their URIs in the soup."""
     media_elements = []
@@ -240,10 +355,13 @@ def _extract_media_elements(soup: BeautifulSoup) -> list[Tag]:
             media_elements.append(element)
 
     for element in soup.find_all("img"):
-        src = str(element.get("src"))
+        src = _best_image_src(element)
         # Skip vector graphics
         if src and looks_like_vector_file_url(src):
             continue
+        if src:
+            # Wire the resolved URI through the existing src-based resolve_media path
+            element["src"] = src
         _add(element)
 
     # CSS background images used as primary media (e.g. Telegram photo wraps).
@@ -270,9 +388,12 @@ def _extract_media_elements(soup: BeautifulSoup) -> list[Tag]:
 
     # For videos, include either the src attribute (higher precedence) or the first source element
     for video in soup.find_all("video"):
-        if video.has_attr("src"):
+        if src := _best_video_src(video):
+            video["src"] = src
             _add(video)
         elif source := video.find("source"):
+            if src := _best_video_src(source):
+                source["src"] = src
             _add(source)
             # In the HTML DOM, replace the video node with the source node to ensure a clean output
             video.replace_with(source)
@@ -350,10 +471,12 @@ async def resolve_media(
     tasks = []
     unique_urls = []  # We use a list to map normalized URLs to their download result to avoid duplicate downloads
 
-    # Normalize URLs in URI list
+    # Normalize URLs in URI list. Pages reference media protocol-relative (//cdn/x.jpg),
+    # root-relative (/x.jpg) and document-relative (img/x.jpg); resolving only the
+    # root-relative ones silently drops the rest.
     for i, uri in enumerate(media_uris):
-        if uri and domain_root and is_root_relative_url(uri):
-            media_uris[i] = f"{domain_root}{uri}"
+        if uri:
+            media_uris[i] = _resolve_media_url(uri, page_url=url, domain_root=domain_root)
 
     # Create retrieval tasks for URL elements
     for element, uri in zip(media_elements, media_uris):
@@ -366,7 +489,8 @@ async def resolve_media(
                     tasks.append(fetch_video_via_page(source_element, uri))
                 else:
                     tasks.append(
-                        download_video(uri, session=session, headers={"Referer": url} if url else {}, **kwargs))
+                        download_video(uri, session=session, max_video_size=max_video_size,
+                                       headers={"Referer": url} if url else {}, **kwargs))
             else:  # It's an image
                 if source_element:
                     tasks.append(fetch_image_via_page(source_element, uri, **kwargs))
@@ -644,60 +768,131 @@ def from_base64(b64_data: str, mime_type: str = "image/jpeg", url: str | None = 
         logger.debug(f"Error decoding {mime_type} base64 data. \n {type(e).__name__}: {e}")
 
 
-def normalize_video(video: Video):
-    """Transcodes the video for browser playback."""
+async def normalize_video(video: Video) -> bool:
+    """Transcodes the video in place so that browsers can play it back. Returns
+    whether the video was changed.
+
+    The transcode replaces the item's own file: writing the result to a sibling path
+    and leaving the item pointing at the original would do the work without ever
+    taking effect. ffmpeg runs as an async subprocess, so a re-encode does not stall
+    the retrievals running concurrently on this event loop.
+    """
     input_path = video.file_path
-    output_path = input_path.with_suffix(".normalized.mp4")
+    # Write beside the original first, then swap atomically, so that a crash or a
+    # failing transcode can never leave a truncated file behind.
+    temp_path = input_path.with_name(f"{input_path.stem}.normalizing.mp4")
 
     try:
-        meta = probe_video(input_path)
+        meta = await probe_video(input_path)
         if not meta:
-            return
+            return False
 
-        # Case 1: fully browser-safe → only ensure faststart
         if is_browser_safe(meta):
-            run_command([
-                "ffmpeg",
-                "-y",
+            # Already playable; only move the moov atom to the front so that players
+            # can start before the whole file has arrived. Streams are copied, not
+            # re-encoded, so this is cheap.
+            cmd = ["-i", str(input_path), "-c", "copy", "-movflags", "+faststart"]
+        else:
+            # Re-encode to the canonical browser format
+            cmd = [
                 "-i", str(input_path),
-                "-c", "copy",
+                "-map", "0:v:0",
+                "-map", "0:a?",
+                "-c:v", "libx264",
+                "-profile:v", "main",
+                "-level", "4.1",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "128k",
                 "-movflags", "+faststart",
-                str(output_path),
-            ])
-            return output_path
+            ]
 
-        # Case 2: re-encode to canonical browser format
-        run_command([
-            "ffmpeg",
-            "-y",
-            "-i", str(input_path),
-            "-map", "0:v:0",
-            "-map", "0:a?",
-            "-c:v", "libx264",
-            "-profile:v", "main",
-            "-level", "4.1",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            "-movflags", "+faststart",
-            str(output_path),
-        ])
-    except subprocess.CalledProcessError as e:
-        logger.warning(f"Error normalizing video {input_path}: {e}")
+        ffmpeg = _resolve_ffmpeg_path()
+        if not ffmpeg:
+            logger.debug("FFmpeg not found; skipping video normalization.")
+            return False
+
+        result = await run_command_async([ffmpeg, "-y", "-loglevel", "error", "-hide_banner",
+                                          *cmd, str(temp_path)])
+        if result is None or not temp_path.exists() or temp_path.stat().st_size == 0:
+            logger.warning(f"Could not normalize video {input_path}.")
+            temp_path.unlink(missing_ok=True)
+            return False
+
+        _replace_item_file(video, temp_path)
+        return True
+
+    except Exception as e:
+        logger.warning(f"Error normalizing video {input_path}: {type(e).__name__}: {e}")
+        temp_path.unlink(missing_ok=True)
+        return False
 
 
-def probe_video(path: Path) -> dict | None:
+def _replace_item_file(item: Item, new_file: Path) -> None:
+    """Swaps an item's file for `new_file`, keeping the item (and the ezmm registry)
+    pointing at the result. The item keeps its id and reference."""
+    from ezmm.common.registry import item_registry
+
+    target = item.file_path.with_suffix(".mp4")
+    os.replace(new_file, target)
+    if target != item.file_path:
+        # The container changed (e.g. .webm -> .mp4), so the old file is now stale
+        item.file_path.unlink(missing_ok=True)
+        item.file_path = target
+        item_registry.update_file_path(item)
+
+
+async def run_command_async(cmd: list[str]) -> Optional[bytes]:
+    """Runs a command without blocking the event loop. Returns its stdout,
+    or None if the command failed."""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await process.communicate()
+    except (FileNotFoundError, OSError) as e:
+        logger.debug(f"Could not run {cmd[0]}: {e}")
+        return None
+
+    if process.returncode != 0:
+        detail = stderr.decode("utf-8", errors="replace").strip() if stderr else ""
+        logger.debug(f"Command {cmd[0]} failed with code {process.returncode}: {detail}")
+        return None
+    return stdout
+
+
+_warned_about_ffprobe = False
+
+
+async def probe_video(path: Path) -> dict | None:
     """Return ffprobe JSON metadata."""
-    result = run_command([
-        "ffprobe",
+    global _warned_about_ffprobe
+    ffprobe = _resolve_ffprobe_path()
+    if not ffprobe:
+        if not _warned_about_ffprobe:
+            _warned_about_ffprobe = True
+            logger.warning("⚠️ ffprobe not found, so videos cannot be normalized for browser "
+                           "playback. It ships with FFmpeg; note that the imageio-ffmpeg "
+                           "package provides ffmpeg only.")
+        return None
+    stdout = await run_command_async([
+        ffprobe,
         "-v", "error",
         "-print_format", "json",
         "-show_streams",
         "-show_format",
         str(path),
     ])
-    if result:
-        return json.loads(result.stdout)
+    if stdout:
+        try:
+            return json.loads(stdout)
+        except json.JSONDecodeError:
+            logger.debug(f"ffprobe returned no valid JSON for {path}.")
+    return None
+
+
 
 
 def is_browser_safe(meta: dict) -> bool:

@@ -1,16 +1,19 @@
 from typing import Optional, TYPE_CHECKING, Union
 from urllib.parse import urljoin
+import asyncio
 import logging
 import os
 import shutil
 from functools import lru_cache
+from pathlib import Path
 
 import aiohttp
 import m3u8
 from ezmm import Video
 from ezmm.util import ts_to_mp4
 
-from scrapemm.download.util import looks_like_hls_url, looks_like_video_file_url
+from scrapemm.download.util import (looks_like_hls_url, looks_like_video_file_url,
+                                    exceeds_max_size)
 
 if TYPE_CHECKING:
     from playwright.async_api import APIRequestContext
@@ -20,22 +23,43 @@ from scrapemm.download.common import HEADERS
 
 logger = logging.getLogger("scrapeMM")
 
+# HLS playlists routinely contain hundreds of segments. Fetch them in parallel, but
+# keep the fan-out per video modest so one video cannot monopolise the connection pool.
+MAX_CONCURRENT_SEGMENTS = 10
+
 
 async def download_video(
         video_url: str,
         session: Union[aiohttp.ClientSession, "APIRequestContext"],
+        max_video_size: Optional[int] = None,
         **kwargs
 ) -> Optional[Video]:
-    """Downloads the linked video (stream) and returns it as a Video object."""
+    """Downloads the linked video (stream) and returns it as a Video object.
+    Videos larger than `max_video_size` bytes are skipped."""
 
     try:
-        headers = await fetch_headers(video_url, session, timeout=3000, **kwargs)
-        content_type = headers.get('Content-Type') or headers.get('content-type') or ''
+        content_type = ''
+        try:
+            headers = await fetch_headers(video_url, session, **kwargs)
+            content_type = headers.get('Content-Type') or headers.get('content-type') or ''
+
+            # Skip oversized videos before downloading a single byte of them
+            if exceeds_max_size(headers, max_video_size):
+                logger.debug(f"Skipping {video_url}: larger than the limit of {max_video_size} bytes.")
+                return None
+        except Exception as e:
+            # The probe only tells us *how* to download. Losing it is no reason to give
+            # up on a URL that already looks like a video: slow or HEAD-hostile hosts
+            # would otherwise cost us the media entirely.
+            if not (looks_like_video_file_url(video_url) or looks_like_hls_url(video_url)):
+                raise
+            logger.debug(f"Header probe failed for {video_url} ({type(e).__name__}); "
+                         f"falling back to the URL suffix.")
 
         if is_video(content_type) or looks_like_video_file_url(video_url):
-            return await download_video_file(video_url, session, **kwargs)
+            return await download_video_file(video_url, session, max_video_size=max_video_size, **kwargs)
         elif is_hls(content_type) or looks_like_hls_url(video_url):
-            return await download_hls_video(video_url, session, **kwargs)
+            return await download_hls_video(video_url, session, max_video_size=max_video_size, **kwargs)
         else:
             logger.warning(
                 f"Cannot download video from {video_url}. Unable to handle content type: {content_type}."
@@ -63,11 +87,14 @@ def is_hls(content_type: str) -> bool:
 async def download_video_file(
         video_url: str,
         session: Union[aiohttp.ClientSession, "APIRequestContext"],
+        max_video_size: Optional[int] = None,
         **kwargs
 ) -> Optional[Video]:
-    """Download a single video file from a URL and return it as a Video object."""
+    """Download a single video file from a URL and return it as a Video object.
+    The download is aborted once it exceeds `max_video_size` bytes."""
     try:
-        content = await request_static(video_url, session, get_text=False, **kwargs)
+        content = await request_static(video_url, session, get_text=False,
+                                       max_size=max_video_size, **kwargs)
         if content:
             assert isinstance(content, bytes)
             return video_from_binary(content, video_url)
@@ -88,6 +115,7 @@ def video_from_binary(binary_data: bytes, source_url: str) -> Video:
 async def download_hls_video(
         playlist_url: str,
         session: Union[aiohttp.ClientSession, "APIRequestContext"],
+        max_video_size: Optional[int] = None,
         **kwargs
 ) -> Optional[Video]:
     """Download an HTTP Live Streaming (HLS) video from a playlist URL and return it as a Video object."""
@@ -153,23 +181,34 @@ async def download_hls_video(
                 return video
             return None
 
-        # Download all segments
-        video_segments = []
+        # Download all segments concurrently. A playlist routinely has hundreds of
+        # them, so fetching one after another dominates the retrieval time.
+        segment_urls = [
+            segment.uri if segment.uri.startswith('http') else urljoin(base_url, segment.uri)
+            for segment in playlist.segments
+        ]
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_SEGMENTS)
 
-        for i, segment in enumerate(playlist.segments):
-            # Construct full URL for the segment
-            if segment.uri.startswith('http'):
-                segment_url = segment.uri
-            else:
-                segment_url = urljoin(base_url, segment.uri)
+        async def fetch_segment(index: int, segment_url: str) -> Optional[bytes]:
+            async with semaphore:
+                try:
+                    return await request_static(segment_url, session, get_text=False)
+                except Exception as e:
+                    logger.debug(f"Failed to download segment {index} from {segment_url}: {e}")
+                    return None
 
-            # Download the segment
-            try:
-                segment_data = await request_static(segment_url, session, get_text=False)
-                if segment_data:
-                    video_segments.append(segment_data)
-            except Exception as e:
-                logger.debug(f"Failed to download segment {i} from {segment_url}: {e}")
+        downloaded = await asyncio.gather(
+            *(fetch_segment(i, u) for i, u in enumerate(segment_urls))
+        )
+        # Keep playlist order; skipping failed segments matches the previous behaviour
+        video_segments = [data for data in downloaded if data]
+
+        if max_video_size is not None:
+            total = sum(len(data) for data in video_segments)
+            if total > max_video_size:
+                logger.debug(f"Skipping HLS video {playlist_url}: {total} bytes exceed "
+                             f"the limit of {max_video_size}.")
+                return None
 
         # Combine all segments
         if video_segments:
@@ -191,7 +230,7 @@ async def download_hls_video(
 async def is_maybe_video_url(url: str, session: Union[aiohttp.ClientSession, "APIRequestContext"]) -> bool:
     """Returns True iff the URL points at an accessible video file/stream."""
     try:
-        headers = await fetch_headers(url, session, timeout=3000)
+        headers = await fetch_headers(url, session)
         content_type = headers.get('Content-Type') or headers.get('content-type') or ''
         if content_type.startswith("video/") or content_type == "application/vnd.apple.mpegurl":
             # Surely a video
@@ -212,8 +251,6 @@ async def _ffmpeg_remux_hls_to_mp4(playlist_url: str) -> Optional[bytes]:
 
     We pass headers for basic compatibility and copy streams without re-encoding.
     """
-    import asyncio
-
     # Prepare optional headers for ffmpeg.
     user_agent = HEADERS.get('User-Agent', '')
     headers_lines = []
@@ -261,6 +298,23 @@ async def _ffmpeg_remux_hls_to_mp4(playlist_url: str) -> Optional[bytes]:
         logger.error("FFmpeg not found. Cannot remux HLS.")
     except Exception as e:
         logger.error(f"FFmpeg failed: {e}")
+    return None
+
+
+@lru_cache(maxsize=1)
+def _resolve_ffprobe_path() -> Optional[str]:
+    """Find an ffprobe executable. ffprobe ships alongside ffmpeg, so the ffmpeg
+    location found by `_resolve_ffmpeg_path()` is the most reliable hint."""
+    which = shutil.which("ffprobe")
+    if which:
+        return which
+
+    ffmpeg = _resolve_ffmpeg_path()
+    if ffmpeg:
+        sibling = Path(ffmpeg).with_name("ffprobe" + Path(ffmpeg).suffix)
+        if sibling.is_file():
+            return str(sibling)
+
     return None
 
 

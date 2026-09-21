@@ -12,26 +12,50 @@ from .paths import APP_NAME, BLACKLIST_PATH
 
 logger = logging.getLogger(APP_NAME)
 
+# Automatic (CAPTCHA-triggered) blacklistings expire after this many seconds. CAPTCHA
+# gates are frequently transient -- a burst of parallel requests can trigger one on a
+# domain that is perfectly retrievable an hour later -- so excluding a domain forever
+# would silently erode coverage over time.
+DEFAULT_BLACKLIST_TTL = 7 * 24 * 60 * 60  # 7 days
+
 
 class DomainBlacklist:
     """Maps each blacklisted domain to the reason why it was blacklisted. Persisted
-    to disk, i.e., kept across processes."""
+    to disk, i.e., kept across processes.
 
-    def __init__(self, path: Path = BLACKLIST_PATH):
+    Entries added automatically (because a CAPTCHA was encountered) expire after
+    `ttl` seconds. Entries added manually via `blacklist_domain()` are permanent:
+    they express a deliberate decision, not an observation that may go stale.
+    """
+
+    def __init__(self, path: Path = BLACKLIST_PATH, ttl: float = DEFAULT_BLACKLIST_TTL):
         self.path = path
-        self._domains: dict[str, str] = self._load()
+        self.ttl = ttl
+        self._domains: dict[str, dict] = self._load()
 
     def reason(self, domain: str) -> Optional[str]:
-        """Returns why the domain was blacklisted (None if it is not blacklisted)."""
-        return self._domains.get(domain)
+        """Returns why the domain was blacklisted (None if it is not blacklisted).
+        Expired entries are dropped and count as not blacklisted."""
+        entry = self._domains.get(domain)
+        if entry is None:
+            return None
+        if self._is_expired(entry):
+            del self._domains[domain]
+            self._save()
+            logger.info(f"⌛ Blacklisting of '{domain}' expired. Retrieving it again.")
+            return None
+        return entry["reason"]
 
-    def add(self, domain: str, reason: str) -> None:
-        """Blacklists the domain persistently, remembering the given reason."""
-        if self._domains.get(domain) == reason:
+    def add(self, domain: str, reason: str, permanent: bool = False) -> None:
+        """Blacklists the domain persistently, remembering the given reason.
+        Unless `permanent`, the entry expires after `self.ttl` seconds."""
+        existing = self._domains.get(domain)
+        if existing and existing["reason"] == reason and existing["permanent"] == permanent:
             return
-        self._domains[domain] = reason
+        self._domains[domain] = dict(reason=reason, added=time.time(), permanent=permanent)
         self._save()
-        logger.warning(f"⛔ Blacklisted domain '{domain}': {reason}")
+        expiry = "permanently" if permanent else f"for {self.ttl / 86400:.1f} days"
+        logger.warning(f"⛔ Blacklisted domain '{domain}' {expiry}: {reason}")
 
     def remove(self, domain: str) -> bool:
         """Removes the domain from the blacklist. Returns False if it wasn't blacklisted."""
@@ -47,24 +71,50 @@ class DomainBlacklist:
         self._save()
 
     def domains(self) -> dict[str, str]:
-        """Returns all blacklisted domains along with the respective reason."""
-        return dict(self._domains)
+        """Returns all non-expired blacklisted domains along with the respective reason."""
+        self._prune()
+        return {domain: entry["reason"] for domain, entry in self._domains.items()}
+
+    def _is_expired(self, entry: dict) -> bool:
+        if entry["permanent"] or self.ttl <= 0:
+            return False
+        return time.time() - entry["added"] > self.ttl
+
+    def _prune(self) -> None:
+        """Drops all expired entries."""
+        alive = {d: e for d, e in self._domains.items() if not self._is_expired(e)}
+        if len(alive) != len(self._domains):
+            self._domains = alive
+            self._save()
 
     def __contains__(self, domain: str) -> bool:
-        return domain in self._domains
+        return self.reason(domain) is not None
 
     def __len__(self) -> int:
+        self._prune()
         return len(self._domains)
 
-    def _load(self) -> dict[str, str]:
+    def _load(self) -> dict[str, dict]:
         if not self.path.exists():
             return {}
         try:
             with open(self.path, "r", encoding="utf-8") as f:
-                return yaml.safe_load(f) or {}
+                raw = yaml.safe_load(f) or {}
         except (OSError, yaml.YAMLError):
             logger.warning(f"Could not read the domain blacklist at {self.path}.", exc_info=True)
             return {}
+        return {domain: self._parse_entry(value) for domain, value in raw.items()}
+
+    @staticmethod
+    def _parse_entry(value) -> dict:
+        """Reads one blacklist entry, accepting the legacy format where an entry was
+        just the reason string. Legacy entries start their TTL now, i.e. they are
+        given a fresh window rather than expiring immediately."""
+        if isinstance(value, dict):
+            return dict(reason=value.get("reason", ""),
+                        added=value.get("added", time.time()),
+                        permanent=value.get("permanent", False))
+        return dict(reason=str(value), added=time.time(), permanent=False)
 
     def _save(self) -> None:
         try:
@@ -77,9 +127,16 @@ class DomainBlacklist:
 blacklist = DomainBlacklist()
 
 
+def set_blacklist_ttl(seconds: float) -> None:
+    """Sets how long (in seconds) an automatically blacklisted domain stays excluded.
+    Use 0 (or any negative value) to keep automatic blacklistings forever."""
+    blacklist.ttl = seconds
+
+
 def blacklist_domain(domain: str, reason: str) -> None:
-    """Blacklists the given domain persistently, i.e., excludes it from any retrieval."""
-    blacklist.add(domain, reason)
+    """Blacklists the given domain permanently, i.e., excludes it from any retrieval
+    until `unblacklist_domain()` is called."""
+    blacklist.add(domain, reason, permanent=True)
 
 
 def unblacklist_domain(domain: str) -> bool:

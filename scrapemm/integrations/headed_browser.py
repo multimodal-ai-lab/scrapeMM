@@ -1,9 +1,12 @@
 import asyncio
+import atexit
 import json
 import logging
 import os
 import sys
 import urllib.request
+from contextlib import suppress
+from pathlib import Path
 from typing import Optional, ClassVar
 from urllib.parse import urlparse
 
@@ -15,6 +18,7 @@ from seleniumbase.undetected.cdp_driver.browser import Browser
 
 from scrapemm import RetrievalFailed
 from scrapemm.common import get_config_var
+from scrapemm.common.paths import BROWSER_PROFILE_PATH
 from scrapemm.common.retrieval_integration import RetrievalIntegration
 from scrapemm.common.scraping_response import ScrapedContent
 from scrapemm.util import get_domain
@@ -46,7 +50,110 @@ def _browser_args() -> list[str]:
     return [
         "--ignore-certificate-errors",
         f"--remote-allow-origins=http://localhost:{_devtools_local_port()}",
+        # A reused profile remembers how the last run ended. After an unclean exit
+        # Chromium greets the next start with its crash-restore bubble and reopens the
+        # previous tabs, which stalls the CDP attach long enough to time out. None of
+        # that is wanted for automation, so it is switched off.
+        "--hide-crash-restore-bubble",
+        "--disable-session-crashed-bubble",
+        "--disable-infobars",
+        "--no-first-run",
+        "--no-default-browser-check",
     ]
+
+
+async def _close_browser_gracefully(browser: Browser, settle: float = 2.0) -> bool:
+    """Asks Chromium to shut itself down via CDP, so it flushes its profile to disk.
+
+    Returns whether the request got through. Best-effort throughout: a browser that
+    already died is closed by definition, and a failure here only costs persistence,
+    never the retrieval.
+    """
+    try:
+        async with async_playwright() as p:
+            connection = await p.chromium.connect_over_cdp(
+                browser.get_endpoint_url(), timeout=5_000)
+            context = connection.contexts[0]
+            page = context.pages[0] if context.pages else await context.new_page()
+            session = await context.new_cdp_session(page)
+            # Browser.close tears down the connection it arrives on, so both of these
+            # are expected to raise once the browser is actually gone.
+            with suppress(Exception):
+                await session.send("Browser.close")
+            with suppress(Exception):
+                await connection.close()
+    except Exception:
+        logger.debug("Could not close the headed browser gracefully; "
+                     "its profile may miss the most recent changes.", exc_info=True)
+        return False
+
+    # Give the process a moment to finish writing before it is terminated
+    await asyncio.sleep(settle)
+    return True
+
+
+# Exclusive handle on the profile, held for as long as this process runs. The OS drops
+# it when the process ends, so a crash cannot leave a stale lock behind.
+_profile_lock: Optional[object] = None
+
+
+def _acquire_profile_lock(path: Path) -> bool:
+    """Takes an exclusive lock on the profile directory, so only one process uses it.
+
+    Chromium refuses to run two instances on one profile -- but it fails silently and
+    unhelpfully: the second launch hands its request to the already running instance,
+    which pops up an empty window, and then exits. The caller is left waiting on a
+    browser it does not control. So the clash has to be detected before launching.
+    """
+    global _profile_lock
+    if _profile_lock is not None:
+        return True  # This process already holds it
+
+    try:
+        handle = open(path / "scrapemm.lock", "a+b")
+    except OSError:
+        return False
+
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return False
+
+    _profile_lock = handle
+    return True
+
+
+def _resolve_profile_dir() -> Optional[str]:
+    """Returns the directory of the shared browser's persistent profile, creating it if
+    needed. Returns None (i.e. a throwaway profile) if the profile is unusable, already
+    taken by another process, or disabled via `update_config(browser_profile=False)`."""
+    configured = get_config_var("browser_profile", True)
+    if configured is False:
+        return None
+
+    path = Path(configured) if isinstance(configured, str) else BROWSER_PROFILE_PATH
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.warning(f"Could not create the browser profile directory {path}.", exc_info=True)
+        return None
+
+    if not _acquire_profile_lock(path):
+        logger.warning(
+            f"The browser profile at {path} is in use by another scrapeMM process. "
+            f"Running on a throwaway profile instead, so sessions established now will "
+            f"not persist. Close the other process if you are capturing a session."
+        )
+        return None
+
+    return str(path)
 
 
 def _resolve_browser_executable(playwright: Optional[Playwright]) -> Optional[str]:
@@ -134,6 +241,23 @@ _BROWSER_CRASH_MARKERS = (
 )
 
 
+@atexit.register
+def _persist_browser_profile_at_exit() -> None:
+    """Closes the shared browser cleanly when the process ends.
+
+    Without this, the ordinary case -- start scrapeMM, retrieve, exit -- would discard
+    every session refresh the browser collected along the way, because the profile is
+    only written on a flush timer or a clean shutdown.
+    """
+    browser = HeadedBrowser._browser
+    if browser is None:
+        return
+    try:
+        asyncio.run(_close_browser_gracefully(browser))
+    except Exception:
+        pass  # Interpreter shutdown is no place to raise
+
+
 class HeadedBrowser(RetrievalIntegration):
     """Base class for retrieval integrations that need a headed browser to avoid bot blocking
      mechanisms (e.g., Cloudflare) when retrieving web content.
@@ -184,36 +308,67 @@ class HeadedBrowser(RetrievalIntegration):
             stale = HeadedBrowser._browser is None or HeadedBrowser._browser.stopped
             superseded = bad_generation is not None and bad_generation == HeadedBrowser._generation
             if stale or superseded:
-                self._cleanup_resources()
+                if superseded and not stale:
+                    # The browser is being replaced while still alive, so let it persist
+                    # its profile first. A crashed one has nothing left to flush.
+                    await self._shutdown_browser()
+                else:
+                    self._cleanup_resources()
                 await self._start_browser_locked(playwright)
                 HeadedBrowser._generation += 1
             return HeadedBrowser._browser, HeadedBrowser._generation
 
     async def _start_browser_locked(self, playwright: Optional[Playwright] = None):
-        """Starts the shared UC browser. Caller must already hold `_lock`."""
-        try:
-            xvfb_metrics = "1920,1080" if sys.platform.startswith("linux") else None
-            executable_path = _resolve_browser_executable(playwright)
-            logger.debug(f"Starting headed browser: {executable_path or 'system default'}")
-            HeadedBrowser._browser = await cdp_driver.start_async(
-                headless=False,
-                uc=True,
-                no_sandbox=True,
-                disable_setuid_sandbox=True,
-                start_maximized=True,
-                xvfb_metrics=xvfb_metrics,
-                timeout=30,
-                # Note: `cdp_driver.start_async()` has no 'chromium_arg' parameter. Passing
-                # browser flags any other way makes them end up in **kwargs, where they are
-                # silently dropped.
-                browser_args=_browser_args(),
-                browser_executable_path=executable_path,
-            )
-            if HeadedBrowser._browser:
-                logger.debug("cdp_driver started successfully.")
-        except Exception:
-            logger.error(f"Failed to start/restart Headed Browser for integration: {self.name}", exc_info=True)
-            self._cleanup_resources()
+        """Starts the shared UC browser. Caller must already hold `_lock`.
+
+        Runs on a persistent profile so that sessions established in this browser (see
+        `ArchiveToday.capture_session()`) survive a restart. If that profile cannot be
+        used -- it is corrupted, or another scrapeMM process already holds it, since
+        Chromium allows only one instance per profile -- the browser is started on a
+        throwaway profile instead: retrieving without persistence beats not retrieving.
+        """
+        xvfb_metrics = "1920,1080" if sys.platform.startswith("linux") else None
+        executable_path = _resolve_browser_executable(playwright)
+        user_agent = get_config_var("browser_user_agent")
+
+        for profile in (_resolve_profile_dir(), None):
+            try:
+                logger.debug(f"Starting headed browser: {executable_path or 'system default'} "
+                             f"(profile: {profile or 'throwaway'})")
+                HeadedBrowser._browser = await cdp_driver.start_async(
+                    headless=False,
+                    uc=True,
+                    no_sandbox=True,
+                    disable_setuid_sandbox=True,
+                    start_maximized=True,
+                    xvfb_metrics=xvfb_metrics,
+                    timeout=30,
+                    # Note: `cdp_driver.start_async()` has no 'chromium_arg' parameter. Passing
+                    # browser flags any other way makes them end up in **kwargs, where they are
+                    # silently dropped.
+                    browser_args=_browser_args(),
+                    browser_executable_path=executable_path,
+                    user_data_dir=profile,
+                    # Bot checks bind their clearance to the exact user agent that earned
+                    # it, so a browser update would silently invalidate every stored
+                    # session. Pinning the agent recorded at capture time prevents that.
+                    agent=user_agent,
+                )
+                if HeadedBrowser._browser:
+                    logger.debug("cdp_driver started successfully.")
+                    return
+            except Exception:
+                self._cleanup_resources()
+                if profile is not None:
+                    logger.warning(
+                        f"Could not start the browser on its persistent profile ({profile}). "
+                        f"Falling back to a throwaway profile, so sessions will not persist. "
+                        f"This is expected if another scrapeMM process is already running.",
+                        exc_info=True,
+                    )
+                    continue
+                logger.error(f"Failed to start/restart Headed Browser for integration: "
+                             f"{self.name}", exc_info=True)
 
     async def _prepare_context(self, context: BrowserContext) -> None:
         """Optional hook before a new page is created (e.g. inject cookies)."""
@@ -342,7 +497,11 @@ class HeadedBrowser(RetrievalIntegration):
         return await target.content(), target
 
     def _cleanup_resources(self):
-        """Close the shared UC browser. Caller must hold `_lock` if racing with `_ensure_browser`."""
+        """Close the shared UC browser. Caller must hold `_lock` if racing with `_ensure_browser`.
+
+        Prefer `_shutdown_browser()` where awaiting is possible: this one terminates the
+        browser without letting it flush its profile.
+        """
         if HeadedBrowser._browser:
             try:
                 HeadedBrowser._browser.quit()
@@ -350,6 +509,19 @@ class HeadedBrowser(RetrievalIntegration):
                 logger.debug("Error while quitting headed browser", exc_info=True)
             HeadedBrowser._browser = None
         self.connected = False
+
+    async def _shutdown_browser(self):
+        """Closes the shared browser, giving it the chance to persist its profile first.
+
+        Chromium writes cookies to disk on a timer and on a clean shutdown; killing the
+        process in between discards everything written since the last flush. That is fatal
+        here, because the tokens a bot check hands out get refreshed on every response --
+        killing the browser would throw away exactly the fresh session we want to keep.
+        """
+        browser = HeadedBrowser._browser
+        if browser is not None:
+            await _close_browser_gracefully(browser)
+        self._cleanup_resources()
 
     async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
         """Change this function as needed to make it work for specific platforms.

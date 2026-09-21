@@ -148,7 +148,7 @@ async def test_threads(url: str, expected: dict[str, int]):
 @pytest.mark.parametrize("url, expected", [
     ("https://www.reddit.com/r/KeineDummenFragen/comments/1wce00w/was_bringt_der_notfallalarm/", dict()),
     ("https://www.reddit.com/r/mildlyinfuriating/comments/1wc3gkx/furniture_shopping_in_2026/", dict(image=2)),
-    ("https://www.reddit.com/r/interestingasfuck/comments/1wc1pwf/this_bus_driver_joined_the_passengers_after_the/",
+    ("https://www.reddit.com/r/interesting/comments/1wj4ih1/moms_reaction_to_learning_her_missing_16yearold/",
      dict(video=1)),
     # Gallery containing 5 photos and one GIF (retrieved as video)
     ("https://www.reddit.com/r/TopCharacterTropes/comments/1wbxea7/the_moral_dilemma_that_wasnt/",

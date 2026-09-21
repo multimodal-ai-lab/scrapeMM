@@ -16,7 +16,6 @@ from test_social_media import assert_expectations
     ("https://archive.vn/Edqcv", dict(image=1)),  # Online article
     ("https://archive.fo/jnN0O", dict(image=1)),  # Older Facebook post
     ("https://archive.md/yACAz", dict(image=2)),  # News article with images
-
 ])
 async def test_archive_today(url: str, expected: dict[str, int]):
     result = await retrieve(url)

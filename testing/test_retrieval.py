@@ -72,7 +72,7 @@ async def test_max_video_size(url, max_video_size, download_expected):
      ]),
     ([
          "https://www.facebook.com/reel/2038221060315031",
-         "https://www.zeit.de/politik/deutschland/2025-07/spionage-iran-festnahme-anschlag-juden-berlin-daenemark",
+         "https://factnameh.com/fa/fact-checks/2025-04-16-araghchi-witkoff-fake-photo",
      ], [
          ["Facebook"],
          ["firecrawl"]

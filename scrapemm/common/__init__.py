@@ -6,7 +6,7 @@ import sys
 import yaml
 
 from .blacklist import (blacklist, blacklist_domain, unblacklist_domain,
-                        get_blacklisted_domains)
+                        get_blacklisted_domains, set_blacklist_ttl, DEFAULT_BLACKLIST_TTL)
 from .cache import (cache, cache_key, set_cache_ttl, clear_cache, DEFAULT_CACHE_TTL)
 from .captcha import detect_captcha
 from .exceptions import RateLimitError, RetrievalFailed, CaptchaEncounteredError
@@ -63,6 +63,7 @@ def get_config_var(name: str, default=None) -> str:
 def _apply_config():
     """Applies the config values that configure runtime behavior."""
     set_cache_ttl(get_config_var("cache_ttl", DEFAULT_CACHE_TTL))
+    set_blacklist_ttl(get_config_var("blacklist_ttl", DEFAULT_BLACKLIST_TTL))
 
 
 def set_wait_on_rate_limit(wait: bool):
