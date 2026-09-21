@@ -25,3 +25,16 @@ RELAXED_SSL_DOMAINS = {  # These domains do not support SSL verification
     "archive.fo",
     "archive.md",
 }
+
+# Domains that serve an nginx "decoy" page to clients whose TLS fingerprint is not a real
+# browser's (aiohttp, on some IPs) instead of the real content. Downloads to these go
+# through curl_cffi browser-TLS impersonation first, aiohttp only as a fallback.
+BROWSER_TLS_DOMAINS = {
+    "archive.today",
+    "archive.is",
+    "archive.ph",
+    "archive.vn",
+    "archive.li",
+    "archive.fo",
+    "archive.md",
+}

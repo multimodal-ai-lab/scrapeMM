@@ -11,9 +11,13 @@ is built around collecting work for the next session rather than waiting for one
 1. **Serve from the permanent page cache** if the snapshot was ever retrieved before. A
    capture never changes and only its replay page is gated, so one retrieval settles that
    URL for good -- no session needed again, ever.
-2. **Otherwise fetch the replay page over plain HTTP** with the stored `cf_clearance`.
-   The page's media lives on ungated `*.archive.ph` subdomains, so once the HTML is in
-   hand the images and videos download without any session. No browser is involved.
+2. **Otherwise fetch the replay page** with the stored `cf_clearance`. The fetch client is
+   chosen once per process (`_ensure_fetch_mode`): the fast path is plain HTTP via curl_cffi
+   browser-TLS impersonation with an aiohttp fallback (`_http_get`); where even that is
+   served Archive.today's nginx decoy, retrieval falls back to the shared headed browser (a
+   real Chromium it serves normally), which also resolves media in-frame. On the HTTP path
+   the page's media lives on ungated `*.archive.ph` subdomains and downloads via curl_cffi
+   too (see `BROWSER_TLS_DOMAINS` in `scrapemm.download.common`), so no session is needed.
 3. **If the page is gated**, buffer the URL and fail immediately. The caller is not kept
    waiting for a human who may be hours away.
 4. **When a session is established** (`capture_session()`), the whole buffer is retrieved
@@ -42,15 +46,15 @@ from urllib.parse import urlparse, urlunparse
 
 import aiohttp
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright, Page
+from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeoutError
 
 from scrapemm import CaptchaEncounteredError
 from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError
 from scrapemm.common import get_config_var, update_config
 from scrapemm.common.paths import CONFIG_DIR
 from scrapemm.common.scraping_response import ScrapedContent
-from scrapemm.download.requests import request_static
-from scrapemm.integrations.headed_browser import HeadedBrowser, remote_view_hint
+from scrapemm.download.common import HEADERS as _DEFAULT_HEADERS
+from scrapemm.integrations.headed_browser import HeadedBrowser, ContentTarget, remote_view_hint
 from scrapemm.secrets import get_secret, set_secret
 from scrapemm.util import parse_cookies, to_scraped_content
 
@@ -129,7 +133,91 @@ LISTING_ROW_REGEX = re.compile(
 # Archive.today localizes the capture times it prints according to Accept-Language
 # ("14 Feb. 2022" instead of "14 Feb 2022" for German, say). The parsers below expect
 # the English form, so every lookup asks for it explicitly.
-LOOKUP_HEADERS = {"Accept-Language": "en-US,en;q=0.9"}
+#
+# A browser User-Agent is essential: from some IPs (datacenter ranges especially),
+# Archive.today serves a decoy page to non-browser agents like aiohttp's default
+# "Python/aiohttp ...", while serving a normal browser string the real content. scrapeMM
+# uses the same Firefox string as elsewhere, which Archive.today serves normally.
+DEFAULT_USER_AGENT = _DEFAULT_HEADERS["User-Agent"]
+
+# Archive.today serves an nginx "decoy" page to clients whose TLS fingerprint is not a
+# real browser's -- aiohttp (Python's TLS) gets it on some IPs, a real browser or libcurl
+# does not. So requests go through curl_cffi, which impersonates a browser's TLS. Several
+# builds are tried because endpoints disagree: the capture listing is served to "chrome"
+# / "safari" but 429s "chrome124", while cse.js and the replay page prefer "chrome124".
+_IMPERSONATIONS = ("chrome124", "chrome", "safari")
+
+ACCEPT_LANGUAGE = {"Accept-Language": "en-US,en;q=0.9"}
+
+
+def _is_decoy(body: str) -> bool:
+    return "welcome to nginx" in body.lower()
+
+
+async def _get_via_curl_cffi(url: str, cookies: Optional[dict], user_agent: Optional[str],
+                             impersonate: str, timeout: float) -> tuple[Optional[int], str]:
+    """GET with a real browser's TLS fingerprint. This is what gets past the nginx decoy
+    that Archive.today serves to non-browser clients like aiohttp on some IPs. A short
+    timeout matters: Archive.today tarpits some requests (accepts the connection, sends
+    nothing), and a browser fallback handles those, so waiting long only delays it."""
+    try:
+        from curl_cffi.requests import AsyncSession
+    except ImportError:
+        return None, ""
+    # No User-Agent override keeps curl_cffi's impersonation UA (a real browser build);
+    # the gated page overrides it with the UA its session was pinned to.
+    headers = {**ACCEPT_LANGUAGE, **({"User-Agent": user_agent} if user_agent else {})}
+    try:
+        async with AsyncSession() as session:
+            response = await session.get(url, impersonate=impersonate, headers=headers,
+                                         cookies=cookies, allow_redirects=True,
+                                         verify=False, timeout=timeout)
+            return response.status_code, response.text
+    except Exception as e:
+        logger.debug(f"curl_cffi ({impersonate}) GET failed for {url}: {type(e).__name__}.")
+        return None, ""
+
+
+async def _get_via_aiohttp(url: str, cookies: Optional[dict],
+                           user_agent: Optional[str]) -> tuple[Optional[int], str]:
+    """Plain-HTTP GET. Archive.today decoys this on some IPs but, oddly, serves it the
+    capture listing that it 429s for curl_cffi -- hence both clients are tried."""
+    headers = {"User-Agent": user_agent or DEFAULT_USER_AGENT, **ACCEPT_LANGUAGE}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, cookies=cookies,
+                                   allow_redirects=True, ssl=False) as response:
+                return response.status, await response.text()
+    except Exception:
+        logger.debug(f"aiohttp GET failed for {url}.", exc_info=True)
+        return None, ""
+
+
+async def _http_get(url: str, cookies: Optional[dict] = None, user_agent: Optional[str] = None,
+                    impersonations: tuple[str, ...] = _IMPERSONATIONS,
+                    timeout: float = 15) -> tuple[Optional[int], str]:
+    """GETs an Archive.today URL resiliently. Archive.today's anti-bot is inconsistent
+    across endpoints, clients and IPs: aiohttp is served an nginx decoy on some IPs, while
+    curl_cffi's impersonation is 429'd on some endpoints for some builds. So the given
+    browser impersonations and then aiohttp are tried; the first usable response (a 200 that
+    is not the decoy) wins, failing which a real gate (429) is preferred over a decoy.
+    Callers that hit a tarpit-prone endpoint (the replay page) pass a single impersonation
+    so a stall costs one timeout, not one per build. Returns (status, body); (None, "") if
+    nothing got through."""
+    attempts: list[tuple[Optional[int], str]] = []
+    for impersonate in impersonations:
+        status, body = await _get_via_curl_cffi(url, cookies, user_agent, impersonate, timeout)
+        if status == 200 and not _is_decoy(body):
+            return status, body
+        attempts.append((status, body))
+    status, body = await _get_via_aiohttp(url, cookies, user_agent)
+    if status == 200 and not _is_decoy(body):
+        return status, body
+    attempts.append((status, body))
+    for status, body in attempts:  # no usable 200: a genuine gate beats a decoy
+        if status == 429:
+            return status, body
+    return attempts[0] if attempts else (None, "")
 
 GATE_HINT = (
     "Archive.today asks to solve a captcha. Cannot access the archived page's text. "
@@ -145,6 +233,21 @@ GATE_HINT = (
 def _looks_like_gate(body_text: str) -> bool:
     """True if the page is Archive.today's access check rather than actual content."""
     return any(marker in body_text.lower() for marker in GATE_MARKERS)
+
+
+def _blocked_hint(subject: str) -> str:
+    """Message for the case where archive.today serves neither the expected page nor its
+    access check nor a 'not found' page, but its nginx decoy / something unrecognized. The
+    offending response itself is logged at WARNING level next to this message."""
+    return (
+        f"Archive.today served its nginx decoy or another unrecognized response instead of "
+        f"{subject} -- not the content, not its access check, not a 'not found' page (the "
+        f"response is logged at WARNING level). It does this to clients whose TLS "
+        f"fingerprint is not a real browser's. scrapeMM already fetches via curl_cffi "
+        f"browser impersonation to avoid this, so if it persists: make sure curl_cffi is "
+        f"installed (it ships with scrapeMM), or the machine's IP may be blocked by "
+        f"archive.today, or an intercepting proxy is rewriting the connection."
+    )
 
 
 def _interactive_solve_enabled() -> bool:
@@ -328,11 +431,13 @@ _pages = _PageCache()
 _buffer = _RequestBuffer()
 
 
-async def _fetch_text(url: str, session: Optional[aiohttp.ClientSession]) -> Optional[str]:
-    if session is not None:
-        return await request_static(url, session=session, headers=LOOKUP_HEADERS)
-    async with aiohttp.ClientSession() as own_session:
-        return await request_static(url, session=own_session, headers=LOOKUP_HEADERS)
+async def _fetch_text(url: str, session: Optional[aiohttp.ClientSession] = None) -> Optional[str]:
+    """Fetches an ungated Archive.today endpoint (cse.js, capture listing) as text, or None
+    if it did not answer with 200. Goes through curl_cffi (see `_http_get`); the `session`
+    argument is accepted for backward compatibility but no longer used, because a plain
+    aiohttp session is the very thing Archive.today serves the decoy to."""
+    status, body = await _http_get(url)
+    return body if status == 200 and body else None
 
 
 def _parse_cse(short_id: str, script: str) -> Optional[Snapshot]:
@@ -359,10 +464,18 @@ async def resolve_snapshot(short_id: str,
         return cached
     script = await _fetch_text(f"https://{CANONICAL_DOMAIN}/cse.js?id={short_id}", session)
     if script is None:
-        raise RetrievalFailed(f"Archive.today did not answer the lookup of snapshot '{short_id}'.")
+        raise RetrievalFailed(
+            f"Archive.today did not answer the cse.js lookup of snapshot '{short_id}' "
+            f"(no response or a non-200 status). " + _blocked_hint("its cse.js lookup endpoint"))
+    # Both a real hit and the stub for a non-existent id carry this id-specific marker;
+    # its absence means the response is not cse.js at all (a decoy, block or DNS junk).
+    if f"cse-serp-thumb-{short_id}" not in script:
+        logger.warning("Archive.today served a non-cse.js response for id %r (%d chars): %r",
+                       short_id, len(script), " ".join(script.split())[:200])
+        raise RetrievalFailed(_blocked_hint("its cse.js lookup endpoint"))
     snapshot = _parse_cse(short_id, script)
     if snapshot is None:
-        return None
+        return None  # genuine: cse.js served the data-less stub for a non-existent id
     _snapshots.put(short_id, snapshot)
     return snapshot
 
@@ -447,12 +560,38 @@ def _extract_content_html(page_html: str) -> Optional[str]:
     return str(element) if element else None
 
 
+# Outcome of fetching a snapshot page: real content, the access check, a genuine missing
+# capture, or an unrecognized response that means the network cannot reach archive.today.
+CONTENT, GATE, NOT_FOUND, BLOCKED = "content", "gate", "notfound", "blocked"
+
+# How this machine reaches Archive.today, decided once by probing (see `_ensure_fetch_mode`):
+# FETCH_HTTP uses the fast curl_cffi/aiohttp path; FETCH_BROWSER routes retrieval through
+# the shared headed browser because plain HTTP is served the decoy here.
+FETCH_HTTP, FETCH_BROWSER = "http", "browser"
+
+
+class _HttpUnusable(RetrievalFailed):
+    """Raised on the HTTP path when Archive.today returns a page it cannot use -- a decoy,
+    or a JavaScript-rendered variant that only a real browser resolves. The caller retries
+    that one URL through the browser; if it escapes uncaught it is still a RetrievalFailed."""
+
+
+def _raise_for_state(state: str) -> None:
+    """Raises the fitting error for a terminal non-content outcome; a no-op for GATE (which
+    the caller handles by solving) and CONTENT."""
+    if state == NOT_FOUND:
+        raise TargetUnavailableError("Archive.today has no capture at this URL.")
+    if state == BLOCKED:
+        raise _HttpUnusable(_blocked_hint("the archived page"))
+
+
 class ArchiveToday(HeadedBrowser):
     """Archive.today / archive.is / … retrieval.
 
-    The replay page is fetched over plain HTTP with the stored session; a headed browser
-    is used only to let a human pass the access check when there is no valid session
-    (`HeadedBrowser` supplies that shared browser and the remote-view tunnel).
+    The replay page is fetched over plain HTTP (curl_cffi/aiohttp, see `_http_get`) where
+    that works, or through the shared headed browser where Archive.today decoys plain HTTP;
+    which one is decided once by `_ensure_fetch_mode()`. The browser (from `HeadedBrowser`)
+    is used in either case to let a human pass the access check, via the remote-view tunnel.
     """
     name = "Archive.today"
     # Every mirror is accepted as input, but all of them are served via CANONICAL_DOMAIN
@@ -470,6 +609,34 @@ class ArchiveToday(HeadedBrowser):
     _solve_lock: asyncio.Lock = asyncio.Lock()
     _remote_hint_shown: bool = False  # The remote-view instructions are logged only once
 
+    # Set once by `_ensure_fetch_mode()`; all later retrievals follow it with no re-probe.
+    _fetch_mode: Optional[str] = None
+    _fetch_mode_lock: asyncio.Lock = asyncio.Lock()
+
+    async def _ensure_fetch_mode(self) -> str:
+        """Decides once whether this machine can reach Archive.today over plain HTTP or must
+        go through the browser (because HTTP is served the decoy here), caches the verdict on
+        the class, and returns it. Subsequent calls return the cached verdict without probing."""
+        if ArchiveToday._fetch_mode is not None:
+            return ArchiveToday._fetch_mode
+        async with self._fetch_mode_lock:
+            if ArchiveToday._fetch_mode is None:
+                ArchiveToday._fetch_mode = await self._probe_fetch_mode()
+            return ArchiveToday._fetch_mode
+
+    async def _probe_fetch_mode(self) -> str:
+        """Probes the ungated cse.js endpoint over the HTTP path. A trusted client gets the
+        real script; a decoyed one gets the nginx page. Anything but a clean hit means HTTP
+        is unreliable here, so retrieval goes through the browser."""
+        status, body = await _http_get(
+            f"https://{CANONICAL_DOMAIN}/cse.js?id={VERIFICATION_SNAPSHOT}")
+        if status == 200 and f"cse-serp-thumb-{VERIFICATION_SNAPSHOT}" in body:
+            logger.info("Archive.today reachable over plain HTTP; using the fast path.")
+            return FETCH_HTTP
+        logger.info("Archive.today serves this machine the decoy over plain HTTP; routing "
+                    "retrieval through the browser instead.")
+        return FETCH_BROWSER
+
     @staticmethod
     def _clearance() -> Optional[str]:
         """The stored session's clearance cookie, or None if no session is stored."""
@@ -481,24 +648,25 @@ class ArchiveToday(HeadedBrowser):
 
     @staticmethod
     async def _fetch_page(session: aiohttp.ClientSession, url: str) -> tuple[Optional[int], str]:
-        """GETs a snapshot page with the stored clearance. Returns (status, body); tolerates
-        the gate's 429 and a missing capture's 404 instead of raising on them."""
+        """GETs a snapshot page with the stored clearance, through curl_cffi (see
+        `_http_get`). Returns (status, body); the gate's 429 and a missing capture's 404
+        come back as data, not exceptions. The `session` argument is unused -- a plain
+        aiohttp session is exactly what Archive.today serves the decoy to."""
         clearance = ArchiveToday._clearance()
-        headers = {"User-Agent": get_config_var("browser_user_agent") or "", **LOOKUP_HEADERS}
         cookies = {CLEARANCE_COOKIE: clearance} if clearance else None
-        try:
-            # archive.ph is in RELAXED_SSL_DOMAINS (archives serve mismatching certs), so
-            # verification is off here as everywhere else in scrapeMM for these hosts.
-            async with session.get(url, headers=headers, cookies=cookies,
-                                   allow_redirects=True, ssl=False) as response:
-                return response.status, await response.text()
-        except Exception:
-            logger.debug(f"Could not fetch Archive.today page {url}.", exc_info=True)
-            return None, ""
+        # The clearance is bound to the user agent its session was solved with, so present
+        # that exact one when it is known; otherwise curl_cffi's own browser UA is fine.
+        # One impersonation only: the replay page is the endpoint Archive.today tarpits, so
+        # trying every build would multiply the stall; a JS-rendered page falls to the
+        # browser regardless.
+        return await _http_get(url, cookies=cookies,
+                               user_agent=get_config_var("browser_user_agent") or None,
+                               impersonations=("chrome124",))
 
     async def _get(self, url: str, **kwargs) -> ScrapedContent:
-        """Retrieves the snapshot over plain HTTP. On the access check, solves it
-        interactively (if enabled) or serves the screenshot fallback (if enabled)."""
+        """Retrieves the snapshot. The fetch client (plain HTTP vs. the browser) is chosen
+        once per process by `_ensure_fetch_mode()`; on the access check the check is solved
+        interactively (if enabled) or the screenshot fallback is served (if enabled)."""
         url = canonicalize_url(url)
         session: aiohttp.ClientSession = kwargs["session"]
         output_format = kwargs.get("output_format", "multimodal")
@@ -510,7 +678,16 @@ class ArchiveToday(HeadedBrowser):
             return await to_scraped_content(cached, session=session,
                                             output_format=output_format, url=url)
 
-        content_html = await self._retrieve_content(session, url)
+        if await self._ensure_fetch_mode() == FETCH_BROWSER:
+            return await self._get_via_browser(url, **kwargs)
+
+        try:
+            content_html = await self._retrieve_content(session, url)
+        except _HttpUnusable:
+            # This capture's HTTP response is not usable (a decoy, or a JS-rendered page);
+            # the browser renders it even though the fast path could not.
+            logger.info(f"Plain HTTP could not render {url}; falling back to the browser for it.")
+            return await self._get_via_browser(url, **kwargs)
         if content_html is not None:
             _pages.put(url, content_html)
             _buffer.discard(url)
@@ -532,25 +709,68 @@ class ArchiveToday(HeadedBrowser):
 
         raise CaptchaEncounteredError(GATE_HINT)
 
+    async def _get_via_browser(self, url: str, **kwargs) -> ScrapedContent:
+        """Browser fetch path, used when plain HTTP is decoyed on this machine or cannot
+        render a particular capture. The shared headed browser (a real Chromium, which
+        Archive.today serves normally) opens the snapshot, `_extract_content` pulls out its
+        content div, and media is resolved in-frame. On the access check it is solved
+        interactively, once, and shared across concurrent retrievals. Not page-cached:
+        re-serving would re-resolve media over HTTP, so each URL is fetched afresh here."""
+        try:
+            return await super()._get(url, **kwargs)
+        except CaptchaEncounteredError:
+            if _interactive_solve_enabled():
+                async with self._solve_lock:
+                    try:
+                        return await super()._get(url, **kwargs)  # another task may have solved
+                    except CaptchaEncounteredError:
+                        pass
+                    if await self._solve_in_browser(url, _solve_timeout()):
+                        return await super()._get(url, **kwargs)
+            raise CaptchaEncounteredError(GATE_HINT)
+
+    async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
+        """Browser-path content extraction: returns the snapshot's content div, or raises
+        for the access check / a missing capture. (Only reached in FETCH_BROWSER mode; the
+        HTTP path classifies the page itself.)"""
+        try:
+            body_text = (await page.locator("body").inner_text()).lower()
+        except Exception:
+            body_text = ""
+        if "not found (yet?)" in body_text:
+            raise TargetUnavailableError("Archive.today has no capture at this URL.")
+        if _looks_like_gate(body_text):
+            raise CaptchaEncounteredError(GATE_HINT)
+        try:
+            element = await page.wait_for_selector(f"#{CONTENT_DIV_ID}", timeout=30000)
+            if element:
+                return element
+        except (TimeoutError, PlaywrightTimeoutError):
+            logger.warning("Archive.today #%s missing at '%s'.", CONTENT_DIV_ID, page.url)
+        return None
+
     async def _retrieve_content(self, session: aiohttp.ClientSession, url: str) -> Optional[str]:
         """The snapshot's content markup, or None if it stays behind the access check.
         Raises TargetUnavailableError if there is no such capture."""
-        content, gated = await self._try_fetch_content(session, url)
+        content, state = await self._try_fetch_content(session, url)
         if content is not None:
             return content
-        if not gated:
-            raise TargetUnavailableError("Archive.today capture not found.")
+        _raise_for_state(state)  # raises for NOT_FOUND / BLOCKED; returns for GATE
 
         if not _interactive_solve_enabled():
             return None
 
         # Only one task solves at a time; the others re-use the session it establishes.
         async with self._solve_lock:
-            content, gated = await self._try_fetch_content(session, url)
-            if content is not None or not gated:
+            content, state = await self._try_fetch_content(session, url)
+            if content is not None:
                 return content
+            _raise_for_state(state)
             if await self._solve_in_browser(url, _solve_timeout()):
-                content, _ = await self._try_fetch_content(session, url)
+                content, state = await self._try_fetch_content(session, url)
+                if content is None:
+                    _raise_for_state(state)  # a BLOCKED response after solving still raises
+                    return None  # still gated: solving did not take
                 # The session is live now and short-lived: spend it on the backlog too
                 await self._drain_buffer(session, skip={url})
                 return content
@@ -573,6 +793,7 @@ class ArchiveToday(HeadedBrowser):
         logger.info(f"📤 Retrieving {len(urls)} buffered Archive.today page(s)...")
         semaphore = asyncio.Semaphore(DRAIN_CONCURRENCY)
         done: set[str] = set()
+        needs_browser: list[str] = []  # HTTP couldn't render these (JS-rendered captures)
         gated_again = False
 
         async def fetch(url: str) -> None:
@@ -583,7 +804,7 @@ class ArchiveToday(HeadedBrowser):
                 if gated_again:
                     return
                 try:
-                    content, gated = await self._try_fetch_content(session, url)
+                    content, state = await self._try_fetch_content(session, url)
                 except Exception:
                     logger.debug(f"Buffered Archive.today page {url} could not be "
                                  f"retrieved.", exc_info=True)
@@ -591,14 +812,40 @@ class ArchiveToday(HeadedBrowser):
                 if content is not None:
                     _pages.put(url, content)
                     done.add(url)
-                elif gated:
+                elif state == GATE:
                     gated_again = True
-                else:
+                elif state == NOT_FOUND:
                     # No such capture -- retrying it in every future round is pointless
                     logger.debug(f"Dropping {url} from the buffer: no such capture.")
                     done.add(url)
+                else:  # BLOCKED: the HTTP path can't render this one; the browser can
+                    needs_browser.append(url)
 
         await asyncio.gather(*(fetch(url) for url in urls))
+
+        # The session is still live in the browser, so render the pages HTTP could not.
+        # Sequentially -- there is one shared browser. output_format="html" caches the
+        # markup; media resolves on serve.
+        if needs_browser and not gated_again:
+            logger.info(f"🌐 {len(needs_browser)} page(s) need the browser to render; "
+                        f"retrieving them through it...")
+        for url in needs_browser:
+            if gated_again:
+                break
+            try:
+                content = await super()._get(url, session=session, output_format="html")
+            except CaptchaEncounteredError:
+                gated_again = True  # session expired mid-drain
+            except TargetUnavailableError:
+                done.add(url)  # no such capture -- stop retrying it
+            except Exception:
+                logger.debug(f"Buffered Archive.today page {url} could not be retrieved "
+                             f"via the browser.", exc_info=True)
+            else:
+                if content and content.html:
+                    _pages.put(url, content.html)
+                    done.add(url)
+
         _buffer.discard_many(done)
 
         if gated_again:
@@ -611,20 +858,27 @@ class ArchiveToday(HeadedBrowser):
         return len(done)
 
     async def _try_fetch_content(self, session: aiohttp.ClientSession,
-                                 url: str) -> tuple[Optional[str], bool]:
-        """Fetches the page once. Returns (content markup or None, whether it was gated).
+                                 url: str) -> tuple[Optional[str], str]:
+        """Fetches the page once. Returns (content markup or None, one of CONTENT / GATE /
+        NOT_FOUND / BLOCKED).
 
         Content presence is the discriminator: the access check is served with status 429
         and carries no content div, while a real snapshot page has one -- even when the
         archived text happens to contain a word like "captcha". So the content div is
-        looked for first, and only its absence lets the gate markers speak.
+        looked for first, and only its absence lets the gate markers speak. A response that
+        is none of these is BLOCKED: archive.today could not be reached cleanly (decoy,
+        block or DNS junk), which must not be mistaken for a missing capture.
         """
         status, body = await self._fetch_page(session, url)
         if content := _extract_content_html(body):
-            return content, False
+            return content, CONTENT
         if "not found (yet?)" in body.lower():
-            return None, False
-        return None, status == 429 or _looks_like_gate(body)
+            return None, NOT_FOUND
+        if status == 429 or _looks_like_gate(body):
+            return None, GATE
+        logger.warning("Archive.today served an unrecognized response for %s (status %s, "
+                       "%d chars): %r", url, status, len(body), " ".join(body.split())[:200])
+        return None, BLOCKED
 
     @staticmethod
     async def _screenshot_content(snapshot: Snapshot, session: aiohttp.ClientSession,

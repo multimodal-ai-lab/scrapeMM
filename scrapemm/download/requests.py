@@ -6,7 +6,7 @@ import aiohttp
 if TYPE_CHECKING:
     from playwright.async_api import APIRequestContext
 
-from scrapemm.download.common import ssl_context, RELAXED_SSL_DOMAINS
+from scrapemm.download.common import ssl_context, RELAXED_SSL_DOMAINS, BROWSER_TLS_DOMAINS
 from scrapemm.download.util import stream, MediaTooLarge
 
 logger = logging.getLogger("scrapeMM")
@@ -20,7 +20,9 @@ MEDIA_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=20)
 
 # Cloudflare (and similar) bot gates reject aiohttp's TLS fingerprint with HTTP 403
 # while accepting real browser JA3/JA4 profiles. Tried in order until one succeeds.
-_CURL_CFFI_IMPERSONATIONS = ("chrome124",)
+# Several builds are listed because some sites (e.g. archive.today) accept one and gate
+# another, so trying a spread finds the one that works.
+_CURL_CFFI_IMPERSONATIONS = ("chrome124", "chrome", "safari")
 
 
 async def _request_via_curl_cffi(
@@ -172,6 +174,14 @@ async def request_static(url: str,
         if get_text:
             return content.decode("utf-8", errors="replace")
         return content
+
+    # Some hosts (archive.today) serve an nginx decoy to non-browser TLS clients, so their
+    # downloads (e.g. a snapshot's rehosted images) go through curl_cffi first; aiohttp is
+    # only the fallback if browser impersonation is unavailable or fails.
+    if get_domain(url) in BROWSER_TLS_DOMAINS:
+        content = await _from_curl_cffi()
+        if content is not None:
+            return content
 
     try:
         if not isinstance(session, aiohttp.ClientSession):
