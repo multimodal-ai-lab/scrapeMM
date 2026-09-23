@@ -1,0 +1,240 @@
+import asyncio
+import logging
+
+import aiohttp
+from aiohttp import ClientConnectorError
+
+from scrapemm.common import RateLimitError, RetrievalFailed
+from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
+from scrapemm.server.secrets import get_secret
+from scrapemm.server.util import get_domain, to_scraped_content
+
+logger = logging.getLogger("scrapeMM")
+
+# Domains which require more advanced scraping
+PREMIUM_PROXY_DOMAINS = {
+    "snopes.com"
+}
+
+
+class Decodo:
+    """Scrapes web content using Decodo's Web Scraping API with proxy support
+    and JavaScript rendering capabilities."""
+
+    DECODO_API_URL = "https://scraper-api.decodo.com/v2/scrape"
+
+    def __init__(self):
+        self.basic_auth_token = None
+        self.n_scrapes = 0
+
+    def _load_token(self):
+        """Loads Decodo credentials from the secrets manager."""
+        self.basic_auth_token = get_secret("decodo_token")
+
+        if self.basic_auth_token:
+            logger.info("✅ Decodo token set.")
+        else:
+            logger.warning("⚠️ Decodo auth token not found. Please configure it in secrets.")
+
+    def _has_token(self) -> bool:
+        """Checks if Decodo credentials are available."""
+        return bool(self.basic_auth_token)
+
+    async def scrape(
+            self, url: str,
+            session: aiohttp.ClientSession,
+            output_format: OutputFormat = "multimodal",
+            enable_js: bool = True,
+            timeout: int = 30,
+            max_retries: int = 5,
+            max_video_size: int | None = None,
+    ) -> ScrapedContent:
+        """Downloads the contents of the specified webpage using Decodo's API.
+
+        Args:
+            url: The URL to scrape
+            session: The aiohttp ClientSession to use
+            output_format: The format the content is needed in (default: "multimodal").
+                Media is downloaded only for the "multimodal" format.
+            enable_js: Whether to enable JavaScript rendering (default: True)
+            timeout: Request timeout in seconds (default: 30)
+            max_retries: Maximum number of retries for failed requests (default: 5)
+            max_video_size: Maximum size of videos embedded in the page, in bytes
+
+        Returns:
+            ScrapedContent holding the scraped HTML along with the requested output format
+
+        Raises:
+            An exception if the scraping failed
+        """
+        if not self._has_token():
+            self._load_token()
+
+        if not self._has_token():
+            logger.warning("⚠️ Cannot scrape with Decodo: credentials not configured.")
+            raise RuntimeError("Decodo credentials not configured.")
+
+        domain = get_domain(url)
+        use_premium_proxy = domain in PREMIUM_PROXY_DOMAINS
+
+        # Try with JS rendering first if enabled
+        html = await self._call_decodo(url, session, enable_js, timeout=timeout, max_retries=max_retries,
+                                       use_premium_proxy=use_premium_proxy)
+
+        return await to_scraped_content(html, session=session, output_format=output_format,
+                                        url=url, max_video_size=max_video_size)
+
+    async def _call_decodo(
+            self, url: str,
+            session: aiohttp.ClientSession,
+            enable_js: bool = True,
+            timeout: int = 10,
+            max_retries: int = 5,
+            use_premium_proxy: bool = False
+    ) -> str:
+        """Calls the Decodo API to scrape the given URL with exponential backoff retry logic.
+
+        Args:
+            url: The URL to scrape
+            session: The aiohttp ClientSession to use
+            enable_js: Whether to enable JavaScript rendering
+            timeout: Request timeout in seconds
+            max_retries: Maximum number of retry attempts for rate limits (default: 5)
+            use_premium_proxy: Whether to use premium proxies for scraping (default: False). Increases
+                success rate but also increases cost (by a factor of 2 or more)
+
+        Returns:
+            HTML content as a string, or None if scraping failed
+        """
+        headers = {
+            'Content-Type': 'application/json',
+            'Authorization': f'Basic {self.basic_auth_token}',
+        }
+
+        # Build request payload
+        # Note: For simple URL scraping, we just provide the URL
+        # The "target" parameter is only used for specific templates like "google_search"
+        payload = {
+            "url": url,
+        }
+
+        # Enable JavaScript rendering if requested
+        # Note: This requires an Advanced plan subscription
+        if enable_js:
+            payload["headless"] = "html"
+
+        if use_premium_proxy:
+            payload["proxy_pool"] = "premium"
+
+        # Retry loop with exponential backoff
+        for attempt in range(max_retries + 1):
+            try:
+                async with session.post(
+                        self.DECODO_API_URL,
+                        json=payload,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=timeout)
+                ) as response:
+                    # Validate response health
+                    if response.status != 200:
+                        logger.debug(f"Communication with Decodo API failed. Status code: {response.status}")
+
+                        if response.status == 429:  # Rate limit
+                            if attempt >= max_retries:
+                                logger.warning(f"Error 429: Rate limit hit and maximum retries reached.")
+                                raise RateLimitError(f"Decodo rate limit hit (despite {max_retries} retries).")
+                        elif response.status == 613:
+                            if attempt >= max_retries:
+                                raise RuntimeError(f"Decodo API error 613 (despite {max_retries} retries).")
+                        elif response.status == 502:  # Bad gateway
+                            if attempt >= max_retries:
+                                logger.warning(f"Error 502: Bad gateway and maximum retries reached.")
+                                raise RuntimeError(
+                                    f"Decodo API error 502: Bad gateway (despite {max_retries} retries).")
+
+                        else:  # Other errors that don't go away on retry
+                            match response.status:
+                                case 400:
+                                    logger.debug(
+                                        "Error 400: Bad request. If you use JavaScript, make sure you have the "
+                                        "Advanced plan subscription.")
+                                case 401:
+                                    logger.error("Error 401: Unauthorized. Check your Decodo credentials.")
+                                case 402:
+                                    logger.error("Error 402: Payment required. Check your Decodo subscription.")
+                                case 403:
+                                    logger.debug("Error 403: Forbidden.")
+                                case 408:
+                                    logger.warning("Error 408: Timeout! Website did not respond in time.")
+                                case 500:
+                                    logger.debug("Error 500: Server error.")
+                                case _:
+                                    logger.debug(f"Error {response.status}: {response.reason}.")
+                            raise RuntimeError(f"Decodo returned error {response.status}: {response.reason}")
+
+                    else:
+                        # Parse response
+                        json_response = await response.json()
+
+                        # Validate if scrape was successful
+                        if json_response.get("status") == "failed":
+                            status_code = json_response.get("status_code")
+                            message = json_response.get("message")
+                            logger.info(f"Decodo failed to scrape {url}: Error {status_code}: {message}")
+                            raise RetrievalFailed(f"Decodo failed with error {status_code}: {message}")
+
+                        # Extract HTML content from results
+                        if "results" in json_response and len(json_response["results"]) > 0:
+                            result = json_response["results"][0]
+
+                            # Check status code from the actual request
+                            status_code = result.get("status_code")
+                            if status_code and status_code >= 400:
+                                msg = f"Target website returned status {status_code} for {url}"
+                                logger.warning(msg)
+                                raise RetrievalFailed(msg)
+
+                            html_content = result.get("content")
+                            if html_content:
+                                self.n_scrapes += 1
+                                logger.debug(f"Successfully scraped {url} with Decodo (scrape #{self.n_scrapes})")
+                                return html_content
+                            else:
+                                msg = f"No content in Decodo response for {url}"
+                                logger.warning(msg)
+                                raise RetrievalFailed(msg)
+                        else:
+                            msg = f"No results in Decodo response for {url}"
+                            logger.warning(msg)
+                            logger.debug(f"Response: {json_response}")
+                            raise RetrievalFailed(msg)
+
+            except ClientConnectorError:  # Decodo sometimes has hiccups
+                if attempt >= max_retries:
+                    raise
+                else:
+                    logger.debug("Decodo API connection error. Retrying...")
+            except aiohttp.ClientError as e:
+                logger.error(f"Network error while scraping with Decodo: {e}")
+                raise
+            except (RateLimitError, asyncio.TimeoutError):
+                raise
+            except Exception as e:
+                logger.debug(f"Error while scraping with Decodo: {e}")
+                raise
+
+            await backoff(attempt)  # Wait before retrying
+
+        # Should not reach here
+        raise RetrievalFailed("Failed to scrape with Decodo after multiple attempts.")
+
+
+async def backoff(n_past_attempts: int):
+    """Exponential backoff: 2^n_past_attempts seconds (1s, 2s, 4s, 8s, 16s...)"""
+    wait_time = 2 ** n_past_attempts
+    logger.debug(f"Backing off for {wait_time:.0f}s before retrying...")
+    await asyncio.sleep(wait_time)
+
+
+# Create a singleton instance
+decodo = Decodo()

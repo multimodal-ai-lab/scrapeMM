@@ -2,12 +2,14 @@ import aiohttp
 import pytest
 from bs4 import BeautifulSoup
 
-from scrapemm.download.common import HEADERS
-from scrapemm.util import (
+from scrapemm.server.download.common import HEADERS
+from scrapemm.server.util import (
     _extract_media_elements,
     get_markdown_hyperlinks,
     unshorten,
 )
+
+pytestmark = pytest.mark.server
 
 
 @pytest.mark.parametrize("input,target",

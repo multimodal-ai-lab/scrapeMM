@@ -1,22 +1,44 @@
-from .common import (APP_NAME, set_wait_on_rate_limit, RateLimitError, RetrievalFailed, logger,
-                     update_config, ScrapingResponse, ScrapedContent, set_cache_ttl, clear_cache,
-                     CaptchaEncounteredError, blacklist_domain, unblacklist_domain,
-                     get_blacklisted_domains)
-from .integrations import Telegram, X
-from .integrations.archive_today import (configure_archive_today_session,
-                                         get_archive_today_buffer,
-                                         clear_archive_today_buffer,
-                                         retrieve_buffered_archive_today,
-                                         count_cached_archive_today_pages)
-from .retrieval import retrieve
-from .secrets import configure_secrets, override_secret, set_secret
+"""scrapeMM: multimodal web retrieval.
 
-# Check if ffmpeg is available. Uses the same resolver as the code that runs FFmpeg,
-# so a bare `ffmpeg` missing from PATH does not disable features that would work via
-# an explicit FFMPEG_PATH or an imageio-ffmpeg install.
-from .download.videos import _resolve_ffmpeg_path
+This package is the **client**. It does not scrape anything itself; it asks a scrapeMM
+server to, and turns the answer back into the `ScrapingResponse` objects that callers
+work with. Run a server with `docker compose up -d` (see the README) and point the
+client at it:
 
-ffmpeg_available = _resolve_ffmpeg_path() is not None
-if not ffmpeg_available:
-    logger.warning("⚠️ FFmpeg not found. Won't normalize videos. If you want to enable it, please install FFmpeg "
-                   "via `conda install -c conda-forge ffmpeg`.")
+    import asyncio, scrapemm
+
+    scrapemm.configure(api_url="http://localhost:8080", api_key="...")
+    result = asyncio.run(scrapemm.retrieve("https://example.com"))
+
+Configuration of the server itself -- API secrets, Firecrawl endpoints, the domain
+blacklist, the Archive.today CAPTCHA -- happens in the server's web UI, not from here.
+"""
+
+from .common import (APP_NAME, AccessBlockedError, CaptchaEncounteredError, DiskFull,
+                     QuotaExceededError, RateLimitError, RetrievalFailed, ScrapedContent,
+                     ScrapingResponse, ServerError, TargetUnavailableError,
+                     UnsupportedDomainError, logger)
+from .client import Settings, configure, retrieve, settings
+
+__version__ = "1.0.0"
+
+__all__ = [
+    "retrieve",
+    "configure",
+    "settings",
+    "Settings",
+    "ScrapingResponse",
+    "ScrapedContent",
+    "AccessBlockedError",
+    "CaptchaEncounteredError",
+    "DiskFull",
+    "QuotaExceededError",
+    "RateLimitError",
+    "RetrievalFailed",
+    "ServerError",
+    "TargetUnavailableError",
+    "UnsupportedDomainError",
+    "APP_NAME",
+    "logger",
+    "__version__",
+]

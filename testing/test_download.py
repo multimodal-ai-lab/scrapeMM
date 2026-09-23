@@ -2,11 +2,13 @@ import aiohttp
 import pytest
 from ezmm import Image, Item, Video
 
-from scrapemm.download import download_medium, download_image, download_video
-from scrapemm.download.common import HEADERS
-from scrapemm.download.images import is_maybe_image_url
-from scrapemm.download.videos import is_maybe_video_url
+from scrapemm.server.download import download_medium, download_image, download_video
+from scrapemm.server.download.common import HEADERS
+from scrapemm.server.download.images import is_maybe_image_url
+from scrapemm.server.download.videos import is_maybe_video_url
 
+
+pytestmark = pytest.mark.server
 
 @pytest.mark.parametrize("url,expected", [
     ("https://media.cnn.com/api/v1/images/stellar/prod/ap22087057359494.jpg?c=16x9&q=h_653,w_1160,c_fill", True),
@@ -90,11 +92,11 @@ async def test_download_medium_falls_back_to_video_when_image_download_fails(mon
     async def fake_download_video(url, session):
         return expected_video
 
-    monkeypatch.setattr("scrapemm.download.media.aiohttp.ClientSession", lambda headers: DummySession())
-    monkeypatch.setattr("scrapemm.download.media.is_maybe_image_url", fake_is_maybe_image_url)
-    monkeypatch.setattr("scrapemm.download.media.download_image", fake_download_image)
-    monkeypatch.setattr("scrapemm.download.media.is_maybe_video_url", fake_is_maybe_video_url)
-    monkeypatch.setattr("scrapemm.download.media.download_video", fake_download_video)
+    monkeypatch.setattr("scrapemm.server.download.media.aiohttp.ClientSession", lambda headers: DummySession())
+    monkeypatch.setattr("scrapemm.server.download.media.is_maybe_image_url", fake_is_maybe_image_url)
+    monkeypatch.setattr("scrapemm.server.download.media.download_image", fake_download_image)
+    monkeypatch.setattr("scrapemm.server.download.media.is_maybe_video_url", fake_is_maybe_video_url)
+    monkeypatch.setattr("scrapemm.server.download.media.download_video", fake_download_video)
 
     item = await download_medium("https://example.test/signed-media")
     assert item is expected_video
@@ -128,7 +130,7 @@ async def test_is_maybe_video_url_octet_stream_with_mp4_suffix(monkeypatch):
     async def fake_fetch_headers(url, session, timeout=3):
         return {"Content-Type": "binary/octet-stream"}
 
-    monkeypatch.setattr("scrapemm.download.videos.fetch_headers", fake_fetch_headers)
+    monkeypatch.setattr("scrapemm.server.download.videos.fetch_headers", fake_fetch_headers)
 
     async with aiohttp.ClientSession(headers=HEADERS) as session:
         result = await is_maybe_video_url("https://storage.googleapis.com/x/y/video.mp4?sig=abc", session)
@@ -145,8 +147,8 @@ async def test_download_video_octet_stream_with_mp4_suffix_downloads_file(monkey
     async def fake_download_video_file(video_url, session, max_video_size=None, **kwargs):
         return expected_video
 
-    monkeypatch.setattr("scrapemm.download.videos.fetch_headers", fake_fetch_headers)
-    monkeypatch.setattr("scrapemm.download.videos.download_video_file", fake_download_video_file)
+    monkeypatch.setattr("scrapemm.server.download.videos.fetch_headers", fake_fetch_headers)
+    monkeypatch.setattr("scrapemm.server.download.videos.download_video_file", fake_download_video_file)
 
     async with aiohttp.ClientSession(headers=HEADERS) as session:
         result = await download_video("https://storage.googleapis.com/x/y/video.mp4?sig=abc", session)

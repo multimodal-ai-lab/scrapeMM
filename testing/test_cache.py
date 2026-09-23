@@ -4,9 +4,12 @@ import time
 
 import pytest
 
-from scrapemm import retrieve, set_cache_ttl, clear_cache
-from scrapemm.common.cache import cache, cache_key, DEFAULT_CACHE_TTL
-from scrapemm.retrieval import resolve_best_methods
+from scrapemm.server.engine import retrieve
+from scrapemm.server.cache import set_cache_ttl, clear_cache
+from scrapemm.server.cache import cache, cache_key, DEFAULT_CACHE_TTL
+from scrapemm.server.engine import resolve_best_methods
+
+pytestmark = pytest.mark.server
 
 URL = "https://www.vishvasnews.com/viral/fact-check-upsc-has-not-reduced-the-maximum-age-limit-for-ias-and-ips-exams/"
 

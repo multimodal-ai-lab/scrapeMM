@@ -1,36 +1,19 @@
 [project]
 name = "scrapeMM"
-version = "0.8.4"
+version = "1.0.0"
 description = "Multimodal scraper for social media, internet archives, and the open web."
 readme = "README.md"
-requires-python = "<3.14,>=3.10"
+requires-python = "<3.15,>=3.10"
 license = "Apache-2.0"
 authors = [{name = "Mark Rothermel", email = "mark.rothermel@tu-darmstadt.de"}]
+
+# This package is the scrapeMM *client*. It talks to a scrapeMM server over HTTP and
+# does no scraping itself, so it needs none of the scraping stack. The server ships as
+# a Docker image built from this repo; its dependencies live in requirements-server.txt.
 dependencies = [
     "aiohttp~=3.14.3",
-    "async_lru",
-    "atproto~=0.0.71",
-    "beautifulsoup4",
-    "backports.zstd~=1.7.0",  # For better content parsing with Firecrawl
-    "brotli",  # Required to read brotli-encoded media
-    "cryptography",
-    "curl_cffi~=0.16.3",  # Provides browser binaries for impersonation
     "ezmm~=0.5.2",
-    "firecrawl-py~=4.32.0",
-    "markdownify~=1.2.3",
-    "pip-system-certs",  # For better SSL certificate handling
-    "platformdirs~=4.11.8",
-    "playwright~=1.62.0",
-    "playwright-stealth",
-    "seleniumbase~=4.54.0",  # Package conflict with atproto on the websockets package. Upgrade only when atproto supports websockets>=16.1
-    "prompt_toolkit",  # For handling user terminal input
-    "PyYAML~=6.0.1",
-    "requests~=2.34.2",
-    "telethon~=1.45.0",
-    "TikTokResearchApi~=1.0.4",
-    "tqdm~=4.70.0",
-    "tweepy~=4.17.0",
-    "yt-dlp[default,curl-cffi]",
+    "tqdm~=4.70.1",
 ]
 
 [project.optional-dependencies]
@@ -49,6 +32,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 namespaces = false  # Disable implicit namespaces
+# The published package is the client. The server is not merely undeclared here -- its
+# code is kept out of the distribution altogether, so `pip install scrapeMM` cannot put
+# a half-usable scraping stack on anybody's machine. The server runs from this repo, as
+# the Docker image does.
+exclude = ["scrapemm.server*", "testing*", "scripts*", "ui*", "docker*"]
 
 [tool.setuptools.package-data]
 "*" = ["*.txt"]  # Include all .txt files contained in any (sub)package in the build
@@ -60,3 +48,6 @@ testpaths = [
 asyncio_mode = "auto"
 asyncio_default_test_loop_scope = "session"
 asyncio_default_fixture_loop_scope = "session"
+markers = [
+    "server: tests that need the server dependencies (requirements-server.txt)",
+]

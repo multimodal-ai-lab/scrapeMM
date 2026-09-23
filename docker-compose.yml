@@ -1,0 +1,115 @@
+# scrapeMM: one command to a running server with its web UI.
+#
+#   cp .env.example .env
+#   docker compose up -d
+#
+# The UI is then at http://localhost:${SCRAPEMM_PORT}. Firecrawl comes up alongside it
+# because COMPOSE_PROFILES in .env says so; empty that variable and set FIRECRAWL_URLS
+# instead to point at instances you already run.
+
+services:
+  scrapemm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: scrapemm:${SCRAPEMM_VERSION:-latest}
+    restart: unless-stopped
+    ports:
+      - "${SCRAPEMM_PORT:-8080}:8080"
+    environment:
+      SCRAPEMM_API_KEY: ${SCRAPEMM_API_KEY:-}
+      SCRAPEMM_MASTER_KEY: ${SCRAPEMM_MASTER_KEY:-}
+      SCRAPEMM_LOG_LEVEL: ${SCRAPEMM_LOG_LEVEL:-INFO}
+      SCRAPEMM_MAX_CONCURRENCY: ${SCRAPEMM_MAX_CONCURRENCY:-40}
+      SCRAPEMM_BEHIND_TLS: ${SCRAPEMM_BEHIND_TLS:-}
+      SCRAPEMM_SCREEN_SIZE: ${SCRAPEMM_SCREEN_SIZE:-1440x900x24}
+      # Clients on this host adopt media files where they lie instead of downloading a
+      # second copy, which only works if the server advertises the path as the *host*
+      # sees it rather than its own /data/media.
+      SCRAPEMM_MEDIA_HOST_DIR: ${SCRAPEMM_MEDIA_HOST_DIR:-}
+      FIRECRAWL_URLS: ${FIRECRAWL_URLS:-http://firecrawl-api:3002}
+    volumes:
+      - ${SCRAPEMM_CONFIG_DIR:-./data/config}:/data/config
+      - ${SCRAPEMM_MEDIA_DIR:-./data/media}:/data/media
+    # Archive.today's CAPTCHA becomes an unsolvable *loop* -- as opposed to a check you
+    # can pass -- when the resolver does not pass EDNS Client Subnet. Docker inherits
+    # the host's resolver by default, which is usually fine; if you hit the loop, it is
+    # worth pinning a resolver that does pass ECS (8.8.8.8 does, 1.1.1.1 does not):
+    #   dns:
+    #     - 8.8.8.8
+    shm_size: ${SCRAPEMM_SHM_SIZE:-1gb}  # Chromium crashes on the default 64 MB
+
+  # --- Self-hosted Firecrawl (profile: firecrawl) --------------------------------
+  # Pinned by FIRECRAWL_VERSION so an upstream change cannot alter your deployment
+  # underneath you. Firecrawl brings its own workers in-process; it only needs Redis,
+  # a Postgres for its job queue, and the Playwright service.
+  firecrawl-api:
+    image: ghcr.io/firecrawl/firecrawl:${FIRECRAWL_VERSION:-latest}
+    profiles: ["firecrawl"]
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://firecrawl-redis:6379
+      REDIS_RATE_LIMIT_URL: redis://firecrawl-redis:6379
+      PLAYWRIGHT_MICROSERVICE_URL: http://firecrawl-playwright:3000/scrape
+      # Without these, Firecrawl tries to start its Postgres and RabbitMQ containers by
+      # itself, which cannot work from inside a container that has no Docker socket.
+      NUQ_DATABASE_URL: postgresql://postgres:${FIRECRAWL_DB_PASSWORD:-firecrawl}@firecrawl-postgres:5432/postgres
+      NUQ_RABBITMQ_URL: amqp://guest:guest@firecrawl-rabbitmq:5672
+      USE_DB_AUTHENTICATION: "false"
+      PORT: "3002"
+      HOST: "0.0.0.0"
+      NUM_WORKERS_PER_QUEUE: ${FIRECRAWL_WORKERS:-8}
+    depends_on:
+      firecrawl-redis:
+        condition: service_started
+      firecrawl-playwright:
+        condition: service_started
+      firecrawl-postgres:
+        condition: service_healthy
+      firecrawl-rabbitmq:
+        condition: service_healthy
+
+  firecrawl-playwright:
+    image: ghcr.io/firecrawl/playwright-service:${FIRECRAWL_PLAYWRIGHT_VERSION:-latest}
+    profiles: ["firecrawl"]
+    restart: unless-stopped
+    environment:
+      PORT: "3000"
+
+  firecrawl-redis:
+    image: redis:7-alpine
+    profiles: ["firecrawl"]
+    restart: unless-stopped
+    command: ["redis-server", "--bind", "0.0.0.0"]
+
+  # Firecrawl's own Postgres image. A stock postgres will not do: the queue schema
+  # ("nuq") ships baked into this image rather than being migrated in at startup, so
+  # Firecrawl's workers would start and immediately die on a missing relation.
+  firecrawl-postgres:
+    image: ghcr.io/firecrawl/nuq-postgres:${FIRECRAWL_DB_VERSION:-latest}
+    profiles: ["firecrawl"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${FIRECRAWL_DB_PASSWORD:-firecrawl}
+      POSTGRES_USER: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - firecrawl-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  firecrawl-rabbitmq:
+    image: rabbitmq:4-alpine
+    profiles: ["firecrawl"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+volumes:
+  firecrawl-db:

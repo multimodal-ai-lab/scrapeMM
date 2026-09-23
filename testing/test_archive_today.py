@@ -1,6 +1,6 @@
 """Tests for the Archive.today snapshot-resolving utility
-(`scrapemm.integrations.archive_today`), which maps any mirror snapshot URL to the
-original URL, capture time and content hash without passing the access check.
+(`scrapemm.server.integrations.archive_today`), which maps any mirror snapshot URL to
+the original URL, capture time and content hash without passing the access check.
 
 The short ids used here are the same captures the integration test suite relies on;
 snapshots never change, so their resolved values are stable. Only the resolving helpers
@@ -9,10 +9,12 @@ browser, no CAPTCHA.
 """
 import pytest
 
-from scrapemm.integrations import archive_today
-from scrapemm.integrations.archive_today import (
+from scrapemm.server.integrations import archive_today
+from scrapemm.server.integrations.archive_today import (
     Snapshot, canonicalize_url, identify_snapshot, resolve_snapshot,
 )
+
+pytestmark = pytest.mark.server
 
 
 @pytest.fixture(autouse=True)

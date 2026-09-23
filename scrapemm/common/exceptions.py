@@ -38,3 +38,47 @@ class TargetUnavailableError(Exception):
 class DiskFull(Exception):
     """No space left on disk. The application should be aborted immediately
     before continuing."""
+
+
+class ServerError(Exception):
+    """The scrapeMM server itself failed, or the client could not reach it."""
+
+
+# Exceptions travel over the API as their name plus their message, so that client code
+# keeps catching the very same classes it caught when scrapeMM ran in-process. Only the
+# classes listed here survive the trip; anything else arrives as a plain RetrievalFailed,
+# which is what an unknown failure of a retrieval method amounts to for the caller.
+WIRE_EXCEPTIONS: dict[str, type[Exception]] = {
+    cls.__name__: cls for cls in (
+        UnsupportedDomainError,
+        RateLimitError,
+        QuotaExceededError,
+        RetrievalFailed,
+        AccessBlockedError,
+        CaptchaEncounteredError,
+        TargetUnavailableError,
+        DiskFull,
+        ServerError,
+        NotImplementedError,
+        TimeoutError,
+        ValueError,
+    )
+}
+
+
+def exception_to_wire(e: Exception) -> dict[str, str]:
+    """Renders an exception for transport. Unknown classes keep their real name in
+    `type` so that it still shows up in logs and in the UI, even though the client
+    will reconstruct them as RetrievalFailed."""
+    return {"type": type(e).__name__, "message": str(e)}
+
+
+def exception_from_wire(data: dict[str, str]) -> Exception:
+    """Rebuilds an exception received from the server."""
+    name = data.get("type", "")
+    message = data.get("message", "")
+    cls = WIRE_EXCEPTIONS.get(name)
+    if cls is None:
+        # Keep the original class name visible; the caller still gets a catchable type
+        return RetrievalFailed(f"{name}: {message}" if name else message)
+    return cls(message)

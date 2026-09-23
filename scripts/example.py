@@ -1,23 +1,15 @@
-from scrapemm import retrieve
+"""Retrieve a few URLs through a running scrapeMM server.
+
+Start one first (`docker compose up -d`), then point this at it -- either here or via
+the SCRAPEMM_API_URL / SCRAPEMM_API_KEY environment variables.
+"""
 import asyncio
 
+import scrapemm
+
+scrapemm.configure(api_url="http://localhost:8080", api_key="_vh3p5HotXT-YE2XDcICD_UZLehwJh-6mYHHr5iVbzY")
+
 if __name__ == "__main__":
-    urls = [
-        "https://perma.cc/L7DR-W3K6",
-        "https://perma.cc/U7BY-FWN4",
-        "https://perma.cc/MC46-CF8H",
-        "https://perma.cc/3LSM-MUQT",
-        "https://perma.cc/PZM5-3T6Y?type=image",
-        "https://perma.cc/V56T-T4UR",
-        "https://perma.cc/LC9M-D4TQ",
-        "https://perma.cc/ZA9X-PWQQ",
-        "https://perma.cc/U3JC-79UN",
-        "https://perma.cc/57C7-HT6N?type=image",
-        "https://perma.cc/U66X-WFNS?type=image",
-        "https://perma.cc/4VHZ-THNN",
-        "https://perma.cc/9GT8-XRU7",
-        "https://perma.cc/LKD5-NJPZ",
-    ]
-    results = asyncio.run(retrieve(urls))
-    for result in results:
-        print(result.get() if result.success else result.errors)
+    url = "https://www.zeit.de/politik/deutschland/2025-07/spionage-iran-festnahme-anschlag-juden-berlin-daenemark"
+    result = asyncio.run(scrapemm.retrieve(url))
+    print(result.get() if result.success else result.errors)

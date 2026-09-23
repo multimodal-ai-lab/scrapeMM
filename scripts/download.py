@@ -2,8 +2,8 @@ import asyncio
 
 import aiohttp
 
-from scrapemm.download import download_medium, download_image
-from scrapemm.download.common import HEADERS
+from scrapemm.server.download import download_medium, download_image
+from scrapemm.server.download.common import HEADERS
 
 
 async def download(url):

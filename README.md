@@ -1,217 +1,30 @@
-# scrapeMM: Multimodal Web Retrieval
-Simple web scraper to asynchronously retrieve webpages and access social media contents, fetching text along with media, i.e., images and videos.
+# scrapeMM: Multimodal Web Scraper
 
-This library aims to help developers and researchers to easily access multimodal data from the web and use it for LLM processing.
+![img.png](img.png)
 
-## Setup
-* **If you want to download videos**: Then, the installation of [ffmpeg](https://ffmpeg.org/) is highly recommended.
-In Conda, you can install it with `conda install -c conda-forge ffmpeg`. Platforms like YouTube and
-Facebook serve video and audio as separate streams, and merging them needs ffmpeg. Without it,
-videos are downloaded **without sound**. scrapeMM also normalizes downloaded videos into a format
-browsers can play; that step additionally needs `ffprobe`, which ships with a full ffmpeg install
-(the `imageio-ffmpeg` package provides `ffmpeg` only).
-* **Install Playwright dependencies** (used by multiple integrations) running `playwright install` (add `--force` if an already installed version needs an update).
+scrapeMM is a scraping service that supports the retrieval of _multimedia content_,i.e., text, images, and videos. For a given URL, scrapeMM returns you the webpage's content as a sequence of Markdown-formatted text and in-line media. scrapeMM supports all major social media platforms, archiving services, and most of the open web.
 
-## Configure
-To set the API secrets, run
-```python
-from scrapemm import configure_secrets
-configure_secrets()
-```
+This project is being developed by the [Multimodal AI Lab at TU Darmstadt](https://www.informatik.tu-darmstadt.de/mai/multimodal_ai/index.en.jsp) for agentic web retrieval with media support. While its primary focus is fact-checking, scrapeMM can be used for any kind of web retrieval tasks.
 
-To set the Firecrawl URL, run
-```python
-from scrapemm import update_config
-update_config(firecrawl_url="your_url")
-```
+## Contents
+- [🌐 Supported Platforms](#-supported-platforms)
+  - [📱 Social Media](#-social-media)
+  - [📦 Archiving Services](#-archiving-services)
+- [🏗️ Architecture](#-architecture)
+- [🚀 Running a server](#-running-a-server)
+  - [⚙️ What is in `.env`](#-what-is-in-env)
+- [🐍 Using the client](#-using-the-client)
+  - [🖼️ Media on one machine is never copied](#-media-on-one-machine-is-never-copied)
+- [🖥️ The web UI](#-the-web-ui)
+- [⚡ Caching](#-caching)
+- [🤖 CAPTCHAs and blacklisted domains](#-captchas-and-blacklisted-domains)
+- [🏃 Speeding up retrieval](#-speeding-up-retrieval)
+- [🔍 How it works](#-how-it-works)
 
-A single Firecrawl instance is the throughput ceiling of the whole pipeline, so you can point
-scrapeMM at **several** of them. It probes all of them at startup, spreads its scrapes across
-those that respond, and retries a busy instance on another one instead of waiting:
-```python
-update_config(firecrawl_urls=["http://host-a:3002", "http://host-b:3002"])
-```
+## 🌐 Supported Platforms
+Next to most parts of the open web, the following platforms are supported too:
 
-### Platform Cookies
-Some content is only served to a logged-in session. Set the respective cookie via
-`configure_secrets()` (or `override_secret("<name>")`) to reach it:
-
-| Secret | Unlocks |
-|---|---|
-| `facebook_cookie` | Facebook posts that require login |
-| `instagram_cookie` | Age-restricted Instagram posts ("can't be seen by certain audiences") |
-
-Facebook hides posts that fact-checkers flagged as false information behind an interstitial
-that yt-dlp cannot read. scrapeMM falls back to reading the video straight out of the page
-source in that case, so flagged posts stay retrievable.
-
-### Archive.today Access
-Archive.today guards its snapshot pages with a Google reCAPTCHA, and a solved one unlocks
-them for only about **five minutes**. scrapeMM does **not** solve CAPTCHAs, so instead of
-waiting for you at the moment of each request it **collects work for your next solve**:
-
-1. A snapshot that was retrieved before is served from a **permanent cache** — a capture
-   never changes, and only its page is gated, so retrieving it once settles it for good.
-2. Otherwise scrapeMM fetches the page with the stored session. Media comes from ungated
-   subdomains, so images and videos download with no session at all.
-3. If the page is gated, the request **fails immediately** with a `CaptchaEncounteredError`
-   and the URL goes into a **buffer**. Nothing blocks.
-4. When you solve the CAPTCHA, everything buffered is retrieved and cached within those
-   five minutes:
-   ```bash
-   python scripts/configure_archive_today.py
-   ```
-   (add a number of seconds to wait, e.g. `900`, when running headless — it prints an SSH
-   command to reach the browser window)
-
-So the working rhythm is: let a batch run and collect misses, solve one CAPTCHA, then run
-the batch again — the second time it is served from the cache. All mirrors (`archive.is`,
-`archive.ph`, …) share one session and one cache.
-
-```python
-from scrapemm import (get_archive_today_buffer, clear_archive_today_buffer,
-                      retrieve_buffered_archive_today, count_cached_archive_today_pages)
-
-get_archive_today_buffer()          # URLs waiting for the next solve
-count_cached_archive_today_pages()  # how many pages are cached
-retrieve_buffered_archive_today()   # resume a drain the gate interrupted, session permitting
-clear_archive_today_buffer()        # forget the backlog
-```
-The buffer lives in `archive_today_buffer.json` and the pages in `archive_today_pages/`,
-both in scrapeMM's config directory.
-
-Two opt-ins sit beside this. `update_config(archive_today_interactive_solve=True)` restores
-the old behaviour of opening the browser and waiting for you at the moment of a gated
-request — reasonable for a one-off, attended retrieval, not for batches. And
-`update_config(archive_today_screenshot_fallback=True)` serves the snapshot's screenshot
-and metadata (not its text) when there is no session, so an unattended run gets *something*
-rather than an error.
-
-## Usage
-
-```python
-from scrapemm import retrieve
-import asyncio
-
-if __name__ == "__main__":
-    url = "https://www.snopes.com/fact-check/gauze-originate-from-gaza/"
-    result = asyncio.run(retrieve(url))
-    if result.success:
-        print(result.get())
-    else:
-        print(result.errors)
-```
-
-`retrieve()` returns a `ScrapingResponse`. Its `result.get()` returns the content in the requested
-format; `result.content` gives access to every format that was produced along the way:
-
-| Attribute | Type | Content |
-|---|---|---|
-| `result.content.html` | `str` | The raw HTML code of the page |
-| `result.content.markdown` | `str` | The page text in Markdown, media referenced by hyperlink |
-| `result.content.multimodal` | `MultimodalSequence` | The page text in Markdown with all media downloaded and embedded |
-
-Use `output_format` to tell scrapeMM which format you need (default: `"multimodal"`):
-
-```python
-result = asyncio.run(retrieve(url, output_format="html"))
-print(result.content.html)
-```
-
-The formats are produced one after another — HTML, then Markdown, then the `MultimodalSequence` —
-and scraping stops as soon as the requested format is reached. So the earlier formats come along
-for free (whenever the used retrieval method had access to them), while nothing beyond the
-requested format is computed and media gets downloaded only for `"multimodal"`. `result.success`
-tells you whether the requested format could be produced.
-`scrapeMM` will ask you for the **API secrets** needed for the integrations. You may skip them if you don't need them.
-
-You will also be prompted to choose a **password** that is used to secure the secrets in an encrypted file.
-
-## Caching
-Successful retrievals are cached in memory for 24 hours, so scraping the same URL again is
-instantaneous. The cache is *not* persisted, i.e., it is empty again after the process ended.
-`result.from_cache` tells you whether a response came from the cache.
-
-To change the caching duration (in seconds) for the current process, run
-```python
-from scrapemm import set_cache_ttl
-set_cache_ttl(60 * 60)  # cache for one hour
-set_cache_ttl(0)  # disable caching
-```
-Use `update_config(cache_ttl=3600)` instead to persist the duration across processes, and
-`clear_cache()` to empty the cache. To bypass the cache for a single call, pass
-`retrieve(url, use_cache=False)`.
-
-## CAPTCHAs and Blacklisted Domains
-Every scraped page is checked for CAPTCHA challenges (Cloudflare, reCAPTCHA, hCaptcha, DataDome,
-AWS WAF, PerimeterX, and others). If a challenge was served instead of the page content, the
-response carries a `CaptchaEncounteredError` and the URL's domain is put on a blacklist that is
-persisted to `blacklist.yaml` in scrapeMM's config directory. Retrieving any URL of a blacklisted
-domain then fails right away with an `UnsupportedDomainError` telling why the domain was
-blacklisted.
-
-```python
-from scrapemm import get_blacklisted_domains, unblacklist_domain, blacklist_domain
-
-get_blacklisted_domains()  # -> {"example.com": "Method decodo encountered a Cloudflare challenge. ..."}
-unblacklist_domain("example.com")  # Retrieve that domain again
-blacklist_domain("example.com", "Paywalled")  # Exclude a domain manually
-```
-
-A domain gets blacklisted only if *all* retrieval methods failed, so a CAPTCHA on one method does
-not exclude a domain that another method can still scrape. Blacklisting applies to the registrable
-domain, i.e., including all of its subdomains.
-
-Automatic blacklistings **expire after 7 days**: CAPTCHA gates are often transient (a burst of
-parallel requests can trigger one on a domain that is perfectly retrievable an hour later), so
-excluding a domain forever would quietly erode coverage over time. Change the duration with
-```python
-update_config(blacklist_ttl=24 * 60 * 60)  # Retry blacklisted domains after a day
-update_config(blacklist_ttl=0)  # Never expire
-```
-Domains you blacklist yourself via `blacklist_domain()` are **permanent** — they express a
-decision, not an observation — and stay excluded until you call `unblacklist_domain()`.
-
-Domains that are served by an integration (`perma.cc`, `archive.today`, `x.com`, ...) are never
-blacklisted automatically: their CAPTCHA gates are transient, so blacklisting would disable the
-respective integration for good.
-
-## Speeding Up Retrieval
-By default, scrapeMM tries its retrieval methods strictly one after another, so a slow method
-delays every method behind it by its full timeout budget. **Hedging** gives each method only a
-head start instead: once the delay elapses, the next method is launched *alongside* it, the first
-success wins, and the rest are cancelled. A method that fails early hands over immediately,
-without waiting out the delay.
-
-```python
-result = asyncio.run(retrieve(url, hedging_delay=5))  # 5 s head start per method
-```
-Use `update_config(hedging_delay=5)` to enable it process-wide. Hedging is **disabled by default**
-because it duplicates work — and, for paid methods such as Decodo, duplicates billable requests.
-
-## How it works
-```
-Input:                                  Output:
-URL (string)   -->   retrieve()   -->   MultimodalSequence
-```
-The `MultimodalSequence` is a sequence of Markdown-formatted text and media provided by the [ezMM](https://github.com/multimodal-ai-lab/ezmm) library.
-
-Web scraping is done with [Firecrawl](https://github.com/mendableai/firecrawl) and [Decodo](https://decodo.com/).
-
-Media is collected from `<img>` and `<video>` tags, from CSS background images, and from
-embedded players of the common video platforms (an `<iframe>` pointing at YouTube, Vimeo,
-Dailymotion, …), which are downloaded with yt-dlp. `max_video_size` caps every one of those
-downloads just like it caps the ones of the platform integrations; oversized videos are skipped
-without downloading a byte whenever the server announces a `Content-Length`.
-
-Images are taken at their highest available resolution: `srcset` candidates are compared, and
-lazy-loading attributes (`data-src`, `data-lazy-src`, `data-original`, …) are honoured, so pages
-that ship a placeholder in `src` still yield their real media. Media references are resolved
-against the page URL, no matter whether they are absolute, protocol-relative (`//cdn/x.jpg`),
-root-relative (`/x.jpg`) or document-relative (`img/x.jpg`).
-
-## Supported Platforms
-### Social Media
+### 📱 Social Media
 - ✅ X/Twitter
 - ✅ Telegram
 - ✅ Bluesky
@@ -222,10 +35,240 @@ root-relative (`/x.jpg`) or document-relative (`img/x.jpg`).
 - ✅ Threads: posts only (profiles TBD)
 - ✅ Reddit: posts only
 
-### Archiving Services
+### 📦 Archiving Services
 - ✅ Perma.cc
-- ✅ Archive.today: Rarely ending up in TimeoutErrors
+- ✅ Archive.today
 - ✅ MediaVault (mvau.lt)
 - ✅ Internet Archive (web.archive.org)
 - ✅ AwesomeScreenshot.com
 - ✅ Ghostarchive (ghostarchive.org)
+
+
+## 🏗️ Architecture
+scrapeMM is split in two:
+
+* **The server** does the scraping. It runs as a Docker container with a web UI for
+  configuring integrations, watching their status, trying URLs and solving CAPTCHAs.
+* **The client** is the `scrapeMM` package on PyPI. It talks to the server over API requests.
+
+In its core, scrapeMM is a layer on top of the scraping services [Firecrawl](https://github.com/mendableai/firecrawl)
+and [Decodo](https://decodo.com/), with additional integrations for social media and
+archiving services. Media are handled with in-line references in the Markdown string, managed by [ezMM](https://github.com/multimodal-ai-lab/ezmm).
+
+## 🚀 Running a server
+Copy the `.env.example` file to `.env` and edit it to suit your needs. Then, run
+```bash
+docker compose up -d
+```
+to start the server's docker containers. The web UI is then at `http://localhost:[SCRAPEMM_PORT]`. It asks
+for the API key: set `SCRAPEMM_API_KEY` in `.env`, or leave it empty and the server
+generates one on first start and prints it to the log (`docker compose logs scrapemm`).
+
+That one command also starts a self-hosted Firecrawl. To point at instances you already
+run instead, empty `COMPOSE_PROFILES` and set `FIRECRAWL_URLS` in `.env`.
+
+Then configure the integrations in the UI under **Secrets** — the dashboard tells you
+which ones are missing what.
+
+### ⚙️ What is in `.env`
+
+| Variable | Meaning |
+|---|---|
+| `SCRAPEMM_PORT` | Port for the web UI and the API |
+| `SCRAPEMM_API_KEY` | The bearer token for both; generated if empty |
+| `SCRAPEMM_CONFIG_DIR` | Where the server keeps secrets, caches, job history, browser profile |
+| `SCRAPEMM_MEDIA_DIR` | Where downloaded media goes |
+| `SCRAPEMM_MEDIA_HOST_DIR` | The same directory as an **absolute host path** — see below |
+| `SCRAPEMM_BEHIND_TLS` | Set to `1` when a reverse proxy terminates HTTPS |
+| `FIRECRAWL_URLS` | Comma-separated Firecrawl endpoints |
+
+⚠️ Secrets are typed into the web UI, so they cross the network. On anything but
+localhost, put HTTPS in front of the server; it warns at startup when you have not.
+
+⚠️ `SCRAPEMM_MEDIA_DIR` must be a directory Docker can really bind-mount. Network or
+virtual filesystems (a Google Drive letter on Windows, for instance) are silently
+replaced by a managed volume, and the media then is not visible on the host at all.
+
+## 🐍 Using the client
+
+```bash
+pip install scrapeMM
+```
+
+```python
+import asyncio
+import scrapemm
+
+scrapemm.configure(api_url="http://localhost:8080", api_key="...")
+
+url = "https://www.snopes.com/fact-check/gauze-originate-from-gaza/"
+result = asyncio.run(scrapemm.retrieve(url))
+print(result.get() if result.success else result.errors)
+```
+
+Or set `SCRAPEMM_API_URL` and `SCRAPEMM_API_KEY` in the environment and skip
+`configure()`.
+
+`retrieve()` returns a `ScrapingResponse`. `result.get()` gives the content in the
+requested format; `result.content` exposes every format produced along the way:
+
+| Attribute | Type | Content |
+|---|---|---|
+| `result.content.html` | `str` | The raw HTML of the page |
+| `result.content.markdown` | `str` | The page text in Markdown, media by hyperlink |
+| `result.content.multimodal` | `MultimodalSequence` | The page text with all media downloaded and embedded |
+
+Choose with `output_format` (default `"multimodal"`):
+
+```python
+result = asyncio.run(scrapemm.retrieve(url, output_format="html"))
+```
+
+The formats are produced in order — HTML, then Markdown, then the `MultimodalSequence` —
+and scraping stops at the one you asked for. So earlier formats come along for free
+whenever the method had access to them, nothing beyond it is computed, and media is
+downloaded only for `"multimodal"`. `result.success` says whether the requested format
+could be produced.
+
+Pass a list of URLs to retrieve them concurrently; results come back in the order you
+asked for them, and a progress bar fills in as each one lands:
+
+```python
+results = asyncio.run(scrapemm.retrieve([url_a, url_b, url_c]))
+```
+
+Failures arrive as the exception classes you would catch in-process:
+
+```python
+from scrapemm import CaptchaEncounteredError, RetrievalFailed
+
+if not result.success:
+    for method, error in result.errors.items():
+        if isinstance(error, CaptchaEncounteredError):
+            ...
+```
+
+### 🖼️ Media on one machine is never copied
+
+When the client runs on the same machine as the server — the usual case for a pipeline
+sitting next to its scraper — the media it gets back are *the server's own files*. No
+second copy of every image and video is made.
+
+The client works out how to do this per server:
+
+| Mode | When | What happens |
+|---|---|---|
+| `shared` | Client and server use the same ezMM registry (`EZMM` points at the same directory) | Nothing. The references are already valid. |
+| `link` | The server's media directory is readable here | Its files are registered by path. Not a byte is copied. |
+| `download` | The server is genuinely elsewhere | The bytes come over the API. |
+
+For `link` to work, set `SCRAPEMM_MEDIA_HOST_DIR` in the server's `.env` to the absolute
+path of the media directory **on the host** — inside the container the server only knows
+its own `/data/media`, which means nothing to a client outside it.
+
+Override the choice with `scrapemm.configure(media_transfer="download")` if you want the
+bytes copied anyway — for instance when the media directory is on a read-only mount, or
+when you want files that outlive the server's.
+
+⚠️ In `link` mode your items point into the server's media directory. The server never
+deletes media on its own, precisely so that those references keep working; prune it
+yourself when you decide to, and expect older sequences to lose their media when you do.
+
+## 🖥️ The web UI
+
+| Page | What it is for |
+|---|---|
+| **Dashboard** | Whether each retrieval method can be used right now, and which secret it is missing if not. Plus FFmpeg, the browser and disk usage. |
+| **Playground** | Try URLs and watch the results stream in, rendered with their media. |
+| **Jobs** | Every retrieval this server has run, with per-URL outcomes and the content it produced. |
+| **CAPTCHA** | The backlog of gated URLs, and the solver panel. |
+| **Secrets** | Set the API credentials. Write-only: the server never gives a value back. |
+| **Settings** | Firecrawl endpoints, hedging, cache and blacklist lifetimes, the domain blacklist. |
+
+Every card on the dashboard carries its own status colour and names the missing secrets
+as chips you can go and fill in. Firecrawl and Decodo get cards too, even though they are
+scraping methods rather than per-platform integrations, and each card counts the URLs it
+has retrieved.
+
+| Colour | Means |
+|---|---|
+| Green — *Ready* | Works. |
+| Amber — *Limited* | Works for public content; an **optional** cookie would unlock more. Facebook and Instagram sit here without their cookies. |
+| Amber — *CAPTCHA gated* | The service is up but behind a check right now. Archive.today spends most of its time here; solving one check in the panel clears it. |
+| Amber — *Unreachable* | Configured, but not answering. |
+| Red — *Not configured* | A **required** credential is missing. |
+| Gray — *Disabled* | Switched off deliberately. |
+
+**Switching a method off.** The ⋮ menu on each card disables it. A disabled method is
+dropped from the method list before retrieval rather than left to fail its way down it,
+so it costs nothing at all — useful for a paid API you are done spending on, or an
+integration that is misbehaving today. If every method that could handle a URL is
+disabled, the error says so rather than claiming the URL is unsupported.
+
+Secrets are encrypted at rest with a key the server generates for itself on first start;
+nobody has to manage it. Set `SCRAPEMM_MASTER_KEY` if you would rather keep that key out
+of the volume. Note what this does and does not buy you: the ciphertext is useless in a
+backup or a volume snapshot, but anyone who can read the config directory can decrypt it,
+because the server has to be able to as well.
+
+## ⚡ Caching
+
+Successful retrievals are cached in memory for 24 hours, so scraping the same URL again is
+instantaneous. `result.from_cache` tells you whether a response came from the cache, and
+`retrieve(url, use_cache=False)` bypasses it for one call. Change the lifetime under
+Settings, or clear the cache there.
+
+## 🤖 CAPTCHAs and blacklisted domains
+
+Every scraped page is checked for CAPTCHA challenges (Cloudflare, reCAPTCHA, hCaptcha,
+DataDome, AWS WAF, PerimeterX and others). If a challenge was served instead of the page,
+the response carries a `CaptchaEncounteredError` and the domain goes on a blacklist;
+retrieving any URL of that domain then fails right away with an `UnsupportedDomainError`
+saying why.
+
+A domain is blacklisted only if *all* methods failed, so a CAPTCHA on one method does not
+exclude a domain another method can still scrape. Automatic blacklistings **expire after 7
+days** — CAPTCHA gates are often transient, and excluding a domain forever would quietly
+erode coverage. Domains you add yourself under Settings are permanent: they express a
+decision, not an observation. Domains served by an integration (`perma.cc`,
+`archive.today`, `x.com`, …) are never blacklisted automatically, since that would disable
+the integration for good.
+
+## 🏃 Speeding up retrieval
+
+By default the server tries its retrieval methods one after another, so a slow method
+delays every method behind it by its full timeout. **Hedging** gives each method only a
+head start instead: once the delay elapses the next is launched *alongside* it, the first
+success wins, and the rest are cancelled.
+
+```python
+result = asyncio.run(scrapemm.retrieve(url, hedging_delay=5))
+```
+
+Set it server-wide under Settings. It is off by default because it duplicates work — and,
+for paid methods such as Decodo, duplicates billable requests.
+
+## 🔍 How it works
+
+```
+Input:                                  Output:
+URL (string)   -->   retrieve()   -->   MultimodalSequence
+```
+
+The `MultimodalSequence` is a sequence of Markdown-formatted text and media provided by the
+[ezMM](https://github.com/multimodal-ai-lab/ezmm) library.
+
+Web scraping is done with [Firecrawl](https://github.com/mendableai/firecrawl) and
+[Decodo](https://decodo.com/), alongside per-platform integrations.
+
+Media is collected from `<img>` and `<video>` tags, from CSS background images, and from
+embedded players of the common video platforms (an `<iframe>` pointing at YouTube, Vimeo,
+Dailymotion, …), which are downloaded with yt-dlp. `max_video_size` caps every one of those
+downloads; oversized videos are skipped without downloading a byte whenever the server
+announces a `Content-Length`.
+
+Images are taken at their highest available resolution: `srcset` candidates are compared and
+lazy-loading attributes (`data-src`, `data-lazy-src`, `data-original`, …) are honoured, so
+pages that ship a placeholder in `src` still yield their real media. Media references are
+resolved against the page URL, whether absolute, protocol-relative (`//cdn/x.jpg`),
+root-relative (`/x.jpg`) or document-relative (`img/x.jpg`).

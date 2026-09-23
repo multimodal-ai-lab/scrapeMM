@@ -5,9 +5,11 @@ import pytest
 from playwright._impl._errors import TargetClosedError
 from playwright.async_api import Error as PlaywrightError
 
-from scrapemm.integrations.headed_browser import HeadedBrowser
-from scrapemm.integrations.perma_cc import PermaCC
+from scrapemm.server.integrations.headed_browser import HeadedBrowser
+from scrapemm.server.integrations.perma_cc import PermaCC
 
+
+pytestmark = pytest.mark.server
 
 @pytest.fixture(autouse=True)
 def reset_headed_browser():
@@ -46,7 +48,7 @@ async def test_concurrent_connect_opens_one_browser():
         return mock_browser
 
     with patch(
-        "scrapemm.integrations.headed_browser.cdp_driver.start_async",
+        "scrapemm.server.integrations.headed_browser.cdp_driver.start_async",
         side_effect=fake_start_async,
     ):
         await asyncio.gather(*[integration._connect() for _ in range(13)])
@@ -74,7 +76,7 @@ async def test_ensure_browser_single_flight_recovery_on_crash():
         return browser
 
     with patch(
-        "scrapemm.integrations.headed_browser.cdp_driver.start_async",
+        "scrapemm.server.integrations.headed_browser.cdp_driver.start_async",
         side_effect=fake_start_async,
     ):
         # Establish the initial shared browser (generation 0 -> 1).
@@ -108,7 +110,7 @@ async def test_ensure_browser_restarts_when_stopped():
     HeadedBrowser._generation = 3
 
     with patch(
-        "scrapemm.integrations.headed_browser.cdp_driver.start_async",
+        "scrapemm.server.integrations.headed_browser.cdp_driver.start_async",
         return_value=fresh_browser,
     ):
         browser, generation = await integration._ensure_browser()
@@ -168,12 +170,12 @@ async def test_get_recovers_from_browser_crash_and_retries_once():
         return html
 
     with patch(
-        "scrapemm.integrations.headed_browser.cdp_driver.start_async",
+        "scrapemm.server.integrations.headed_browser.cdp_driver.start_async",
         side_effect=fake_start_async,
     ), patch.object(HeadedBrowser, "_new_page", side_effect=fake_new_page), \
          patch.object(PermaCC, "_extract_content", side_effect=fake_extract_content), \
          patch.object(HeadedBrowser, "_html_and_source", side_effect=fake_html_and_source), \
-         patch("scrapemm.util.to_multimodal_sequence", side_effect=fake_to_multimodal_sequence):
+         patch("scrapemm.server.util.to_multimodal_sequence", side_effect=fake_to_multimodal_sequence):
         result = await integration._get("https://perma.cc/AAAA-BBBB")
 
     assert result.html == "<html>ok</html>"
@@ -190,7 +192,7 @@ async def test_get_raises_instead_of_returning_none_when_browser_unavailable():
     integration = PermaCC()
 
     with patch(
-        "scrapemm.integrations.headed_browser.cdp_driver.start_async",
+        "scrapemm.server.integrations.headed_browser.cdp_driver.start_async",
         return_value=None,
     ):
         with pytest.raises(RuntimeError):
@@ -227,7 +229,7 @@ async def test_transient_connect_failure_does_not_permanently_block_future_calls
             return None
 
     with patch(
-        "scrapemm.integrations.headed_browser.cdp_driver.start_async",
+        "scrapemm.server.integrations.headed_browser.cdp_driver.start_async",
         side_effect=flaky_start_async,
     ):
         # First call: browser fails to start on every attempt -> informative error, not None.
@@ -238,7 +240,7 @@ async def test_transient_connect_failure_does_not_permanently_block_future_calls
         # (which left self.connected as None, not False) did not permanently disable retries.
         with patch.object(PermaCC, "_extract_content", side_effect=lambda page: page), \
              patch.object(HeadedBrowser, "_html_and_source", side_effect=lambda _t, _p: ("<html>ok</html>", _t)), \
-             patch("scrapemm.util.to_multimodal_sequence", side_effect=lambda html, **_kw: html), \
+             patch("scrapemm.server.util.to_multimodal_sequence", side_effect=lambda html, **_kw: html), \
              patch.object(HeadedBrowser, "_new_page", side_effect=lambda _p, attempts=3: (FakePage(), 1)):
             result = await integration.get("https://perma.cc/AAAA-BBBB")
             assert result.html == "<html>ok</html>"
@@ -277,7 +279,7 @@ async def test_get_survives_client_side_redirect_abort():
     with patch.object(HeadedBrowser, "_new_page", side_effect=lambda _p, attempts=3: (page, 1)), \
          patch.object(PermaCC, "_extract_content", side_effect=lambda _page: _page), \
          patch.object(HeadedBrowser, "_html_and_source", side_effect=lambda _t, _p: ("<html>ok</html>", _t)), \
-         patch("scrapemm.util.to_multimodal_sequence", side_effect=lambda html, **_kw: html):
+         patch("scrapemm.server.util.to_multimodal_sequence", side_effect=lambda html, **_kw: html):
         result = await integration.get("https://perma.cc/AAAA-BBBB")
 
     assert result.html == "<html>ok</html>"

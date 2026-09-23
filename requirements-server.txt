@@ -1,0 +1,39 @@
+# Dependencies of the scrapeMM *server*, on top of the client package's own.
+#
+# Deliberately not a pyproject extra: the server is not installable from PyPI in any
+# meaningful sense, because pip cannot give it Playwright's browsers, FFmpeg or the
+# Xvfb display that the Archive.today CAPTCHA panel drives. It ships as a Docker image
+# built from this repo, and this file is what that build installs.
+#
+# Working on the server from a checkout:
+#   pip install -e .
+#   pip install -r requirements-server.txt
+#   playwright install
+
+# --- Web server ------------------------------------------------------------------
+fastapi~=0.139.2
+uvicorn[standard]~=0.51.0
+python-multipart  # Form uploads in the web UI
+websockets  # Proxying the CAPTCHA panel's VNC connection
+
+# --- Scraping stack --------------------------------------------------------------
+async_lru
+atproto~=0.0.71
+beautifulsoup4
+backports.zstd~=1.7.0  # For better content parsing with Firecrawl
+brotli  # Required to read brotli-encoded media
+cryptography  # Encrypts the secrets store at rest
+curl_cffi~=0.16.3  # Provides browser binaries for impersonation
+firecrawl-py~=4.32.0
+markdownify~=1.2.3
+pip-system-certs  # For better SSL certificate handling
+platformdirs~=4.11.8
+playwright~=1.62.0
+playwright-stealth
+seleniumbase~=4.54.0  # Package conflict with atproto on the websockets package. Upgrade only when atproto supports websockets>=16.1
+PyYAML~=6.0.1
+requests~=2.34.2
+telethon~=1.45.0
+TikTokResearchApi~=1.0.4
+tweepy~=4.17.0
+yt-dlp[default,curl-cffi]

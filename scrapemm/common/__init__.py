@@ -1,22 +1,27 @@
+"""Everything the client and the server share.
+
+This package is deliberately import-light: it must not pull in Playwright, yt-dlp or
+any other server-side dependency, because the published `scrapeMM` package is the
+client alone (the server ships as a Docker image).
+"""
+
 import io
 import logging
 import os
 import sys
 
-import yaml
-
-from .blacklist import (blacklist, blacklist_domain, unblacklist_domain,
-                        get_blacklisted_domains, set_blacklist_ttl, DEFAULT_BLACKLIST_TTL)
-from .cache import (cache, cache_key, set_cache_ttl, clear_cache, DEFAULT_CACHE_TTL)
-from .captcha import detect_captcha
-from .exceptions import RateLimitError, RetrievalFailed, CaptchaEncounteredError
-from .paths import APP_NAME, CONFIG_DIR, CONFIG_PATH, BLACKLIST_PATH
+from .exceptions import (AccessBlockedError, CaptchaEncounteredError, DiskFull,
+                         QuotaExceededError, RateLimitError, RetrievalFailed,
+                         TargetUnavailableError, UnsupportedDomainError,
+                         ServerError, exception_from_wire, exception_to_wire)
+from .paths import APP_NAME
 from .scraping_response import (ScrapingResponse, ScrapedContent,
                                 OutputFormat, OUTPUT_FORMATS)
 
-# Set up logger
+# Set up logger. The level is DEBUG unless SCRAPEMM_LOG_LEVEL says otherwise -- the
+# server runs unattended, where debug-level chatter is rarely what you want.
 logger = logging.getLogger(APP_NAME)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(os.getenv("SCRAPEMM_LOG_LEVEL", "DEBUG").upper())
 
 
 def _utf8_stdout():
@@ -38,41 +43,3 @@ if not logger.hasHandlers():
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     logger.propagate = False
-
-WAIT_ON_RATE_LIMIT = False
-
-
-def load_config() -> dict:
-    if os.path.exists(CONFIG_PATH):
-        with open(CONFIG_PATH, "r") as f:
-            return yaml.safe_load(f) or {}
-    else:
-        return {}
-
-
-def update_config(**kwargs):
-    _config.update(kwargs)
-    yaml.dump(_config, open(CONFIG_PATH, "w"))
-    _apply_config()
-
-
-def get_config_var(name: str, default=None) -> str:
-    return _config.get(name, default)
-
-
-def _apply_config():
-    """Applies the config values that configure runtime behavior."""
-    set_cache_ttl(get_config_var("cache_ttl", DEFAULT_CACHE_TTL))
-    set_blacklist_ttl(get_config_var("blacklist_ttl", DEFAULT_BLACKLIST_TTL))
-
-
-def set_wait_on_rate_limit(wait: bool):
-    """Set whether to wait on rate limits (particularly relevant for X API).
-    Will result in a RateLimitError otherwise."""
-    global WAIT_ON_RATE_LIMIT
-    WAIT_ON_RATE_LIMIT = wait
-
-
-# Load config
-_config = load_config()
-_apply_config()

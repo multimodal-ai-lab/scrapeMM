@@ -2,7 +2,7 @@ import asyncio
 import time
 from pathlib import Path
 
-from scrapemm.retrieval import retrieve
+from scrapemm.server.engine import retrieve
 
 
 async def main():

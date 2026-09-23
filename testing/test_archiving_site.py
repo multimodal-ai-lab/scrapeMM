@@ -1,8 +1,10 @@
 import pytest
 
-from scrapemm import retrieve
+from scrapemm.server.engine import retrieve
 from test_social_media import assert_expectations
 
+
+pytestmark = pytest.mark.server
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("url, expected", [

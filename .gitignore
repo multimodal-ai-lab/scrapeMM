@@ -11,3 +11,14 @@ build/
 dev/
 venv/
 .vscode/
+# Deployment state and local configuration
+/.env
+/data/
+/ui/node_modules/
+/ui/.nuxt/
+/ui/.output/
+/scrapemm/server/ui/
+
+# Build artefacts
+/dist/
+/AGENTS.md

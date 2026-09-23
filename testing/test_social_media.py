@@ -1,9 +1,11 @@
 import pytest
 from ezmm import MultimodalSequence
 
-from scrapemm import retrieve
+from scrapemm.server.engine import retrieve
 from scrapemm.common import ScrapingResponse
 
+
+pytestmark = pytest.mark.server
 
 def assert_expectations(response: ScrapingResponse, expected: dict[str, int]):
     """Assert that the content has the expected number of images and videos."""

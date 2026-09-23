@@ -1,0 +1,21 @@
+# Keep the build context small: it is copied to the daemon on every build.
+.git/
+.github/
+.idea/
+.pytest_cache/
+**/__pycache__/
+**/*.pyc
+
+# Runtime state, never part of an image
+data/
+temp/
+testing/
+scripts/
+
+# The UI is built inside the image; a host-built copy would only shadow it
+ui/node_modules/
+ui/.nuxt/
+ui/.output/
+
+*.egg-info/
+.env
