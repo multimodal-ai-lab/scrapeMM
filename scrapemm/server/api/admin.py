@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from scrapemm.common.paths import APP_NAME
 from .. import registry, status as status_module
-from ..auth import require_api_key
+from ..auth import api_key_from_environment, regenerate_api_key, require_api_key
 from ..blacklist import blacklist
 from ..cache import cache
 from ..config import SETTINGS, get_config, update_config
@@ -161,6 +161,23 @@ async def rotate_secrets_key() -> dict:
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"rotated": True}
+
+
+# --- API key ----------------------------------------------------------------------
+
+@router.get("/api-key")
+async def describe_api_key() -> dict:
+    """Never the key itself: only whether the UI may regenerate it."""
+    return {"from_environment": api_key_from_environment()}
+
+
+@router.post("/api-key/regenerate")
+async def regenerate_key() -> dict:
+    """Returns the new key once, so the caller can switch over to it."""
+    try:
+        return {"api_key": regenerate_api_key()}
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 # --- Configuration ----------------------------------------------------------------

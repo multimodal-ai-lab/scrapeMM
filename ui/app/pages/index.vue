@@ -136,11 +136,13 @@ const apiKey = useToken()
 // Fixed-width mask, so the display does not even give away how long the key is.
 const maskedKey = '•'.repeat(16)
 
-function copy(what: 'address' | 'key') {
+async function copy(what: 'address' | 'key') {
   const value = what === 'address' ? address.value : apiKey.value
   if (!value) return
-  navigator.clipboard?.writeText(value)
-  copied.value = what
+  const ok = await copyText(value)
+  // Only claim success when the clipboard really has it
+  if (ok) copied.value = what
+  else error.value = 'Copying to the clipboard failed. This browser blocks it here.'
   setTimeout(() => { if (copied.value === what) copied.value = null }, 1500)
 }
 
@@ -257,11 +259,12 @@ onMounted(() => load())
           />
           {{ address }}
         </button>
+        <USkeleton v-else-if="!error" class="h-5 w-48 self-center" />
 
         <!-- The key is copyable but never legible: what somebody needs from it here is
              to paste it into a client, not to read it off a screen others can see. -->
         <button
-          v-if="apiKey" type="button"
+          v-if="apiKey && (environment || error)" type="button"
           class="inline-flex items-center gap-2 font-mono text-base text-muted
                  hover:text-primary transition-colors"
           title="API key — click to copy"
@@ -271,10 +274,12 @@ onMounted(() => load())
             :name="copied === 'key' ? 'i-fa7-solid-check' : 'i-fa7-regular-copy'"
             class="size-4" :class="copied === 'key' ? 'text-success' : ''"
           />
+          <span class="select-none">API key</span>
           <span class="tracking-tight select-none" aria-label="API key, hidden">
             {{ copied === 'key' ? 'copied' : maskedKey }}
           </span>
         </button>
+        <USkeleton v-else-if="apiKey" class="h-5 w-40 self-center" />
       </div>
 
       <UButton

@@ -13,6 +13,7 @@ This project is being developed by the [Multimodal AI Lab at TU Darmstadt](https
 - [🏗️ Architecture](#-architecture)
 - [🚀 Running a server](#-running-a-server)
   - [⚙️ What is in `.env`](#-what-is-in-env)
+  - [🦭 Running under Podman](#-running-under-podman)
 - [🐍 Using the client](#-using-the-client)
   - [🖼️ Media on one machine is never copied](#-media-on-one-machine-is-never-copied)
 - [🖥️ The web UI](#-the-web-ui)
@@ -64,30 +65,25 @@ to start the server's docker containers. The web UI is then at `http://localhost
 for the API key: set `SCRAPEMM_API_KEY` in `.env`, or leave it empty and the server
 generates one on first start and prints it to the log (`docker compose logs scrapemm`).
 
-That one command also starts a self-hosted Firecrawl. To point at instances you already
-run instead, empty `COMPOSE_PROFILES` and set `FIRECRAWL_URLS` in `.env`.
+That one command also starts a self-hosted Firecrawl. Further instances can be added in
+the UI under **Settings**.
 
 Then configure the integrations in the UI under **Secrets** — the dashboard tells you
 which ones are missing what.
 
 ### ⚙️ What is in `.env`
 
-| Variable | Meaning |
-|---|---|
-| `SCRAPEMM_PORT` | Port for the web UI and the API |
-| `SCRAPEMM_API_KEY` | The bearer token for both; generated if empty |
-| `SCRAPEMM_CONFIG_DIR` | Where the server keeps secrets, caches, job history, browser profile |
-| `SCRAPEMM_MEDIA_DIR` | Where downloaded media goes |
-| `SCRAPEMM_MEDIA_HOST_DIR` | The same directory as an **absolute host path** — see below |
-| `SCRAPEMM_BEHIND_TLS` | Set to `1` when a reverse proxy terminates HTTPS |
-| `FIRECRAWL_URLS` | Comma-separated Firecrawl endpoints |
+| Variable | Meaning                                                                                                                                           |
+|---|---------------------------------------------------------------------------------------------------------------------------------------------------|
+| `SCRAPEMM_PORT` | Port for the web UI and the API                                                                                                                   |
+| `SCRAPEMM_API_KEY` | The bearer token for both; generated if empty                                                                                                     |
+| `SCRAPEMM_CONFIG_DIR` | Where the server keeps secrets, caches, job history, browser profile                                                                              |
+| `SCRAPEMM_MEDIA_DIR` | The ezMM media directory downloaded media goes to; Must be an **absolute, Docker-mountable path** on the host system |
+| `SCRAPEMM_BEHIND_TLS` | Set to `1` when a reverse proxy terminates HTTPS                                                                                                  |
 
 ⚠️ Secrets are typed into the web UI, so they cross the network. On anything but
 localhost, put HTTPS in front of the server; it warns at startup when you have not.
 
-⚠️ `SCRAPEMM_MEDIA_DIR` must be a directory Docker can really bind-mount. Network or
-virtual filesystems (a Google Drive letter on Windows, for instance) are silently
-replaced by a managed volume, and the media then is not visible on the host at all.
 
 ## 🐍 Using the client
 
@@ -106,8 +102,11 @@ result = asyncio.run(scrapemm.retrieve(url))
 print(result.get() if result.success else result.errors)
 ```
 
-Or set `SCRAPEMM_API_URL` and `SCRAPEMM_API_KEY` in the environment and skip
-`configure()`.
+`configure()` only needs to run once per machine: it saves its settings to
+`%APPDATA%\scrapeMM\client.json` on Windows, or `~/.config/scrapeMM/client.json`
+elsewhere, and later processes load them from there. Pass `persist=False` to change the
+running process only. `SCRAPEMM_API_URL` and `SCRAPEMM_API_KEY` in the environment
+override the saved values.
 
 `retrieve()` returns a `ScrapingResponse`. `result.get()` gives the content in the
 requested format; `result.content` exposes every format produced along the way:
@@ -162,9 +161,10 @@ The client works out how to do this per server:
 | `link` | The server's media directory is readable here | Its files are registered by path. Not a byte is copied. |
 | `download` | The server is genuinely elsewhere | The bytes come over the API. |
 
-For `link` to work, set `SCRAPEMM_MEDIA_HOST_DIR` in the server's `.env` to the absolute
-path of the media directory **on the host** — inside the container the server only knows
-its own `/data/media`, which means nothing to a client outside it.
+For `shared` or `link` to work, set `SCRAPEMM_MEDIA_DIR` in the server's `.env` to an
+**absolute** path — ideally your clients' `ezMM` directory, which gives you `shared`. With
+a relative path the server cannot tell clients where the files are on the host, so they
+fall back to `download`.
 
 Override the choice with `scrapemm.configure(media_transfer="download")` if you want the
 bytes copied anyway — for instance when the media directory is on a read-only mount, or
@@ -183,7 +183,7 @@ yourself when you decide to, and expect older sequences to lose their media when
 | **Jobs** | Every retrieval this server has run, with per-URL outcomes and the content it produced. |
 | **CAPTCHA** | The backlog of gated URLs, and the solver panel. |
 | **Secrets** | Set the API credentials. Write-only: the server never gives a value back. |
-| **Settings** | Firecrawl endpoints, hedging, cache and blacklist lifetimes, the domain blacklist. |
+| **Settings** | Firecrawl endpoints, hedging, cache and blacklist lifetimes, the domain blacklist. Regenerating the API key (unless `SCRAPEMM_API_KEY` sets it). |
 
 Every card on the dashboard carries its own status colour and names the missing secrets
 as chips you can go and fill in. Firecrawl and Decodo get cards too, even though they are

@@ -29,8 +29,8 @@ async function remove() {
   }
 }
 
-function copyId() {
-  navigator.clipboard?.writeText(String(route.params.id))
+async function copyId() {
+  if (!(await copyText(String(route.params.id)))) return
   copied.value = true
   setTimeout(() => { copied.value = false }, 1500)
 }

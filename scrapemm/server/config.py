@@ -79,8 +79,6 @@ def _seed_from_environment():
     """Lets the container's .env prime the configuration on a fresh volume. Values
     already in config.yaml win: the UI is the authority once someone has used it."""
     seeded = {}
-    if (urls := os.getenv("FIRECRAWL_URLS")) and not _config.get("firecrawl_urls"):
-        seeded["firecrawl_urls"] = [u.strip() for u in urls.split(",") if u.strip()]
     if (limit := os.getenv("SCRAPEMM_MAX_CONCURRENCY")) and not _config.get("max_concurrency"):
         try:
             seeded["max_concurrency"] = int(limit)

@@ -6,10 +6,24 @@
 # This is why the server is not a pip install: the UI is a build artifact, and nobody
 # should need a Node toolchain to run scrapeMM.
 # ---------------------------------------------------------------------------------
-FROM node:22-alpine AS ui
+# The registry prefix is spelled out on purpose. Docker silently expands a bare
+# `node:22-alpine` to `docker.io/library/...`; Podman instead walks the
+# `unqualified-search-registries` list from registries.conf, which on RHEL/Fedora starts
+# with registry.redhat.io -- a registry that rejects anonymous pulls. The build then dies
+# on "unable to retrieve auth token: invalid username/password" for an image that is
+# public, and never reaches Docker Hub at all. A fully qualified name removes the guess.
+FROM docker.io/library/node:22-alpine AS ui
 
 WORKDIR /ui
 COPY ui/package.json ui/package-lock.json* ./
+# The committed lockfile pins the whole dependency tree, so a build resolves to the
+# same versions rather than to whatever the registry happens to serve that minute --
+# which is how an upstream republish once broke this stage mid-build.
+#
+# `npm install` rather than `npm ci` on purpose: it honours the lockfile when the two
+# agree and repairs it when they drift, where `npm ci` fails the build outright. npm
+# has been known to emit a lockfile its own `ci` then rejects, and a build that stops
+# for that is worse than one that resolves a package differently.
 RUN npm install --no-audit --no-fund
 
 COPY ui/ ./

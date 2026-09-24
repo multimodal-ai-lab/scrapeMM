@@ -41,16 +41,39 @@ def api_key() -> str:
     except OSError:
         pass
 
-    _api_key = secrets_module.token_urlsafe(32)
+    _api_key = _generate()
+    logger.warning(f"🔑 No SCRAPEMM_API_KEY was set, so one was generated: {_api_key}\n"
+                   f"   Enter it in the web UI, or set SCRAPEMM_API_KEY in your .env.")
+    return _api_key
+
+
+def api_key_from_environment() -> bool:
+    return bool(os.getenv("SCRAPEMM_API_KEY"))
+
+
+def regenerate_api_key() -> str:
+    """Replaces the token with a fresh one; the old one stops working immediately."""
+    global _api_key
+    if api_key_from_environment():
+        raise RuntimeError("The API key is set by SCRAPEMM_API_KEY in the environment, "
+                           "which would override a regenerated one on the next start. "
+                           "Change it there instead, or remove it to manage the key here.")
+    _api_key = _generate()
+    logger.warning("🔑 The API key was regenerated. Clients using the old one are now "
+                   "rejected.")
+    return _api_key
+
+
+def _generate() -> str:
+    """A new token, persisted so that it survives restarts."""
+    key = secrets_module.token_urlsafe(32)
     try:
-        API_KEY_PATH.write_text(_api_key, encoding="utf-8")
+        API_KEY_PATH.write_text(key, encoding="utf-8")
         os.chmod(API_KEY_PATH, 0o600)
     except OSError:
         logger.warning(f"Could not persist the API key to {API_KEY_PATH}; a new one "
                        f"will be generated on the next start.")
-    logger.warning(f"🔑 No SCRAPEMM_API_KEY was set, so one was generated: {_api_key}\n"
-                   f"   Enter it in the web UI, or set SCRAPEMM_API_KEY in your .env.")
-    return _api_key
+    return key
 
 
 def _token_from(authorization: Optional[str], token: Optional[str]) -> Optional[str]:

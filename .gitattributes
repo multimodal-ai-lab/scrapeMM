@@ -1,0 +1,25 @@
+# Line endings.
+#
+# Everything in this repository that a Linux container executes must keep LF, whatever
+# the checkout platform does by default. Git stores LF, but a Windows clone with
+# core.autocrlf=true writes CRLF into the working tree -- and `docker build` copies the
+# working tree verbatim. A shell script that arrives with CRLF has `#!/usr/bin/env bash\r`
+# as its shebang, so the kernel looks for an interpreter literally named "bash\r" and the
+# container dies with exit 127 and the memorable message:
+#
+#     /usr/bin/env: 'bash\r': No such file or directory
+#
+# These rules pin LF for those files, so a Windows checkout builds the same image as a
+# Linux one.
+
+* text=auto
+
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*.dockerfile    text eol=lf
+docker-compose*.yml text eol=lf
+.env.example    text eol=lf
+*.py            text eol=lf
+
+# Lockfiles and build output are noisy in diffs and never merged by hand
+ui/package-lock.json -diff linguist-generated

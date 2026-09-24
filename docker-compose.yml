@@ -4,8 +4,7 @@
 #   docker compose up -d
 #
 # The UI is then at http://localhost:${SCRAPEMM_PORT}. Firecrawl comes up alongside it
-# because COMPOSE_PROFILES in .env says so; empty that variable and set FIRECRAWL_URLS
-# instead to point at instances you already run.
+# because COMPOSE_PROFILES in .env says so.
 
 services:
   scrapemm:
@@ -26,8 +25,7 @@ services:
       # Clients on this host adopt media files where they lie instead of downloading a
       # second copy, which only works if the server advertises the path as the *host*
       # sees it rather than its own /data/media.
-      SCRAPEMM_MEDIA_HOST_DIR: ${SCRAPEMM_MEDIA_HOST_DIR:-}
-      FIRECRAWL_URLS: ${FIRECRAWL_URLS:-http://firecrawl-api:3002}
+      SCRAPEMM_MEDIA_DIR: ${SCRAPEMM_MEDIA_DIR:-./data/media}
     volumes:
       - ${SCRAPEMM_CONFIG_DIR:-./data/config}:/data/config
       - ${SCRAPEMM_MEDIA_DIR:-./data/media}:/data/media
@@ -77,7 +75,7 @@ services:
       PORT: "3000"
 
   firecrawl-redis:
-    image: redis:7-alpine
+    image: docker.io/library/redis:7-alpine
     profiles: ["firecrawl"]
     restart: unless-stopped
     command: ["redis-server", "--bind", "0.0.0.0"]
@@ -102,7 +100,7 @@ services:
       retries: 10
 
   firecrawl-rabbitmq:
-    image: rabbitmq:4-alpine
+    image: docker.io/library/rabbitmq:4-alpine
     profiles: ["firecrawl"]
     restart: unless-stopped
     healthcheck:

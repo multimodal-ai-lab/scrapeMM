@@ -15,10 +15,11 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.routing import Match
 
 from scrapemm.common.paths import APP_NAME
 from . import registry
@@ -114,9 +115,41 @@ def create_app() -> FastAPI:
     return app
 
 
+CATCH_ALL = "/{path:path}"
+
+
+def _no_such_route(request: Request) -> JSONResponse:
+    """Says precisely what was asked for and why it is wrong. Without this, the UI's
+    catch-all turns every mistyped API call into a bare "Method Not Allowed", which
+    points at nothing."""
+    path, method = request.url.path, request.method
+    # Ask the routes themselves which methods they would take here: included routers
+    # are wrapped, so their routes cannot simply be listed.
+    routes = [r for r in request.app.routes if getattr(r, "path", None) != CATCH_ALL]
+    allowed = sorted(m for m in ("GET", "POST", "PUT", "PATCH", "DELETE")
+                     if any(r.matches({**request.scope, "method": m})[0] == Match.FULL
+                            for r in routes))
+    if allowed:
+        detail = (f"{method} {path} is not supported; this route accepts "
+                  f"{', '.join(allowed)}.")
+        if method == "GET" and "POST" in allowed:
+            detail += (" If your client sent a POST, a redirect on the way (for example "
+                       "http:// to https://) turned it into a GET: point api_url at the "
+                       "final address directly.")
+        return JSONResponse({"detail": detail}, status_code=405,
+                            headers={"Allow": ", ".join(allowed)})
+    return JSONResponse({"detail": (
+        f"{method} {path} is not a route of this scrapeMM server. The API lives under "
+        f"/v1, e.g. POST /v1/retrieve, so a client's api_url must be the server's root "
+        f"(like http://localhost:8080), without /v1 or any other path.")},
+        status_code=404)
+
+
 def _mount_ui(app: FastAPI) -> None:
-    """Serves the built Nuxt UI."""
-    if not UI_DIR.is_dir():
+    """Serves the built Nuxt UI, and a specific error for anything that is neither UI
+    nor API."""
+    has_ui = UI_DIR.is_dir()
+    if not has_ui:
         @app.get("/", include_in_schema=False)
         async def no_ui() -> JSONResponse:
             return JSONResponse({
@@ -124,20 +157,24 @@ def _mount_ui(app: FastAPI) -> None:
                 "api": "/v1",
                 "docs": "/docs",
             })
-        return
-
-    if (UI_DIR / "_nuxt").is_dir():
+    elif (UI_DIR / "_nuxt").is_dir():
         app.mount("/_nuxt", StaticFiles(directory=UI_DIR / "_nuxt"), name="nuxt")
 
     index = UI_DIR / "index.html"
 
     # HEAD as well as GET: reverse proxies and uptime checks probe the root with HEAD,
-    # and FastAPI does not derive it from a GET route on its own.
-    @app.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
-    async def ui(path: str) -> FileResponse:
+    # and FastAPI does not derive it from a GET route on its own. The other methods are
+    # here only to answer them with a useful error.
+    @app.api_route(CATCH_ALL, methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+                   include_in_schema=False)
+    async def ui(path: str, request: Request) -> Response:
         """Serves a real file where there is one, and index.html otherwise -- the SPA
         owns routes like /jobs/abc123, which exist in the browser but not on disk, and
-        a reload of one of those must not 404."""
+        a reload of one of those must not 404. Unknown /v1 paths never get the SPA:
+        a client expecting JSON would otherwise receive a web page."""
+        if (not has_ui or request.method not in ("GET", "HEAD")
+                or path == "v1" or path.startswith("v1/")):
+            return _no_such_route(request)
         candidate = (UI_DIR / path).resolve()
         # Refuse anything that escapes the UI directory, however it was spelled
         if UI_DIR.resolve() in candidate.parents and candidate.is_file():

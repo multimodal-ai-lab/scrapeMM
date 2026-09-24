@@ -158,8 +158,8 @@ watch(page, load)
 onMounted(load)
 
 const copied = ref('')
-function copy(id: string) {
-  navigator.clipboard?.writeText(id)
+async function copy(id: string) {
+  if (!(await copyText(id))) return
   copied.value = id
   setTimeout(() => { if (copied.value === id) copied.value = '' }, 1500)
 }

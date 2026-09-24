@@ -73,7 +73,51 @@ async function clearCache() {
   }
 }
 
-onMounted(load)
+// null until known; the key cannot be regenerated here when .env sets it
+const keyFromEnvironment = ref<boolean | null>(null)
+const regenerating = ref(false)
+const newKey = ref('')
+const keyCopied = ref(false)
+
+async function loadKeyState() {
+  try {
+    keyFromEnvironment.value = (await api.get<any>('/v1/api-key')).from_environment
+  } catch (e: any) {
+    error.value = e.message
+  }
+}
+
+async function regenerateKey() {
+  if (!confirm('Regenerate the API key? Every client using the current key is rejected '
+    + 'until it is given the new one.')) return
+  regenerating.value = true
+  error.value = ''
+  notice.value = ''
+  try {
+    const { api_key } = await api.post<any>('/v1/api-key/regenerate')
+    // This browser switches over at once; otherwise its next call would be rejected
+    setToken(api_key)
+    newKey.value = api_key
+  } catch (e: any) {
+    error.value = e.message
+  } finally {
+    regenerating.value = false
+  }
+}
+
+async function copyNewKey() {
+  if (!(await copyText(newKey.value))) {
+    error.value = 'Copying to the clipboard failed. Select the key and copy it by hand.'
+    return
+  }
+  keyCopied.value = true
+  setTimeout(() => { keyCopied.value = false }, 1500)
+}
+
+onMounted(() => {
+  load()
+  loadKeyState()
+})
 </script>
 
 <template>
@@ -139,6 +183,35 @@ onMounted(load)
       <p class="text-sm text-muted">
         {{ cache.entries }} responses cached, lifetime {{ cache.ttl }}s.
       </p>
+    </UCard>
+
+    <UCard>
+      <template #header>
+        <div class="flex items-center justify-between">
+          <h2 class="font-medium">API key</h2>
+          <UButton
+            size="xs" variant="ghost" color="error" icon="i-fa7-solid-rotate"
+            label="Regenerate" :loading="regenerating"
+            :disabled="keyFromEnvironment !== false" @click="regenerateKey"
+          />
+        </div>
+      </template>
+      <p v-if="keyFromEnvironment" class="text-sm text-muted">
+        The key is set by <code class="font-mono">SCRAPEMM_API_KEY</code> in the server's
+        <code class="font-mono">.env</code>. Change it there, or empty it to manage the key here.
+      </p>
+      <p v-else class="text-sm text-muted">
+        A new key replaces the current one at once: clients that still use the old key are
+        rejected until they are given the new one. This browser switches over by itself.
+      </p>
+      <div v-if="newKey" class="mt-3 flex items-center gap-2">
+        <UInput :model-value="newKey" readonly class="flex-1 font-mono" />
+        <UButton
+          :icon="keyCopied ? 'i-fa7-solid-check' : 'i-fa7-regular-copy'"
+          color="neutral" variant="subtle" :label="keyCopied ? 'Copied' : 'Copy'"
+          @click="copyNewKey"
+        />
+      </div>
     </UCard>
 
     <UCard v-if="media">

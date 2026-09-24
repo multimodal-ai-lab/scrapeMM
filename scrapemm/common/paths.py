@@ -1,7 +1,7 @@
 """Names the client and the server agree on.
 
-The client persists nothing -- it is configured through `scrapemm.configure()` or the
-environment -- so the on-disk locations all belong to the server and live in
+The client persists only what `scrapemm.configure()` saves (see
+`scrapemm.client.settings.CONFIG_PATH`); the server's on-disk locations live in
 `scrapemm.server.paths`.
 """
 

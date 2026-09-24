@@ -57,9 +57,6 @@ def configured_firecrawl_urls() -> list[str]:
             ordered.append(url)
     return ordered
 
-
-FIRECRAWL_URLS = configured_firecrawl_urls()
-
 NO_BOT_DOMAINS_FILE_PATH = Path(__file__).parent / "no_bot_domains.txt"
 NO_BOT_DOMAINS = read_urls_from_file(NO_BOT_DOMAINS_FILE_PATH)
 

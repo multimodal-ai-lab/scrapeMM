@@ -150,8 +150,12 @@ async def _stream(session: aiohttp.ClientSession, config: Settings,
                     f"{url} rejected the API key. Set it with "
                     f"scrapemm.configure(api_key=...) or SCRAPEMM_API_KEY.")
             if response.status >= 400:
-                body = (await response.text())[:500]
-                raise ServerError(f"{url} responded {response.status}: {body}")
+                message, explained = _describe_failure(url, response, await response.text())
+                # A current scrapeMM server explains its 404s and 405s; an unexplained
+                # one means something else answered, which is worth finding out
+                if response.status in (404, 405) and not explained and not response.history:
+                    message += await _identify(session, config.base_url)
+                raise ServerError(message)
 
             # Read raw chunks and split lines here rather than iterating
             # `response.content`, whose line reader refuses anything over 512 KB. One
@@ -169,6 +173,53 @@ async def _stream(session: aiohttp.ClientSession, config: Settings,
     except aiohttp.ClientError as e:
         raise ServerError(
             f"Could not reach the scrapeMM server at {config.base_url}: {e}") from e
+
+
+def _describe_failure(url: str, response: aiohttp.ClientResponse,
+                      body: str) -> tuple[str, bool]:
+    """Turns an error response into a message that says what to fix, and tells whether
+    the server gave an explanation of its own."""
+    detail = None
+    try:
+        detail = json.loads(body).get("detail")
+    except (json.JSONDecodeError, AttributeError):
+        pass
+    # A bare "Method Not Allowed" repeats the status line and explains nothing
+    informative = isinstance(detail, str) and detail != response.reason
+    message = f"POST {url} failed with {response.status} {response.reason}"
+    if informative:
+        message += f": {detail}"
+    elif not isinstance(detail, str) and body.strip():
+        message += f": {body[:500]}"
+
+    if response.history:
+        final = response.url.with_path("/").with_query(None)
+        message += (f". The request was redirected to {response.url}, which turns a POST "
+                    f"into a GET. Set api_url to {str(final).rstrip('/')} directly.")
+    return message, informative
+
+
+async def _identify(session: aiohttp.ClientSession, base_url: str) -> str:
+    """Says what actually answers at `base_url`. The health check needs no API key,
+    so this works even when the key is wrong or missing."""
+    service = None
+    try:
+        async with session.get(f"{base_url}/healthz", allow_redirects=False,
+                               timeout=aiohttp.ClientTimeout(total=5)) as response:
+            health = await response.json(content_type=None)
+            if isinstance(health, dict) and health.get("status") == "ok" and "version" in health:
+                service = health["version"]
+    except Exception:
+        pass
+
+    if service is not None:
+        return (f". A scrapeMM server {service} runs at {base_url} but has no POST "
+                f"/v1/retrieve; update the server or the client so their versions match.")
+    return (f". Whatever answers at {base_url} is not a scrapeMM server (it has no "
+            f"scrapeMM health check at /healthz), so another service probably holds "
+            f"this port. Point the client at the scrapeMM server with "
+            f"scrapemm.configure(api_url=...) or SCRAPEMM_API_URL, using the port set "
+            f"as SCRAPEMM_PORT in the server's .env.")
 
 
 def _parse(line: bytes) -> Optional[dict[str, Any]]:

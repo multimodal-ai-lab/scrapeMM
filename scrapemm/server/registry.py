@@ -4,8 +4,8 @@ Two jobs. First, describe retrieved media well enough that a client can pick it 
 without a copy being made: each item's *host-visible* path goes into the manifest, so
 a client on the same machine adopts the file where it lies. Inside Docker the server's
 own path (`/data/media/...`) means nothing to anyone outside the container, which is
-why SCRAPEMM_MEDIA_HOST_DIR exists -- the compose file sets it to whatever the volume
-is mounted from on the host.
+why the compose file hands SCRAPEMM_MEDIA_DIR -- the host directory the volume is
+mounted from -- to the server as well.
 
 Second, make the registry identifiable. A random fingerprint is written into its root
 once, and a client compares it against its own registry's to find out whether the two
@@ -16,6 +16,7 @@ import logging
 import shutil
 import time
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -35,8 +36,13 @@ FINGERPRINT_FILENAME = ".scrapemm-registry"
 # elsewhere and the paths would only be noise (or an unwanted disclosure of layout).
 EXPOSE_PATHS = os.getenv("SCRAPEMM_MEDIA_EXPOSE_PATHS", "1").lower() not in ("0", "false", "no")
 
-# Where the registry lives as seen from *outside* the container
-HOST_DIR = os.getenv("SCRAPEMM_MEDIA_HOST_DIR")
+# Where the registry lives as seen from *outside* the container. Only an absolute path
+# helps a client; a relative one is relative to the compose file, which we cannot see.
+HOST_DIR = os.getenv("SCRAPEMM_MEDIA_DIR")
+if HOST_DIR and not re.match(r"^([A-Za-z]:)?[\\/]", HOST_DIR):
+    logger.info(f"SCRAPEMM_MEDIA_DIR={HOST_DIR!r} is not absolute, so clients on this "
+                f"host cannot adopt media files and will download them instead.")
+    HOST_DIR = None
 
 _fingerprint: Optional[str] = None
 
