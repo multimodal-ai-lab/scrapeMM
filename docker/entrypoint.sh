@@ -22,7 +22,11 @@ cleanup() {
 trap cleanup EXIT
 
 echo "Starting Xvfb on ${DISPLAY} (${SCREEN_SIZE})..."
-Xvfb "$DISPLAY" -screen 0 "$SCREEN_SIZE" -nolisten tcp &
+# Xvfb recompiles its keymap on start and whenever a client (x11vnc) connects, and
+# xkbcomp complains each time about keysyms the image's keyboard data lacks. Harmless,
+# so those lines are filtered out; anything else Xvfb reports still gets through.
+Xvfb "$DISPLAY" -screen 0 "$SCREEN_SIZE" -nolisten tcp \
+    2> >(grep --line-buffered -vE '^(The XKEYBOARD keymap compiler|> |Errors from xkbcomp)' >&2) &
 XVFB_PID=$!
 
 # Wait for the display to accept connections before anything tries to use it
@@ -37,7 +41,7 @@ echo "Starting x11vnc on 127.0.0.1:${VNC_PORT}..."
 # -nopw with -localhost: the socket is reachable only from inside the container; the
 #   web UI's own API key is what actually guards it
 x11vnc -display "$DISPLAY" -rfbport "$VNC_PORT" -localhost -forever -shared \
-       -nopw -quiet -bg -o /tmp/x11vnc.log
+       -nopw -quiet -bg -o /tmp/x11vnc.log >/dev/null  # -bg would echo "PORT=..."
 VNC_PID=""
 
 echo "Starting scrapeMM on port ${PORT}..."

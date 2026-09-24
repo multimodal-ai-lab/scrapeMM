@@ -105,8 +105,9 @@ function sinceTimestamp(period: string): number | null {
   return span ? Math.floor(Date.now() / 1000 - span) : null
 }
 
-async function load() {
-  loading.value = true
+/** `quiet` refreshes in the background, without the spinner, for running jobs. */
+async function load(quiet = false) {
+  if (!quiet) loading.value = true
   error.value = ''
   try {
     const query = new URLSearchParams({
@@ -152,10 +153,44 @@ watch(filters, () => {
   page.value = 1
   syncQuery()
   if (debounce) clearTimeout(debounce)
-  debounce = setTimeout(load, 250)
+  debounce = setTimeout(() => load(), 250)
 })
-watch(page, load)
-onMounted(load)
+watch(page, () => load())
+onMounted(() => load())
+
+// While a job in view is still running, follow it until it is done
+let poll: ReturnType<typeof setTimeout> | null = null
+watch(jobs, (list) => {
+  if (poll) clearTimeout(poll)
+  poll = list.some((job) => job.status === 'running') ? setTimeout(() => load(true), 3000) : null
+})
+onUnmounted(() => { if (poll) clearTimeout(poll) })
+
+/**
+ * The URLs as they were asked for. Stored with the job the moment it starts, unlike its
+ * results, which only exist once each URL is done -- so a running job has its title too.
+ */
+function requested(job: any): string[] {
+  const urls: string[] = [...new Set<string>(job.params?.urls || [])]
+  return urls.length ? urls : (job.urls || []).map((u: any) => u.url)
+}
+
+/** The one status icon a row carries, which now also holds what the badges used to. */
+function look(job: any) {
+  const counts = `${job.succeeded} succeeded, ${job.failed} failed`
+  if (job.status === 'running') {
+    return { icon: 'i-fa7-solid-circle-notch', color: 'text-info animate-spin',
+             title: `Running · ${job.urls?.length || 0} of ${job.url_count} done` }
+  }
+  if (job.status !== 'completed') {
+    return { icon: 'i-fa7-solid-circle-xmark', color: 'text-error',
+             title: `${job.status} · ${counts}` }
+  }
+  if (job.failed) {
+    return { icon: 'i-fa7-solid-circle-exclamation', color: 'text-error', title: counts }
+  }
+  return { icon: 'i-fa7-solid-circle-check', color: 'text-success', title: counts }
+}
 
 const copied = ref('')
 async function copy(id: string) {
@@ -179,7 +214,7 @@ async function copy(id: string) {
       <UButton
         class="transition-transform duration-150 hover:scale-105"
         icon="i-fa7-solid-rotate" color="neutral" variant="subtle" :loading="loading"
-        label="Refresh" @click="load"
+        label="Refresh" @click="load()"
       />
     </div>
 
@@ -269,17 +304,16 @@ async function copy(id: string) {
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-1.5 min-w-0">
                 <UIcon
-                  :name="job.failed ? 'i-fa7-solid-circle-exclamation' : 'i-fa7-solid-circle-check'"
-                  class="size-3.5 shrink-0"
-                  :class="job.failed ? 'text-error' : 'text-success'"
+                  :name="look(job).icon" class="size-3.5 shrink-0"
+                  :class="look(job).color" :title="look(job).title"
                 />
-                <span class="font-medium truncate" :title="job.urls?.[0]?.url">
-                  {{ job.urls?.[0]?.url || '(no URL)' }}
+                <span class="font-medium truncate" :title="requested(job)[0]">
+                  {{ requested(job)[0] }}
                 </span>
                 <UBadge
-                  v-if="job.url_count > 1" color="neutral" variant="subtle" size="sm"
-                  :label="`+${job.url_count - 1}`"
-                  :title="job.urls?.slice(1).map((u: any) => u.url).join('\n')"
+                  v-if="requested(job).length > 1" color="neutral" variant="subtle" size="sm"
+                  :label="`+${requested(job).length - 1}`"
+                  :title="requested(job).slice(1).join('\n')"
                 />
               </div>
 
@@ -325,20 +359,6 @@ async function copy(id: string) {
                   {{ copied === job.id ? 'copied' : job.id }}
                 </button>
               </div>
-            </div>
-
-            <div class="flex items-center gap-2 shrink-0">
-              <UBadge
-                color="success" variant="subtle" size="sm" :label="`${job.succeeded} ok`"
-              />
-              <UBadge
-                v-if="job.failed" color="error" variant="subtle" size="sm"
-                :label="`${job.failed} failed`"
-              />
-              <UBadge
-                v-if="job.status !== 'completed'" color="warning" variant="subtle"
-                size="sm" :label="job.status"
-              />
             </div>
           </div>
 

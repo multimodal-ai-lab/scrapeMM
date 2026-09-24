@@ -106,8 +106,8 @@ export function useApi() {
         body: JSON.stringify(body),
       }, onMessage),
 
-    /** Streams an NDJSON response to a GET (integration statuses). */
-    streamGet: (path: string, onMessage: (message: any) => void) =>
-      readNdjson(path, { headers: authHeaders() }, onMessage),
+    /** Streams an NDJSON response to a GET (integration statuses, the live view). */
+    streamGet: (path: string, onMessage: (message: any) => void, signal?: AbortSignal) =>
+      readNdjson(path, { headers: authHeaders(), signal }, onMessage),
   }
 }

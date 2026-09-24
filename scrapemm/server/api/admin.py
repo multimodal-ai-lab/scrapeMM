@@ -116,6 +116,17 @@ async def environment() -> dict:
     return await status_module.environment()
 
 
+@router.get("/live")
+async def live() -> StreamingResponse:
+    """The dashboard's live view as NDJSON: a header with every method, then the
+    environment and each method's status whenever one of them changes, and a ping
+    every few seconds of silence. See `live.py` for how it is kept cheap."""
+    from ..live import hub
+    return StreamingResponse(hub.subscribe(), media_type="application/x-ndjson",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
 # --- Secrets ----------------------------------------------------------------------
 
 class SecretValue(BaseModel):

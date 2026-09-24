@@ -25,6 +25,12 @@ export default defineNuxtConfig({
     head: {
       title: 'scrapeMM',
       meta: [{ name: 'viewport', content: 'width=device-width, initial-scale=1' }],
+      // Generated from res/logo.png; the .ico is for browsers that ask for nothing else
+      link: [
+        { rel: 'icon', href: '/favicon.ico', sizes: '48x48' },
+        { rel: 'icon', type: 'image/png', href: '/favicon.png', sizes: '192x192' },
+        { rel: 'apple-touch-icon', href: '/apple-touch-icon.png' },
+      ],
     },
   },
 

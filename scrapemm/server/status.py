@@ -10,10 +10,11 @@ Firecrawl and Decodo are not integrations (they are general scraping methods), b
 a dashboard's point of view they are the same kind of thing: something that either works
 or needs configuring. They get cards here too.
 
-Statuses are cached, because connecting costs real API calls and the UI polls.
+Statuses are cached for STATUS_TTL, because connecting costs real API calls.
 """
 
 import asyncio
+import functools
 import logging
 import os
 import shutil
@@ -33,8 +34,10 @@ from .toggles import is_enabled
 
 logger = logging.getLogger(APP_NAME)
 
-# How long a probe result is served before it is taken again
-STATUS_TTL = 60.0
+# How long a probe result is served before it is taken again. Probes cost real API
+# calls and log-ins, so a reload or a second viewer reuses them; "Re-check all", a
+# changed secret or a toggled method probes afresh at once.
+STATUS_TTL = 60 * 60.0
 
 # How long one method may take to answer before the dashboard gives up on it
 PROBE_TIMEOUT = 20.0
@@ -109,6 +112,22 @@ class IntegrationStatus:
 _cache: dict[str, tuple[float, IntegrationStatus]] = {}
 _locks: dict[str, asyncio.Lock] = {}
 
+# Called whenever a status is probed or forgotten; the live dashboard stream listens
+_listeners: list = []
+
+
+def _notify() -> None:
+    for listener in _listeners:
+        listener()
+
+
+def cached_status(key: str) -> tuple[Optional[IntegrationStatus], bool]:
+    """The last probe result for a method, if any, and whether it is still fresh."""
+    cached = _cache.get(key)
+    if cached is None:
+        return None, False
+    return cached[1], time.time() - cached[0] < STATUS_TTL
+
 
 def _lock_for(name: str) -> asyncio.Lock:
     """One probe at a time per method, so a burst of dashboard polls does not open five
@@ -164,24 +183,26 @@ async def check(name: str, force: bool = False) -> IntegrationStatus:
         else:
             status = await _probe(key, NAME_TO_INTEGRATION[key])
         _cache[key] = (time.time(), status)
+        _notify()
         return status
 
 
-_counts_cache: tuple[float, dict[str, int]] = (0.0, {})
+_counts_cache: tuple[int, dict[str, int]] = (-1, {})
 
 
-def _retrieval_counts() -> dict[str, int]:
+def retrieval_counts() -> dict[str, int]:
     """How many URLs each method has retrieved, keyed in lower case.
 
-    Cached alongside the statuses: it is one aggregate over the whole results table, and
-    every card asks for it.
+    One aggregate over the whole results table, so it is re-run only after the job
+    history has actually changed.
     """
     global _counts_cache
-    cached_at, counts = _counts_cache
-    if time.time() - cached_at < STATUS_TTL:
+    version, counts = _counts_cache
+    if version == jobs.version:
         return counts
+    version = jobs.version
     counts = {method.lower(): n for method, n in jobs.method_counts().items()}
-    _counts_cache = (time.time(), counts)
+    _counts_cache = (version, counts)
     return counts
 
 
@@ -203,7 +224,7 @@ def _base_status(key: str, name: str, kind: str,
         # The Headed Browser, the archives and the like take no credentials at all;
         # offering to configure them would lead somewhere with nothing to fill in.
         configurable=bool(required or optional),
-        retrievals=_retrieval_counts().get(name.lower(), 0),
+        retrievals=retrieval_counts().get(name.lower(), 0),
         checked_at=time.time(),
     )
 
@@ -335,13 +356,12 @@ async def _check_safely(key: str, force: bool):
 def invalidate(*names: str) -> None:
     """Forgets cached statuses, so the next poll probes afresh. Called when a secret
     changes: the dashboard should reflect that immediately, not a minute later."""
-    global _counts_cache
-    _counts_cache = (0.0, {})
     if names:
         for name in names:
             _cache.pop(name.lower(), None)
     else:
         _cache.clear()
+    _notify()
 
 
 def secrets_to_integrations(secret_name: str) -> list[str]:
@@ -366,22 +386,63 @@ async def environment() -> dict:
         "playwright": await _playwright_status(),
         "display": _display_status(),
         "captcha": _captcha_backlog(),
-        "media": registry.usage(),
+        "media": _media_usage(),
         "address": _address(),
-        "throughput": {
-            "last_24h": jobs.count_since(24 * 60 * 60),
-            "success_rate": jobs.recent_success_rate(RECENT_WINDOW),
-        },
+        **_job_figures(),
         "blacklist": {
-            "domains": len(blacklist.domains()),
+            "domains": len(blacklist),
             "ttl": blacklist.ttl,
         },
         "cache": {
             "entries": len(cache),
             "ttl": cache.ttl,
         },
+    }
+
+
+# The 24-hour count slides with the clock even when nothing is written, so it is also
+# refreshed on this interval
+JOB_FIGURES_MAX_AGE = 60.0
+
+_job_figures_cache: tuple[int, float, dict] = (-1, 0.0, {})
+
+
+def _job_figures() -> dict:
+    """The dashboard's aggregates over the job history, re-queried only after a write
+    (or once the sliding window needs it). That keeps a live dashboard from scanning
+    the results table every couple of seconds while nothing happens."""
+    global _job_figures_cache
+    version, at, figures = _job_figures_cache
+    if version == jobs.version and time.time() - at < JOB_FIGURES_MAX_AGE:
+        return figures
+    version = jobs.version
+    figures = {
+        "throughput": {
+            "last_24h": jobs.count_since(24 * 60 * 60),
+            "success_rate": jobs.recent_success_rate(RECENT_WINDOW),
+        },
         "jobs": jobs.stats(),
     }
+    _job_figures_cache = (version, time.time(), figures)
+    return figures
+
+
+# Walking the media tree is O(files), so after new retrievals it is re-walked at most
+# this often; with nothing retrieved, the registry's own longer TTL applies.
+MEDIA_MIN_AGE = 15.0
+
+_media_version = -1
+
+
+def _media_usage() -> dict:
+    global _media_version
+    if jobs.version == _media_version:
+        return registry.usage()
+    version, started = jobs.version, time.time()
+    measured = registry.usage(max_age=MEDIA_MIN_AGE)
+    if measured["measured_at"] >= started:  # Walked just now, so it includes `version`
+        _media_version = version
+    return measured
 
 
 _playwright_cache: Optional[dict] = None
@@ -414,6 +475,7 @@ async def _playwright_status() -> dict:
     return _playwright_cache
 
 
+@functools.cache  # Resolving the host name can mean a DNS lookup; it does not change
 def _address() -> dict:
     """Where this server can be reached.
 

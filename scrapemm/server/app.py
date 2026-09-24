@@ -24,7 +24,7 @@ from starlette.routing import Match
 from scrapemm.common.paths import APP_NAME
 from . import registry
 from .api import ROUTERS
-from .auth import api_key
+from .auth import log_api_key
 from .jobs import jobs
 from .secrets import log_summary
 from .version import __version__
@@ -44,11 +44,13 @@ DEV_ORIGINS = [o.strip() for o in os.getenv("SCRAPEMM_CORS_ORIGINS", "").split("
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(f"🚀 scrapeMM server {__version__} starting up.")
-    api_key()  # Generates and prints one if the deployment did not set it
+    log_api_key()  # Generates one first if the deployment did not set it
     log_summary()
     registry.fingerprint()  # Stamp the media registry so clients can recognise it
     _warn_if_exposed()
     jobs.prune()
+    if stale := jobs.interrupt_unfinished():
+        logger.info(f"Marked {stale} job(s) left running by the last run as interrupted.")
     # Fill the caches the dashboard depends on, in the background. Starting Playwright's
     # driver and walking the media tree cost a couple of seconds between them, and there
     # is no reason for the first person to open the dashboard to be the one who pays it.

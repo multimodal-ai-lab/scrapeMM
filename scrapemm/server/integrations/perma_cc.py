@@ -159,7 +159,10 @@ class PermaCC(HeadedBrowser):
 
     async def _pick_best_media_frame(self, root: Frame) -> Frame:
         """Prefer a descendant frame that actually hosts post media (e.g. Telegram embed)."""
-        deadline = time.monotonic() + 30
+        # Only Telegram posts load their media in a late nested embed worth waiting for;
+        # everything else gets a single pass instead of burning the whole wait.
+        is_telegram = "t.me/" in root.url or "telegram" in root.url
+        deadline = time.monotonic() + (30 if is_telegram else 0)
         best = root
         best_score = await self._media_score(root)
 

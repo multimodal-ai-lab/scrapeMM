@@ -52,8 +52,13 @@ async function signIn() {
     <div v-if="!token" class="min-h-screen flex items-center justify-center p-4">
       <UCard class="w-full max-w-md">
         <template #header>
-          <h1 class="text-lg font-semibold">scrapeMM</h1>
-          <p class="text-sm text-muted">Enter the server's API key to continue.</p>
+          <div class="flex items-center gap-3">
+            <img src="/logo.webp" alt="" class="size-10 shrink-0">
+            <div>
+              <h1 class="text-lg font-semibold">scrapeMM</h1>
+              <p class="text-sm text-muted">Enter the server's API key to continue.</p>
+            </div>
+          </div>
         </template>
         <form class="space-y-3" @submit.prevent="signIn">
           <UInput
@@ -80,11 +85,24 @@ async function signIn() {
         :class="collapsed ? 'w-16' : 'w-56'"
       >
         <div class="flex items-center gap-2 px-1 h-9">
+          <!-- Collapsed, the logo is all that remains of the brand, and it is what
+               expands the sidebar again: the chevron no longer fits beside it. -->
           <NuxtLink
-            to="/" class="font-semibold text-lg truncate transition-opacity duration-200"
-            :class="collapsed ? 'opacity-0 w-0 overflow-hidden' : 'opacity-100'"
-          >scrapeMM</NuxtLink>
+            v-if="!collapsed" to="/" class="flex items-center gap-2 min-w-0"
+            aria-label="scrapeMM dashboard"
+          >
+            <img src="/logo.webp" alt="" class="size-7 shrink-0">
+            <span class="font-semibold text-lg truncate">scrapeMM</span>
+          </NuxtLink>
+          <button
+            v-else type="button" class="mx-auto transition-transform duration-200 hover:scale-110"
+            aria-label="Expand the sidebar" title="Expand the sidebar"
+            @click="collapsed = false"
+          >
+            <img src="/logo.webp" alt="" class="size-7">
+          </button>
           <UButton
+            v-if="!collapsed"
             class="ml-auto transition-transform duration-200 hover:scale-110"
             variant="ghost" color="neutral" size="sm" square
             :icon="collapsed ? 'i-fa7-solid-chevron-right' : 'i-fa7-solid-chevron-left'"

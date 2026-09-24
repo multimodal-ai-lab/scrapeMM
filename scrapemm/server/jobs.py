@@ -43,6 +43,8 @@ class JobStore:
     def __init__(self, path=JOBS_DB_PATH):
         self.path = path
         self._lock = threading.RLock()
+        # Bumped on every write, so the live dashboard re-queries only after a change
+        self.version = 0
         self._connection = sqlite3.connect(str(path), check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA journal_mode=WAL;")
@@ -85,6 +87,7 @@ class JobStore:
                 """
             )
             self._connection.commit()
+            self.version += 1
 
     # --- Writing ------------------------------------------------------------------
 
@@ -100,6 +103,7 @@ class JobStore:
                 "VALUES (?, ?, 'running', ?, ?)",
                 (job_id, time.time(), json.dumps(params, default=str), url_count))
             self._connection.commit()
+            self.version += 1
         return job_id
 
     def record(self, job_id: str, payload: ResponsePayload, success: bool) -> None:
@@ -115,6 +119,7 @@ class JobStore:
                  json.dumps(payload.errors), content, payload.retrieval_time,
                  int(payload.from_cache), time.time()))
             self._connection.commit()
+            self.version += 1
 
     def finish(self, job_id: str, succeeded: int, failed: int,
                status: str = "completed") -> None:
@@ -124,6 +129,19 @@ class JobStore:
                 "WHERE id = ?",
                 (time.time(), status, succeeded, failed, job_id))
             self._connection.commit()
+            self.version += 1
+
+    def interrupt_unfinished(self) -> int:
+        """Marks the jobs a previous server process left running. Called at startup:
+        nothing can still be working on them, and they would otherwise show as running
+        forever."""
+        with self._lock:
+            count = self._connection.execute(
+                "UPDATE jobs SET status = 'interrupted', finished_at = ? "
+                "WHERE status = 'running'", (time.time(),)).rowcount
+            self._connection.commit()
+            self.version += 1
+        return count
 
     # --- Reading ------------------------------------------------------------------
 
@@ -233,6 +251,7 @@ class JobStore:
             cursor = self._connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
             self._connection.execute("DELETE FROM results WHERE job_id = ?", (job_id,))
             self._connection.commit()
+            self.version += 1
         return cursor.rowcount > 0
 
     # --- Housekeeping -------------------------------------------------------------
@@ -251,6 +270,7 @@ class JobStore:
             self._connection.execute(
                 "DELETE FROM results WHERE job_id NOT IN (SELECT id FROM jobs)")
             self._connection.commit()
+            self.version += 1
         if removed:
             logger.info(f"Pruned {removed} job records (media untouched).")
         return removed

@@ -226,9 +226,12 @@ async def retrieve_one(
         hedging_delay = get_config_var("hedging_delay", DEFAULT_HEDGING_DELAY)
 
     async with _concurrency_gate():
-        return await _retrieve_single(url, session, methods, actions, output_format,
-                                      max_video_size, prioritize, use_cache,
-                                      hedging_delay)
+        response = await _retrieve_single(url, session, methods, actions, output_format,
+                                          max_video_size, prioritize, use_cache,
+                                          hedging_delay)
+    # Report under the URL as requested, not as preprocessed (e.g. percent-decoded):
+    # the client maps results back onto its request by URL
+    return replace(response, url=url)
 
 
 async def _retrieve_single(

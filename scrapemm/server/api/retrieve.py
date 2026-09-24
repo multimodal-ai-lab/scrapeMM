@@ -73,6 +73,8 @@ async def _stream(request: RetrieveRequest) -> AsyncIterator[bytes]:
     })
 
     succeeded = failed = 0
+    tasks: dict[asyncio.Task, str] = {}
+    finished = False
     try:
         async with aiohttp.ClientSession() as session:
             tasks = {
@@ -96,13 +98,23 @@ async def _stream(request: RetrieveRequest) -> AsyncIterator[bytes]:
                 else:
                     failed += 1
                 yield _line({"type": "result", "payload": payload.to_dict()})
+        jobs.finish(job_id, succeeded, failed)
+        finished = True
     except Exception as e:
         logger.error("Retrieval batch failed.", exc_info=True)
         jobs.finish(job_id, succeeded, failed, status="failed")
+        finished = True
         yield _line({"type": "error", "message": f"{type(e).__name__}: {e}"})
         return
+    finally:
+        if not finished:
+            # The client went away mid-batch (the stream was closed under us). Nobody is
+            # left to receive the rest, so stop scraping it and say what happened --
+            # otherwise the job would show as running forever.
+            for task in tasks:
+                task.cancel()
+            jobs.finish(job_id, succeeded, failed, status="interrupted")
 
-    jobs.finish(job_id, succeeded, failed)
     yield _line({
         "type": "summary",
         "job_id": job_id,

@@ -1,6 +1,10 @@
+<p align="center">
+  <img src="res/logo_small.png" alt="scrapeMM logo" width="128">
+</p>
+
 # scrapeMM: Multimodal Web Scraper
 
-![img.png](img.png)
+![screenshot](res/img.png)
 
 scrapeMM is a scraping service that supports the retrieval of _multimedia content_,i.e., text, images, and videos. For a given URL, scrapeMM returns you the webpage's content as a sequence of Markdown-formatted text and in-line media. scrapeMM supports all major social media platforms, archiving services, and most of the open web.
 

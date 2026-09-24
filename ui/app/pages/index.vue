@@ -4,7 +4,7 @@ const api = useApi()
 
 const integrations = ref<any[]>([])
 const environment = ref<any>(null)
-const loading = ref(true)
+const loading = ref(false)
 const error = ref('')
 const busy = ref<string | null>(null)
 const copied = ref<'address' | 'key' | null>(null)
@@ -12,27 +12,63 @@ const copied = ref<'address' | 'key' | null>(null)
 const pending = shallowRef<Set<string>>(new Set())
 
 /**
- * Loads the dashboard progressively.
- *
- * Probing seventeen methods takes as long as the slowest of them, so waiting for all of
- * them before drawing anything left the page blank for seconds. Instead the card layout
- * appears at once from the stream's header, each card resolves when its own probe does,
- * and the environment tiles arrive on their own timeline beside them.
+ * The live view. The server pushes the environment and each method's status whenever
+ * one of them changes, so the page is never stale and never polls. The card layout
+ * appears at once from the stream's header, and each card resolves when its own probe
+ * does. A dropped connection is re-established with growing pauses.
  */
-async function load(force = false) {
-  loading.value = true
-  error.value = ''
-  // The two halves are independent; neither should wait on the other.
-  await Promise.all([loadIntegrations(force), loadEnvironment()])
-  loading.value = false
+const live = ref<'connecting' | 'live' | 'reconnecting'>('connecting')
+let liveAbort: AbortController | null = null
+let unmounted = false
+
+function onLive(message: any) {
+  live.value = 'live'
+  if (message.type === 'header') {
+    const keys = message.methods.map((m: any) => m.key).join()
+    // A reconnect repeats the header; only a changed method list needs new placeholders
+    if (integrations.value.map((i) => i.key).join() !== keys) {
+      pending.value = new Set(message.methods.map((m: any) => m.key))
+      integrations.value = message.methods.map((m: any) => ({
+        ...m, state: 'checking', missing_secrets: [], missing_optional_secrets: [],
+        enabled: true, retrievals: 0, configurable: false, detail: '',
+      }))
+    }
+  } else if (message.type === 'status') {
+    replace(message.payload)
+    pending.value.delete(message.payload.key)
+    triggerRef(pending)
+  } else if (message.type === 'environment') {
+    environment.value = message.payload
+  }
 }
 
-async function loadEnvironment() {
-  try {
-    environment.value = await api.get<any>('/v1/environment')
-  } catch (e: any) {
-    error.value = e.message
+async function connectLive() {
+  let pause = 1000
+  while (!unmounted && apiKey.value) {
+    liveAbort = new AbortController()
+    try {
+      await api.streamGet('/v1/live', (message) => {
+        pause = 1000  // Got through: the next drop starts over with a short pause
+        error.value = ''
+        onLive(message)
+      }, liveAbort.signal)
+    } catch (e: any) {
+      if (unmounted) return
+      if (!apiKey.value) { error.value = e.message; return }
+    }
+    if (unmounted) return
+    live.value = 'reconnecting'
+    await new Promise((resolve) => setTimeout(resolve, pause))
+    pause = Math.min(pause * 2, 15000)
   }
+}
+
+/** Re-probes every method now. The results reach every open dashboard via the live view. */
+async function recheckAll() {
+  loading.value = true
+  error.value = ''
+  await loadIntegrations(true)
+  loading.value = false
 }
 
 async function loadIntegrations(force = false) {
@@ -234,7 +270,11 @@ const tiles = computed(() => {
   ]
 })
 
-onMounted(() => load())
+onMounted(() => connectLive())
+onUnmounted(() => {
+  unmounted = true
+  liveAbort?.abort()
+})
 </script>
 
 <template>
@@ -282,10 +322,25 @@ onMounted(() => load())
         <USkeleton v-else-if="apiKey" class="h-5 w-40 self-center" />
       </div>
 
-      <UButton
-        class="shrink-0" icon="i-fa7-solid-rotate" color="neutral" variant="subtle"
-        :loading="loading" label="Re-check all" @click="load(true)"
-      />
+      <div class="flex items-center gap-3 shrink-0">
+        <!-- Whether what is on screen is current: the page updates itself while live -->
+        <span
+          class="inline-flex items-center gap-1.5 text-xs text-muted"
+          :title="live === 'live' ? 'Updates as soon as something changes'
+            : 'The connection to the server dropped; trying again'"
+        >
+          <span
+            class="size-2 rounded-full"
+            :class="live === 'live' ? 'bg-success animate-pulse'
+              : live === 'reconnecting' ? 'bg-warning' : 'bg-neutral-400'"
+          />
+          {{ live === 'live' ? 'Live' : live === 'reconnecting' ? 'Reconnecting…' : 'Connecting…' }}
+        </span>
+        <UButton
+          icon="i-fa7-solid-rotate" color="neutral" variant="subtle"
+          :loading="loading" label="Re-check all" @click="recheckAll"
+        />
+      </div>
     </div>
 
     <UAlert v-if="error" color="error" variant="subtle" :description="error" />

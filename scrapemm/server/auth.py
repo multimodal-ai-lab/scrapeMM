@@ -42,9 +42,16 @@ def api_key() -> str:
         pass
 
     _api_key = _generate()
-    logger.warning(f"🔑 No SCRAPEMM_API_KEY was set, so one was generated: {_api_key}\n"
-                   f"   Enter it in the web UI, or set SCRAPEMM_API_KEY in your .env.")
+    logger.warning("🔑 No SCRAPEMM_API_KEY was set, so a new API key was generated.")
     return _api_key
+
+
+def log_api_key() -> None:
+    """Prints the key on every startup, so the admin can always find it in the logs."""
+    key = api_key()
+    source = "from SCRAPEMM_API_KEY" if api_key_from_environment() else f"stored in {API_KEY_PATH}"
+    logger.info(f"🔑 API key ({source}): {key}\n"
+                f"   Enter it in the web UI, or set SCRAPEMM_API_KEY in your .env.")
 
 
 def api_key_from_environment() -> bool:

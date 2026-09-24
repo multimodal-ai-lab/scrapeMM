@@ -106,6 +106,7 @@ MAX_MEDIA_PER_PAGE = 32
 URL_REGEX = r"https?:\/\/(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9@:%_\+.~#?&//=]*)"
 DATA_URI_REGEX = r"data:([\w/+.-]+/[\w.+-]+);base64,([A-Za-z0-9+/=]+)"
 MD_HYPERLINK_REGEX = rf'(!?\[([^]^[]*)\]\((.*?)(?: "[^"]*")?\))'
+MD_DATA_URI_LINK_REGEX = r'!?\[[^]^[]*\]\(\s*data:[^)]*\)'
 
 # Marks HttpOnly cookies in the Netscape cookies.txt format
 HTTP_ONLY_PREFIX = "#HttpOnly_"
@@ -133,6 +134,11 @@ def preprocess_html(html: str) -> str:
 
 
 def postprocess_markdown(text: str) -> str:
+    # Media worth keeping was already turned into items; any base64 left over is
+    # unresolvable or too small, and only bloats the text
+    text = re.sub(MD_DATA_URI_LINK_REGEX, "", text)
+    text = re.sub(DATA_URI_REGEX, "", text)
+
     # Remove any excess whitespaces
     text = re.sub(r' {2,}', ' ', text)
 
