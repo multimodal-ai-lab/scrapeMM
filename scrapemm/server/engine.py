@@ -409,8 +409,9 @@ async def _retrieve_single(
     if domain not in DOMAIN_TO_INTEGRATION:
         verdict, reason = await reachability.check(url)
         if verdict == "dead":
-            return _failure(url, output_format, dict(scrapemm=TargetUnavailableError(reason)),
-                            start_time)
+            errors = dict(scrapemm=TargetUnavailableError(reason))
+            return await _last_resort(url, domain, key, session, errors, output_format,
+                                      max_video_size, start_time, auto)
         if verdict == "unreachable":
             # Only from this server, maybe (e.g. its IP is blocked): services that fetch
             # from elsewhere still get their chance, the local methods are skipped
@@ -419,8 +420,10 @@ async def _retrieve_single(
             methods = [m for m in methods if m not in local]
             unreachable = reason
             if not methods:
-                return _failure(url, output_format, dict(scrapemm=TargetUnavailableError(
-                    f"{reason} No enabled method fetches from elsewhere.")), start_time)
+                errors = dict(scrapemm=TargetUnavailableError(
+                    f"{reason} No enabled method fetches from elsewhere."))
+                return await _last_resort(url, domain, key, session, errors, output_format,
+                                          max_video_size, start_time, auto)
             logger.info(f"Skipping {', '.join(skipped) or 'no method'} for {url}: the host "
                         f"is unreachable from this server. Trying {', '.join(methods)}.")
 
@@ -480,37 +483,7 @@ async def _retrieve_single(
 
         if isinstance(content, Exception):
             return "error", content
-
-        if not content:
-            # Methods are expected to raise instead of returning empty-handed
-            logger.info(f"Method {method_name} returned no content for url: {url}.")
-            return "error", RetrievalFailed(f"Method {method_name} returned no content.")
-
-        # Ensure the method returned the actual content and not a CAPTCHA challenge
-        if captcha := detect_captcha(content):
-            logger.warning(f"🤖 Method {method_name} encountered a {captcha} at {url}.")
-            return "error", CaptchaEncounteredError(f"Method {method_name} encountered a {captcha}.")
-
-        # ...nor only the teaser of a paywalled article
-        if reason := detect_paywall(content):
-            logger.info(f"💰 Method {method_name} got only the paywalled teaser of {url}: {reason}.")
-            return "error", PaywallError(f"Method {method_name} could not get around the "
-                                         f"paywall: {reason}.")
-
-        # ...nor an empty page: it would count as a success and be cached, so that
-        # asking again returned nothing too (seen with archive replays that never loaded)
-        if _is_empty(content, output_format):
-            logger.info(f"Method {method_name} returned an empty page for {url}.")
-            return "error", RetrievalFailed(f"Method {method_name} returned an empty page "
-                                            f"without any text or media.")
-
-        if content.get(output_format) is not None:
-            return "success", content
-
-        # The method retrieved something, just not in the requested format (e.g. the X API
-        # has no HTML page to offer). Keep it, but continue with the remaining methods.
-        logger.info(f"Method {method_name} could not provide the content of {url} as {output_format}.")
-        return "partial", content
+        return _classify(url, method_name, content, output_format)
 
     if hedging_delay and hedging_delay > 0 and len(methods) > 1:
         winner, errors, partial = await _run_methods_hedged(methods, evaluate, hedging_delay,
@@ -541,18 +514,16 @@ async def _retrieve_single(
             errors[PLAIN_HTTP] = result
 
     if winner is not None:
-        method_name, content = winner
-        logger.info(f"🎉 Successfully retrieved with method: {method_name}")
-        if content.multimodal is not None:
-            await postprocess_media(content.multimodal)
-        response = ScrapingResponse(url=url, content=content, method=method_name, errors=errors,
-                                    output_format=output_format,
-                                    retrieval_time=time.time() - start_time)
-        cache.put(key, response)
-        return response
+        return await _success(url, key, *winner, errors, output_format, start_time)
 
     # All methods failed
     logger.warning(f"All retrieval methods failed for URL: {url}")
+
+    # Nothing live worked: an archived copy is better than nothing
+    if auto and (archived := await _archive_fallback(url, domain, session, errors,
+                                                     output_format, max_video_size)):
+        return await _success(url, key, ARCHIVE_FALLBACK, archived, errors, output_format,
+                              start_time)
 
     # Queue the URL with a CAPTCHA challenge for a human to decide on
     _record_challenge(domain, url, errors, output_format, methods, max_video_size)
@@ -562,14 +533,161 @@ async def _retrieve_single(
     return _failure(url, output_format, errors, start_time, content=partial)
 
 
+def _classify(url: str, method_name: str, content: Optional[ScrapedContent],
+              output_format: OutputFormat) -> tuple[str, object]:
+    """Judges what a method returned: "success", "partial" (content, but not in the
+    requested format) or "error", along with the content or the exception."""
+    if not content:
+        # Methods are expected to raise instead of returning empty-handed
+        logger.info(f"Method {method_name} returned no content for url: {url}.")
+        return "error", RetrievalFailed(f"Method {method_name} returned no content.")
+
+    _derive_markdown(content)
+
+    # Ensure the method returned the actual content and not a CAPTCHA challenge
+    if captcha := detect_captcha(content):
+        logger.warning(f"🤖 Method {method_name} encountered a {captcha} at {url}.")
+        return "error", CaptchaEncounteredError(f"Method {method_name} encountered a {captcha}.")
+
+    # ...nor only the teaser of a paywalled article
+    if reason := detect_paywall(content):
+        logger.info(f"💰 Method {method_name} got only the paywalled teaser of {url}: {reason}.")
+        return "error", PaywallError(f"Method {method_name} could not get around the "
+                                     f"paywall: {reason}.")
+
+    # ...nor an empty page: it would count as a success and be cached, so that
+    # asking again returned nothing too (seen with archive replays that never loaded)
+    if _is_empty(content, output_format):
+        logger.info(f"Method {method_name} returned an empty page for {url}.")
+        return "error", RetrievalFailed(f"Method {method_name} returned an empty page "
+                                        f"without any text or media.")
+
+    if content.get(output_format) is not None:
+        return "success", content
+
+    # The method retrieved something, just not in the requested format (e.g. the X API
+    # has no HTML page to offer). Keep it, but continue with the remaining methods.
+    logger.info(f"Method {method_name} could not provide the content of {url} as {output_format}.")
+    return "partial", content
+
+
+def _derive_markdown(content: ScrapedContent) -> None:
+    """Fills in the Markdown of content that only came as a multimodal sequence, as the
+    integrations (TikTok, X, Telegram, ...) deliver it: the sequence's text with every
+    medium referenced by hyperlink to where it came from, as in the Markdown of a web
+    page, or by its ezMM reference where there is no web address to link to. So every
+    method provides the "markdown" format, not just those that scrape HTML."""
+    if content.markdown is not None or content.multimodal is None:
+        return
+    parts = []
+    for element in content.multimodal:
+        if isinstance(element, str):
+            parts.append(element)
+            continue
+        source = getattr(element, "source_url", None) or ""
+        if not source.startswith(("http://", "https://")):
+            parts.append(element.reference)  # E.g. a file:// URI: meaningless elsewhere
+        elif isinstance(element, Image):
+            parts.append(f"![{element.reference}]({source})")
+        else:
+            parts.append(f"[{element.kind}: {element.reference}]({source})")
+    content.markdown = " ".join(parts)
+
+
+async def _success(url: str, key, method_name: str, content: ScrapedContent,
+                   errors: dict, output_format: OutputFormat,
+                   start_time: float) -> ScrapingResponse:
+    logger.info(f"🎉 Successfully retrieved with method: {method_name}")
+    if content.multimodal is not None:
+        await postprocess_media(content.multimodal)
+    response = ScrapingResponse(url=url, content=content, method=method_name, errors=errors,
+                                output_format=output_format,
+                                retrieval_time=time.time() - start_time)
+    cache.put(key, response)
+    return response
+
+
+async def _last_resort(url: str, domain: str, key, session: aiohttp.ClientSession,
+                       errors: dict, output_format: OutputFormat,
+                       max_video_size: Optional[int], start_time: float,
+                       auto: bool) -> ScrapingResponse:
+    """For a URL that no live method can even try (its host is down or refuses this
+    server): the archived copy, if there is one, or else the failure."""
+    if auto and (archived := await _archive_fallback(url, domain, session, errors,
+                                                     output_format, max_video_size)):
+        return await _success(url, key, ARCHIVE_FALLBACK, archived, errors, output_format,
+                              start_time)
+    return _failure(url, output_format, errors, start_time)
+
+
+ARCHIVE_ORG = "Internet Archive"
+ARCHIVE_FALLBACK = f"{ARCHIVE_ORG} (fallback)"
+
+
+async def _archive_fallback(url: str, domain: str, session: aiohttp.ClientSession,
+                            errors: dict, output_format: OutputFormat,
+                            max_video_size: Optional[int]) -> Optional[ScrapedContent]:
+    """The latest snapshot of the URL in the Wayback Machine, retrieved through the
+    Internet Archive integration: the last resort for a page no live method got, e.g.
+    because its host is down or refuses this server (archive.premier.gov.ru). Runs only
+    after everything else failed, so it costs a healthy URL nothing. Its outcome is
+    judged like any method's, so an archived CAPTCHA or teaser does not count either;
+    a failure is filed into `errors`.
+
+    Only for the open web: integrations' domains (social media, other archives) need
+    their own handling, and their snapshots mostly show a login wall. archive.today is
+    not asked: its CAPTCHA gate would turn every such request into a queued challenge."""
+    if domain in DOMAIN_TO_INTEGRATION or not is_enabled(ARCHIVE_ORG):
+        return None
+    snapshot = await _latest_wayback_snapshot(url, session)
+    if snapshot is None:
+        return None
+    logger.info(f"No live method got {url}; trying its Wayback Machine snapshot {snapshot}.")
+    try:
+        content = await retrieve_via_integration(snapshot, integration_name=ARCHIVE_ORG,
+                                                 session=session, output_format=output_format,
+                                                 max_video_size=max_video_size)
+    except Exception as e:
+        errors[ARCHIVE_FALLBACK] = e
+        return None
+    status, result = _classify(snapshot, ARCHIVE_FALLBACK, content, output_format)
+    if status == "success":
+        return result
+    errors[ARCHIVE_FALLBACK] = result if status == "error" else RetrievalFailed(
+        f"The snapshot {snapshot} did not provide the content as {output_format}.")
+    return None
+
+
+async def _latest_wayback_snapshot(url: str, session: aiohttp.ClientSession) -> Optional[str]:
+    """The URL of the most recent successful (HTTP 200) capture of `url`, if any."""
+    # Without the scheme: with it, the API often answers with no snapshots at all
+    query = re.sub(r"^https?://", "", url)
+    try:
+        async with session.get("https://archive.org/wayback/available", params={"url": query},
+                               timeout=aiohttp.ClientTimeout(total=15)) as response:
+            data = await response.json(content_type=None)
+    except Exception as e:
+        logger.debug(f"Could not ask the Wayback Machine about {url}: {type(e).__name__}: {e}")
+        return None
+    closest = (data.get("archived_snapshots") or {}).get("closest") or {}
+    if closest.get("available") and str(closest.get("status")) == "200" and closest.get("url"):
+        return re.sub(r"^http://", "https://", closest["url"])
+    return None
+
+
 def _record_outcome(method_name: str, status: str, payload, errors: dict, partial,
                     output_format: OutputFormat):
     """Files one method's outcome into the error dict / partial content.
     Returns the (possibly updated) partial content."""
     if status == "partial":
-        errors[method_name] = RetrievalFailed(
-            f"Method {method_name} did not provide the content as {output_format}."
-        )
+        if output_format == "html":
+            # The only format a method can lack: Markdown is derived from the sequence
+            message = (f"Method {method_name} has no HTML page to offer (it retrieves the "
+                       f"content through an API or a player); request 'markdown' or "
+                       f"'multimodal' instead.")
+        else:
+            message = f"Method {method_name} did not provide the content as {output_format}."
+        errors[method_name] = RetrievalFailed(message)
         return partial or payload
     errors[method_name] = payload
     return partial
