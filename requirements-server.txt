@@ -37,3 +37,4 @@ telethon~=1.45.0
 TikTokResearchApi~=1.0.4
 tweepy~=4.17.0
 yt-dlp[default,curl-cffi]
+bgutil-ytdlp-pot-provider==2.0.0  # yt-dlp plugin: YouTube PO tokens. Keep in step with BGUTIL_VERSION in the Dockerfile
