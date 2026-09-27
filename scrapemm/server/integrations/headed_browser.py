@@ -625,6 +625,10 @@ async def _browser_alive(browser: Optional[Browser]) -> bool:
 # Seconds to give a Cloudflare challenge to clear by itself, before and after solving it
 CLOUDFLARE_SELF_CLEAR_WAIT = 6
 CLOUDFLARE_SOLVE_ATTEMPTS = 3
+# Bounds the wait for the solver and its run, which drives the browser through CDP calls
+# without timeouts of their own: one that hung held the solver's lock, and every page
+# behind a challenge then waited out the full retrieval timeout (thip.media, 10 minutes)
+CLOUDFLARE_SOLVE_TIMEOUT = 120
 
 # The challenge page, not the bot-management scripts ordinary Cloudflare pages carry too
 _CLOUDFLARE_CHALLENGE_EXPR = ("/^just a moment/i.test(document.title) || !!document.querySelector("
@@ -673,7 +677,7 @@ async def _solve_cloudflare_in_own_tab(url: str) -> bool:
     finally:
         if tab is not None:
             with suppress(Exception):
-                await tab.close()
+                await asyncio.wait_for(tab.close(), 10)
 
 
 @atexit.register
@@ -1117,8 +1121,14 @@ class HeadedBrowser(RetrievalIntegration):
             return
         logger.info(f"☁️ Cloudflare challenge at {page.url}; solving it in a SeleniumBase tab.")
         # One at a time: the click goes through the one shared browser window
-        async with HeadedBrowser._cloudflare_lock:
-            solved = await _solve_cloudflare_in_own_tab(page.url)
+        try:
+            async with asyncio.timeout(CLOUDFLARE_SOLVE_TIMEOUT):
+                async with HeadedBrowser._cloudflare_lock:
+                    solved = await _solve_cloudflare_in_own_tab(page.url)
+        except TimeoutError:
+            logger.warning(f"Solving the Cloudflare challenge at {page.url} did not finish "
+                           f"within {CLOUDFLARE_SOLVE_TIMEOUT} s; given up.")
+            solved = False
         if not solved:
             logger.info(f"Could not get past the Cloudflare challenge at {page.url}.")
             return

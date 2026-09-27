@@ -393,14 +393,20 @@ async def _retrieve_single(
     # A domain behind an open CAPTCHA challenge would only gate this URL too: queue it
     # with the challenge, to be retrieved once somebody solves it
     if challenges.store.holds(domain):
-        challenge = challenges.store.get(domain)
-        challenges.store.record(domain, url, challenge.captcha if challenge else "CAPTCHA",
-                                output_format, methods, max_video_size)
         e = CaptchaEncounteredError(
             f"{domain} is behind a CAPTCHA that is waiting for a human. The URL is queued: "
             f"solve the challenge on the CAPTCHA page of the web UI, then request it again "
             f"to get the result.")
-        return _failure(url, output_format, dict(scrapemm=e), start_time)
+        errors = dict(scrapemm=e)
+        # An archived copy beats waiting for a human, who may never come
+        if auto and (archived := await _archive_fallback(url, domain, session, errors,
+                                                         output_format, max_video_size)):
+            return await _success(url, key, ARCHIVE_FALLBACK, archived, errors,
+                                  output_format, start_time)
+        challenge = challenges.store.get(domain)
+        challenges.store.record(domain, url, challenge.captcha if challenge else "CAPTCHA",
+                                output_format, methods, max_video_size)
+        return _failure(url, output_format, errors, start_time)
 
     # A host that is down fails every method only after its full timeout, minutes in
     # all: find out cheaply first. Integrations' domains are up by definition.
@@ -659,20 +665,53 @@ async def _archive_fallback(url: str, domain: str, session: aiohttp.ClientSessio
 
 
 async def _latest_wayback_snapshot(url: str, session: aiohttp.ClientSession) -> Optional[str]:
-    """The URL of the most recent successful (HTTP 200) capture of `url`, if any."""
-    # Without the scheme: with it, the API often answers with no snapshots at all
+    """The URL of the most recent successful (HTTP 200) capture of `url`, if any.
+
+    Asks both of the Wayback Machine's indexes at once, as each misses what the other
+    finds: the availability API had no capture of a thip.media page that CDX listed,
+    and CDX regularly takes longer than half a minute to answer at all."""
+    # Without the scheme: with it, the availability API often reports no snapshots
     query = re.sub(r"^https?://", "", url)
+    found = [s for s in await asyncio.gather(_wayback_available(query, session),
+                                             _wayback_cdx(query, session)) if s]
+    if not found:
+        return None
+    timestamp, original = max(found)  # The newer one
+    return f"https://web.archive.org/web/{timestamp}/{original}"
+
+
+WAYBACK_TIMEOUT = aiohttp.ClientTimeout(total=20)
+
+
+async def _wayback_available(query: str, session: aiohttp.ClientSession) -> Optional[tuple[str, str]]:
+    """(timestamp, original URL) of the capture the availability API names, if any."""
     try:
         async with session.get("https://archive.org/wayback/available", params={"url": query},
-                               timeout=aiohttp.ClientTimeout(total=15)) as response:
+                               timeout=WAYBACK_TIMEOUT) as response:
             data = await response.json(content_type=None)
     except Exception as e:
-        logger.debug(f"Could not ask the Wayback Machine about {url}: {type(e).__name__}: {e}")
+        logger.debug(f"Wayback availability API failed for {query}: {type(e).__name__}: {e}")
         return None
     closest = (data.get("archived_snapshots") or {}).get("closest") or {}
-    if closest.get("available") and str(closest.get("status")) == "200" and closest.get("url"):
-        return re.sub(r"^http://", "https://", closest["url"])
+    match = re.match(r"https?://web\.archive\.org/web/(\d+)/(.+)", closest.get("url") or "")
+    if closest.get("available") and str(closest.get("status")) == "200" and match:
+        return match.group(1), match.group(2)
     return None
+
+
+async def _wayback_cdx(query: str, session: aiohttp.ClientSession) -> Optional[tuple[str, str]]:
+    """(timestamp, original URL) of the newest HTTP 200 capture in the CDX index, if any.
+    Filtered here rather than by the server: its `filter` makes it scan far more slowly."""
+    params = {"url": query, "limit": "-10", "output": "json", "fl": "timestamp,original,statuscode"}
+    try:
+        async with session.get("https://web.archive.org/cdx/search/cdx", params=params,
+                               timeout=WAYBACK_TIMEOUT) as response:
+            rows = await response.json(content_type=None)
+    except Exception as e:
+        logger.debug(f"Wayback CDX query failed for {query}: {type(e).__name__}: {e}")
+        return None
+    captures = [(row[0], row[1]) for row in (rows or [])[1:] if len(row) == 3 and row[2] == "200"]
+    return max(captures) if captures else None
 
 
 def _record_outcome(method_name: str, status: str, payload, errors: dict, partial,
@@ -870,8 +909,15 @@ def _record_challenge(domain: str, url: str, errors: dict[str, Optional[Exceptio
     """Opens (or joins) a CAPTCHA challenge for the domain if a method ran into one.
     A human decides on it in the web UI: solve it, or discard it -- which blacklists the
     domain, as used to happen straight away. Integrations that queue their own gated
-    requests (Archive.today) are left to do so."""
-    error = next((e for e in errors.values() if isinstance(e, CaptchaEncounteredError)), None)
+    requests (Archive.today) are left to do so.
+
+    Only a CAPTCHA the shared browser met counts (the Browser method's, or a browser-
+    based integration's): a human solves it in that browser, and the clearance helps
+    nothing else. Firecrawl's or Decodo's CAPTCHAs used to queue domains that the
+    browser's own Cloudflare solver passes -- thip.media, after the browser merely timed
+    out once -- and every later URL of those domains then failed at once, for hours."""
+    error = next((e for m, e in errors.items() if isinstance(e, CaptchaEncounteredError)
+                  and (m == BROWSER or m in INTEGRATION_NAMES)), None)
     if error is None:
         return
     integration = DOMAIN_TO_INTEGRATION.get(domain)
