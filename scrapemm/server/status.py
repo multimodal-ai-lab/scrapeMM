@@ -435,19 +435,10 @@ def _job_figures() -> dict:
     return figures
 
 
-# Walking the media tree is O(files), so after new retrievals it is re-walked at most
-# this often; with nothing retrieved, the registry's own longer TTL applies.
-MEDIA_MIN_AGE = 15.0
-
-_media_version = -1
-
-
 def _media_usage() -> dict:
-    """Never walks the tree itself (see `registry.usage`); after new retrievals it asks
-    for a background re-measurement, which a walk started from now on will include."""
-    global _media_version
-    if jobs.version != _media_version and registry.refresh(MEDIA_MIN_AGE):
-        _media_version = jobs.version
+    """Never walks the tree itself (see `registry.usage`), and never because of a job:
+    re-measuring after every job kept a walk over a shared registry of millions of files
+    running for a whole batch. The figure is refreshed on the registry's TTL instead."""
     return registry.usage()
 
 

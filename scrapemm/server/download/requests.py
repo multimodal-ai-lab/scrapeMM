@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from contextlib import suppress
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Union, TYPE_CHECKING
 
@@ -15,7 +16,7 @@ try:
 except ImportError:
     CurlSession = None
 
-from scrapemm.server.download.common import ssl_context, RELAXED_SSL_DOMAINS, BROWSER_TLS_DOMAINS
+from scrapemm.server.download.common import ssl_context, RELAXED_SSL_DOMAINS, BROWSER_TLS_DOMAINS, HEADERS
 from scrapemm.server.download.util import stream, MediaTooLarge
 
 logger = logging.getLogger("scrapeMM")
@@ -33,6 +34,9 @@ MEDIA_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=20)
 # another, so trying a spread finds the one that works.
 _CURL_CFFI_IMPERSONATIONS = ("chrome124", "chrome", "safari")
 
+
+# Largest binary body taken through Playwright's request context, see `request_static()`
+MAX_PLAYWRIGHT_BODY = 2 * 1024 * 1024
 
 # Per attempt. curl's own default would let a stalled request hold its thread for long.
 CURL_CFFI_TIMEOUT = 30
@@ -217,7 +221,19 @@ async def request_static(url: str,
             # Playwright APIRequestContext
             response = await session.get(url, **kwargs)
             if response.ok:
-                return await response.text() if get_text else await response.body()
+                if get_text:
+                    return await response.text()
+                length = response.headers.get("content-length", "")
+                if length.isdigit() and int(length) <= MAX_PLAYWRIGHT_BODY:
+                    return await response.body()
+                # Too large, or of unknown size, to pass through Playwright's pipe: its
+                # Python client reassembles a message in time quadratic in its size, on
+                # the event loop (see `download.browser.READ_CHUNK`). Downloaded directly.
+                with suppress(Exception):
+                    await response.dispose()
+                async with aiohttp.ClientSession(headers=HEADERS) as direct:
+                    return await request_static(url, direct, get_text=False,
+                                                max_size=max_size, headers=kwargs.get("headers"))
             if response.status == 403:
                 return await _from_curl_cffi()
             return None

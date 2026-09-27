@@ -1,12 +1,14 @@
 import asyncio
 import base64
 import binascii
+import inspect
 import json
 import logging
 import os
 import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Awaitable, Callable, Iterable, Union, TYPE_CHECKING
 from urllib.parse import unquote, urljoin, urlparse
@@ -20,6 +22,7 @@ from markdownify import markdownify as md
 from playwright.async_api import APIRequestContext, Page, Frame
 
 from scrapemm.server.download import download_video, download_image
+from scrapemm.server.download.images import image_from_binary, image_size
 from scrapemm.server.download.util import (
     looks_like_image_file_url,
     looks_like_vector_file_url,
@@ -102,6 +105,15 @@ def read_urls_from_file(file_path):
 
 
 MAX_MEDIA_PER_PAGE = 32
+
+# Threads for parsing and converting HTML: CPU-bound pure Python, so off the event loop,
+# but few, as each one holds the GIL the loop needs as well (see `decode_image()`)
+_html_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="html")
+
+
+async def _in_html_thread(function, *args, **kwargs):
+    return await asyncio.get_running_loop().run_in_executor(
+        _html_executor, lambda: function(*args, **kwargs))
 # Concurrent media downloads per host. Some servers silently drop connection attempts
 # beyond a couple at once, which costs 7 s of TCP retries each (archive.premier.gov.ru).
 # Measured no slower on image-heavy pages than 4 or 6: the connections get reused.
@@ -456,11 +468,16 @@ async def resolve_media(
     if source_element is not None and media is None:
         page = source_element if isinstance(source_element, Page) else source_element.page
         media = BrowserMedia(page)  # Sees no past responses, but still fetches via the browser
-    soup = BeautifulSoup(html, "html.parser")
     domain_root = get_domain_root(url) if url else None
 
-    # 1. Identify all potential media elements and their URLs
-    media_elements: list[Tag] = _extract_media_elements(soup)
+    # 1. Identify all potential media elements and their URLs. Parsing, decoding and
+    # rewriting the HTML are CPU-bound -- a second and more for a page with hundreds
+    # of images -- so they run in a thread, not on the event loop every retrieval shares.
+    def parse() -> tuple[BeautifulSoup, list[Tag]]:
+        parsed = BeautifulSoup(html, "html.parser")
+        return parsed, _extract_media_elements(parsed)
+
+    soup, media_elements = await _in_html_thread(parse)
     if not media_elements:
         return MultimodalSequence(html)
 
@@ -468,7 +485,8 @@ async def resolve_media(
                                        for element in media_elements]
 
     # 2. Resolve base64 media
-    resolved_media: list[Optional[Item]] = _resolve_base64_media(list(zip(media_elements, media_uris)), source_url=url)
+    resolved_media: list[Optional[Item]] = await _in_html_thread(
+        _resolve_base64_media, list(zip(media_elements, media_uris)), source_url=url)
 
     # 3. Normalize URLs and prepare tasks for remaining elements
     tasks = []
@@ -539,6 +557,11 @@ async def resolve_media(
         url_to_medium.update(zip([uri for uri, _ in later], await later_results))
     finally:
         later_results.cancel()  # No-op once done
+        # Downloads that never started (the retrieval was cancelled) would each warn
+        # "coroutine ... was never awaited"
+        for task in tasks:
+            if inspect.iscoroutine(task) and inspect.getcoroutinestate(task) == inspect.CORO_CREATED:
+                task.close()
 
     # 5. Add downloaded media to resolved_media
     for i, uri in enumerate(media_uris):
@@ -546,6 +569,15 @@ async def resolve_media(
             resolved_media[i] = medium
 
     # 6. Replace or remove elements in the SOUP
+    return MultimodalSequence(await _in_html_thread(
+        _replace_media_elements, soup, media_elements, media_uris, resolved_media))
+
+
+def _replace_media_elements(soup: BeautifulSoup, media_elements: list[Tag],
+                            media_uris: list[Optional[str]],
+                            resolved_media: list[Optional[Item]]) -> str:
+    """Puts each resolved medium's reference in place of its element, removes the
+    elements without one, and returns the resulting HTML."""
     inserted_url_refs: set[str] = set()
     for i, (element, medium) in enumerate(zip(media_elements, resolved_media)):
         # Check if element is still in the tree
@@ -556,7 +588,7 @@ async def resolve_media(
         has_child_tags = any(getattr(child, "name", None) for child in element.children)
 
         if medium:
-            too_small = isinstance(medium, Image) and (medium.width < 256 or medium.height < 256)
+            too_small = isinstance(medium, Image) and min(image_size(medium)) < 256
 
             if not too_small:
                 if uri and uri in inserted_url_refs:
@@ -582,7 +614,7 @@ async def resolve_media(
         else:
             element.decompose()
 
-    return MultimodalSequence(str(soup))
+    return str(soup)
 
 
 def is_url(href: str) -> bool:
@@ -643,12 +675,12 @@ async def to_scraped_content(
         return content
 
     if output_format == "markdown":
-        content.markdown = html2md(html)
+        content.markdown = await _in_html_thread(html2md, html)
         return content
 
     content.multimodal = await to_multimodal_sequence(html, session=session, **kwargs)
     # After the media: a browser page is closed by then (see `resolve_media()`)
-    content.markdown = html2md(html)
+    content.markdown = await _in_html_thread(html2md, html)
     return content
 
 
@@ -667,7 +699,7 @@ async def to_multimodal_sequence(
     mms = await resolve_media(html, session=session, **kwargs)
 
     # 2. Convert resulting (partially replaced) HTML to Markdown
-    text = html2md(mms)
+    text = await _in_html_thread(html2md, mms)
 
     return MultimodalSequence(text)
 
@@ -695,7 +727,9 @@ def from_base64(b64_data: str, mime_type: str = "image/jpeg", url: str | None = 
             if mime_type == "image/svg+xml":
                 return None  # We do not care about SVGs
             elif mime_type.startswith("image/"):
-                return Image(binary_data=binary_data, source_url=url)
+                # Downscaled like any downloaded image: a huge inline one otherwise
+                # took hundreds of MB. Small ones are filtered by the caller.
+                return image_from_binary(binary_data, source_url=url, ignore_small_images=False)
             elif mime_type.startswith("video/"):
                 return Video(binary_data=binary_data, source_url=url)
             else:
