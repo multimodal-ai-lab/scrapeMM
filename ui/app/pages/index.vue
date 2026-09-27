@@ -191,7 +191,7 @@ function duration(seconds: number) {
 
 /** Media as a share of the room available to it: what it uses, over that plus free. */
 function mediaShare(media: any): number | null {
-  if (media.disk_free == null) return null
+  if (media.disk_free == null || media.bytes == null) return null
   const available = media.bytes + media.disk_free
   return available > 0 ? media.bytes / available : null
 }
@@ -234,12 +234,11 @@ const tiles = computed(() => {
       value: `${env.captcha.waiting}`,
       tone: env.captcha.waiting ? 'warning' as const : 'neutral' as const,
       detail: env.captcha.waiting
-        ? (env.captcha.solvable ? 'click to solve and clear them'
-          : 'no display to solve on')
+        ? `URLs on ${env.captcha.challenges} site${env.captcha.challenges === 1 ? '' : 's'} · solve or discard`
         : 'nothing waiting on a human',
-      // Only a link when there is something to do, and then straight into the solver
-      // rather than the page around it.
-      to: env.captcha.waiting && env.captcha.solvable ? '/captcha?solve' : undefined },
+      // Only a link when there is something to decide; which challenge to solve, and
+      // whether at all, is decided on that page
+      to: env.captcha.waiting ? '/captcha' : undefined },
     { label: 'Blacklisted', icon: 'i-fa7-solid-ban',
       value: `${env.blacklist.domains}`,
       tone: env.blacklist.domains ? 'warning' as const : 'neutral' as const,
@@ -250,18 +249,29 @@ const tiles = computed(() => {
       value: `${env.jobs.jobs}`, tone: 'neutral' as const,
       detail: `${env.jobs.urls} URLs all time`, to: '/jobs' },
     { label: 'Media stored', icon: 'i-fa7-solid-photo-film',
-      value: bytes(env.media.bytes), tone: diskTone(env.media),
+      // Null until the server's first background measurement is done
+      value: env.media.bytes == null ? '…' : bytes(env.media.bytes),
+      tone: diskTone(env.media),
       // The ring measures media against the space media could actually use -- what it
       // already occupies plus what is still free. Whatever else is on the volume is
       // somebody else's business and only made the figure look alarming for no reason.
       ring: mediaShare(env.media),
-      detail: env.media.disk_free
-        ? `${env.media.files} files · ${bytes(env.media.disk_free)} free`
-        : `${env.media.files} files downloaded`,
+      detail: env.media.files == null
+        ? 'measuring…'
+        : env.media.disk_free
+          ? `${env.media.files} files · ${bytes(env.media.disk_free)} free`
+          : `${env.media.files} files downloaded`,
       to: '/settings' },
-    { label: 'Cached responses', icon: 'i-fa7-solid-bolt',
-      value: `${env.cache.entries}`, tone: 'neutral' as const,
-      detail: duration(env.cache.ttl), to: '/settings' },
+    // How often a retrieval was answered from the cache instead of being scraped again:
+    // relative as the value, absolute below it, alongside what the cache holds now
+    { label: 'Cache hits', icon: 'i-fa7-solid-bolt',
+      value: env.jobs.cache_hit_rate == null ? '—'
+        : `${(env.jobs.cache_hit_rate * 100).toFixed(1)}%`,
+      tone: 'neutral' as const, ring: env.jobs.cache_hit_rate,
+      detail: env.jobs.urls
+        ? `${env.jobs.from_cache} of ${env.jobs.urls} URLs · ${env.cache.entries} cached, ${duration(env.cache.ttl)}`
+        : `${env.cache.entries} cached · ${duration(env.cache.ttl)}`,
+      to: '/settings' },
     { label: 'FFmpeg', icon: 'i-fa7-solid-film',
       value: env.ffmpeg.available ? 'Ready' : 'Missing',
       tone: env.ffmpeg.available ? 'neutral' as const : 'warning' as const,

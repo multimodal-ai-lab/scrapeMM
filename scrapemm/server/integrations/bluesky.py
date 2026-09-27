@@ -110,7 +110,10 @@ class Bluesky(RetrievalIntegration):
                 # For video embeds
                 elif hasattr(embed, 'py_type') and getattr(embed, 'py_type') == 'app.bsky.embed.video#view':
                     video = await download_video(embed.playlist, session)
-                    if video:
+                    if not video:
+                        logger.warning(f"The video of {url} could not be downloaded from "
+                                       f"{embed.playlist}; returning the post without it.")
+                    else:
                         if max_video_size is None or video.size <= max_video_size:
                             media.append(video)
                         else:
@@ -248,7 +251,9 @@ Metrics:
 def error_to_string(error: Exception) -> str:
     """Takes an Error object containing a response and prints the contents."""
     from atproto_client.exceptions import RequestErrorBase
-    if isinstance(error, RequestErrorBase):
+    # Network errors and timeouts carry no response. Reading one from them used to raise
+    # here, which hid the actual error and skipped every fallback of the caller.
+    if isinstance(error, RequestErrorBase) and error.response is not None:
         response = error.response
         code = response.status_code
         content = response.content
@@ -260,4 +265,4 @@ def error_to_string(error: Exception) -> str:
         else:
             return f"Error {code}: {content}."
     else:
-        return str(error)
+        return f"{type(error).__name__}: {error}"

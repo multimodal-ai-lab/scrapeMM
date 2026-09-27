@@ -36,6 +36,12 @@ RUN npm run generate
 # Playwright's image is the base because it already carries Chromium and every system
 # library it needs -- the part a pip install cannot provide.
 # ---------------------------------------------------------------------------------
+# The JavaScript runtime yt-dlp needs for YouTube, as a stage of its own. A named stage
+# rather than `COPY --from=<image>`: Podman's builder does not pull an image referenced
+# only there, and fails with "image not found", while a FROM image it pulls like any
+# other. The `bin` flavour holds nothing but the static binary.
+FROM docker.io/denoland/deno:bin-2.6.0 AS deno
+
 FROM mcr.microsoft.com/playwright/python:v1.62.0-noble AS server
 
 ENV PYTHONUNBUFFERED=1 \
@@ -60,6 +66,14 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
         python3-tk \
         tini \
     && rm -rf /var/lib/apt/lists/*
+
+# A JavaScript runtime for yt-dlp: YouTube hides its video formats behind signature and
+# "n" challenges that yt-dlp solves by running YouTube's own player code. Without one,
+# formats go missing ("n challenge solving failed") or only thumbnails remain. Deno is
+# the runtime yt-dlp uses by default; its solver scripts come with yt-dlp[default].
+# Copied as the single static binary from the official image (the `deno` stage above).
+COPY --from=deno /deno /usr/local/bin/deno
+RUN deno --version
 
 WORKDIR /app
 

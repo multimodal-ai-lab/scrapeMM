@@ -1,10 +1,13 @@
 import asyncio
+import json
 import logging
+from typing import Optional
 
 import aiohttp
 from aiohttp import ClientConnectorError
 
-from scrapemm.common import RateLimitError, RetrievalFailed
+from scrapemm.common import (AccessBlockedError, QuotaExceededError, RateLimitError,
+                             RetrievalFailed, UnsupportedDomainError)
 from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
 from scrapemm.server.secrets import get_secret
 from scrapemm.server.util import get_domain, to_scraped_content
@@ -153,24 +156,10 @@ class Decodo:
                                     f"Decodo API error 502: Bad gateway (despite {max_retries} retries).")
 
                         else:  # Other errors that don't go away on retry
-                            match response.status:
-                                case 400:
-                                    logger.debug(
-                                        "Error 400: Bad request. If you use JavaScript, make sure you have the "
-                                        "Advanced plan subscription.")
-                                case 401:
-                                    logger.error("Error 401: Unauthorized. Check your Decodo credentials.")
-                                case 402:
-                                    logger.error("Error 402: Payment required. Check your Decodo subscription.")
-                                case 403:
-                                    logger.debug("Error 403: Forbidden.")
-                                case 408:
-                                    logger.warning("Error 408: Timeout! Website did not respond in time.")
-                                case 500:
-                                    logger.debug("Error 500: Server error.")
-                                case _:
-                                    logger.debug(f"Error {response.status}: {response.reason}.")
-                            raise RuntimeError(f"Decodo returned error {response.status}: {response.reason}")
+                            error = _api_error(response.status, response.reason,
+                                               await response.text(), url)
+                            logger.debug(f"Decodo refused {url}: {type(error).__name__}: {error}")
+                            raise error
 
                     else:
                         # Parse response
@@ -227,6 +216,52 @@ class Decodo:
 
         # Should not reach here
         raise RetrievalFailed("Failed to scrape with Decodo after multiple attempts.")
+
+
+def _decodo_message(body: str) -> str:
+    """Decodo's own explanation of an error, from its JSON body ({"status": "failed",
+    "message": "Url is not supported."}), else the body itself."""
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return body.strip()[:300]
+    if isinstance(data, dict):
+        for key in ("message", "detail", "error", "errors"):
+            if data.get(key):
+                return str(data[key]).strip()[:300]
+    return body.strip()[:300]
+
+
+def _api_error(status: int, reason: Optional[str], body: str, url: str) -> Exception:
+    """Turns an error response of Decodo's API into an exception that says what went
+    wrong -- and what to do about it -- rather than repeating the bare status line."""
+    message = _decodo_message(body)
+    said = f' Decodo says: "{message}"' if message else ""
+    domain = get_domain(url)
+
+    if status == 400 and "not supported" in message.lower():
+        # A refusal by policy, not a malformed request: Decodo will not scrape this site
+        return UnsupportedDomainError(f"Decodo does not scrape {domain or 'this URL'}; it "
+                                      f"refuses the URL as unsupported.{said}")
+    match status:
+        case 400:
+            return RetrievalFailed(f"Decodo rejected the request as invalid (400).{said} "
+                                   f"A possible cause: scrapeMM asks for JavaScript "
+                                   f"rendering, which Decodo refuses on plans below Advanced.")
+        case 401:
+            return RuntimeError(f"Decodo rejected the credentials (401).{said} Check the "
+                                f"Decodo token under Secrets in the web UI.")
+        case 402:
+            return QuotaExceededError(f"Decodo requires payment (402): the subscription "
+                                      f"ran out or does not cover this request.{said}")
+        case 403:
+            return AccessBlockedError(f"Decodo's account may not scrape this (403).{said}")
+        case 408:
+            return RetrievalFailed(f"{domain or 'The website'} did not answer Decodo in "
+                                   f"time (408).{said}")
+        case 500:
+            return RetrievalFailed(f"Decodo failed internally (500).{said}")
+    return RetrievalFailed(f"Decodo answered {status} {reason or ''}.".replace(" .", ".") + said)
 
 
 async def backoff(n_past_attempts: int):

@@ -6,9 +6,9 @@ anybody scrapes anything. So this module drives the connection deliberately, rec
 why it failed if it did, and names the secrets that are missing -- the dashboard's job
 is to turn "Instagram doesn't work" into "Instagram needs instagram_cookie".
 
-Firecrawl and Decodo are not integrations (they are general scraping methods), but from
-a dashboard's point of view they are the same kind of thing: something that either works
-or needs configuring. They get cards here too.
+The Browser, Firecrawl and Decodo are not integrations (they are general retrieval
+methods), but from a dashboard's point of view they are the same kind of thing: something
+that either works or needs configuring. They get cards here too.
 
 Statuses are cached for STATUS_TTL, because connecting costs real API calls.
 """
@@ -30,7 +30,7 @@ from .cache import cache
 from .environment import ffmpeg_available, ffprobe_available
 from .jobs import jobs
 from .secrets import is_set
-from .toggles import is_enabled
+from .toggles import is_enabled, resolve_alias
 
 logger = logging.getLogger(APP_NAME)
 
@@ -73,8 +73,8 @@ OPTIONAL_SECRETS: dict[str, tuple[str, ...]] = {
     "instagram": ("instagram_cookie",),
 }
 
-# The general scraping methods, which are not `RetrievalIntegration`s
-METHOD_KEYS = ("firecrawl", "decodo")
+# The general retrieval methods, which are not tied to a platform like the integrations
+METHOD_KEYS = ("browser", "firecrawl", "decodo")
 
 # The states a card can be in, which is also the colour it gets in the UI
 READY, UNCONFIGURED, ERROR, DISABLED = "ready", "unconfigured", "error", "disabled"
@@ -153,7 +153,8 @@ def all_methods() -> list[dict]:
     methods = [{"key": i.name.lower(), "name": i.name, "kind": "integration",
                 "domains": list(i.domains)}
                for i in RETRIEVAL_INTEGRATIONS]
-    methods += [{"key": "firecrawl", "name": "Firecrawl", "kind": "method",
+    methods += [{"key": "browser", "name": "Browser", "kind": "method", "domains": []},
+                {"key": "firecrawl", "name": "Firecrawl", "kind": "method",
                  "domains": []},
                 {"key": "decodo", "name": "Decodo", "kind": "method", "domains": []}]
     return methods
@@ -201,7 +202,11 @@ def retrieval_counts() -> dict[str, int]:
     if version == jobs.version:
         return counts
     version = jobs.version
-    counts = {method.lower(): n for method, n in jobs.method_counts().items()}
+    counts: dict[str, int] = {}
+    for method, n in jobs.method_counts().items():
+        # Retrievals recorded under a method's former name count towards it
+        key = resolve_alias(method).lower()
+        counts[key] = counts.get(key, 0) + n
     _counts_cache = (version, counts)
     return counts
 
@@ -221,7 +226,7 @@ def _base_status(key: str, name: str, kind: str,
         missing_optional_secrets=[s for s in optional if not is_set(s)],
         configured=all(is_set(s) for s in required),
         enabled=is_enabled(key),
-        # The Headed Browser, the archives and the like take no credentials at all;
+        # The Browser, the archives and the like take no credentials at all;
         # offering to configure them would lead somewhere with nothing to fill in.
         configurable=bool(required or optional),
         retrievals=retrieval_counts().get(name.lower(), 0),
@@ -250,9 +255,8 @@ def _settle(status: IntegrationStatus) -> IntegrationStatus:
     return status
 
 
-async def _probe(key: str, integration) -> IntegrationStatus:
-    status = _base_status(key, integration.name, "integration",
-                          list(integration.domains))
+async def _probe(key: str, integration, kind: str = "integration") -> IntegrationStatus:
+    status = _base_status(key, integration.name, kind, list(integration.domains))
 
     if not status.enabled or status.missing_secrets:
         # Neither case needs the network, and probing a method that is switched off or
@@ -294,8 +298,12 @@ async def _probe(key: str, integration) -> IntegrationStatus:
 
 
 async def _probe_method(key: str) -> IntegrationStatus:
-    """Firecrawl and Decodo: scraping methods rather than per-platform integrations,
-    but the dashboard treats them the same way."""
+    """The Browser, Firecrawl and Decodo: retrieval methods rather than per-platform
+    integrations, but the dashboard treats them the same way."""
+    if key == "browser":
+        from .integrations import browser
+        return await _probe(key, browser, kind="method")
+
     if key == "firecrawl":
         from .integrations.firecrawl.firecrawl import (configured_firecrawl_urls,
                                                        find_all_firecrawls)
@@ -435,14 +443,12 @@ _media_version = -1
 
 
 def _media_usage() -> dict:
+    """Never walks the tree itself (see `registry.usage`); after new retrievals it asks
+    for a background re-measurement, which a walk started from now on will include."""
     global _media_version
-    if jobs.version == _media_version:
-        return registry.usage()
-    version, started = jobs.version, time.time()
-    measured = registry.usage(max_age=MEDIA_MIN_AGE)
-    if measured["measured_at"] >= started:  # Walked just now, so it includes `version`
-        _media_version = version
-    return measured
+    if jobs.version != _media_version and registry.refresh(MEDIA_MIN_AGE):
+        _media_version = jobs.version
+    return registry.usage()
 
 
 _playwright_cache: Optional[dict] = None
@@ -508,21 +514,19 @@ def _address() -> dict:
 def _captcha_backlog() -> dict:
     """How much work is waiting on somebody solving a CAPTCHA.
 
-    Archive.today buffers every gated snapshot rather than blocking on a human, so this
-    is the number that says whether anyone needs to go and do something.
+    Gated URLs are queued with a challenge per site rather than blocking on a human, so
+    this is the number that says whether anyone needs to go and do something.
     """
+    from . import challenges
     try:
-        from .integrations.archive_today import (count_cached_archive_today_pages,
-                                                 get_archive_today_buffer)
-        waiting = len(get_archive_today_buffer())
-        cached = count_cached_archive_today_pages()
+        listed = challenges.list_challenges()
     except Exception:
-        logger.debug("Could not read the Archive.today backlog.", exc_info=True)
-        waiting, cached = 0, 0
+        logger.debug("Could not read the CAPTCHA challenges.", exc_info=True)
+        listed = []
 
     return {
-        "waiting": waiting,
-        "cached_pages": cached,
+        "waiting": sum(c["waiting"] for c in listed),
+        "challenges": len(listed),
         # Without a display there is no way to solve one, which is worth saying when
         # something is actually waiting.
         "solvable": bool(os.getenv("DISPLAY")) or os.name == "nt",

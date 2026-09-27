@@ -56,6 +56,7 @@ async def retrieve(
     :param methods: List of retrieval methods to use in order, or "auto" to let the
         server pick the best ones per domain. Available methods:
         - "integrations" (API integrations for Twitter, Instagram, etc.)
+        - "browser" (the server's own browser, a real Chromium)
         - "firecrawl" (Firecrawl scraping service)
         - "decodo" (Decodo Web Scraping API)
         Pass a list of strings to apply one order to every URL, or a list of lists to

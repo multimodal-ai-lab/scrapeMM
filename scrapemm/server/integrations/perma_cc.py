@@ -5,15 +5,14 @@ from typing import Optional
 
 from playwright.async_api import TimeoutError, Page, Frame
 
+from scrapemm.server.download.browser import MAX_IMAGE_BYTES, MAX_VIDEO_BYTES, BLOB_ATTR, install_stash
 from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget
 
 logger = logging.getLogger("scrapeMM")
 
 
-# Limits for inlining media as data URIs to avoid excessive memory usage
-MAX_IMAGE_BYTES = 50 * 1024 * 1024  # 50 MB
-MAX_VIDEO_BYTES = 250 * 1024 * 1024  # 250 MB
-INLINE_CONCURRENCY = 6
+# Media fetched inside a frame at the same time
+STASH_CONCURRENCY = 6
 # Large WARCs (e.g. 80MB+ Telegram videos) need a long wait for the innermost iframe.
 INNERMOST_FRAME_TIMEOUT_MS = 120_000
 
@@ -50,7 +49,7 @@ class PermaCC(HeadedBrowser):
 
         # Prefer the content of the Perma.cc archive iframe specifically
         try:
-            outer_iframe_el = await page.wait_for_selector("iframe.archive-iframe", timeout=5000)
+            outer_iframe_el = await page.wait_for_selector("iframe.archive-iframe", timeout=20000)
         except TimeoutError:
             outer_iframe_el = None
 
@@ -77,13 +76,13 @@ class PermaCC(HeadedBrowser):
 
         if not middle_iframe_el:
             logger.debug("Perma.cc middle iframe not found; falling back to outer iframe.")
-            await _inline_media_in_frame(outer_frame)
+            await _stash_media_in_frame(outer_frame)
             return outer_frame
 
         middle_frame = await middle_iframe_el.content_frame()
         if not middle_frame:
             logger.debug("Perma.cc middle iframe has no content frame; falling back to outer.")
-            await _inline_media_in_frame(outer_frame)
+            await _stash_media_in_frame(outer_frame)
             return outer_frame
 
         try:
@@ -96,12 +95,12 @@ class PermaCC(HeadedBrowser):
         inner_frame = await self._wait_for_innermost_frame(middle_frame)
         if inner_frame is None:
             logger.debug("Perma.cc inner iframe not ready; falling back to middle iframe.")
-            await _inline_media_in_frame(middle_frame)
+            await _stash_media_in_frame(middle_frame)
             return middle_frame
 
         # Prefer a nested media-rich descendant (e.g. Telegram embed) when present.
         target = await self._pick_best_media_frame(inner_frame)
-        await _inline_media_in_frame(target)
+        await _stash_media_in_frame(target)
         return target
 
     async def _wait_for_innermost_frame(
@@ -214,18 +213,27 @@ class PermaCC(HeadedBrowser):
             return 0
 
 
-async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video_limit: int = MAX_VIDEO_BYTES,
-                                 concurrency: int = INLINE_CONCURRENCY) -> None:
-    """Replace media URLs inside a frame with data URIs fetched using the same session.
-    Operates directly in the page context to ensure session-bound URLs resolve.
+async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video_limit: int = MAX_VIDEO_BYTES,
+                                concurrency: int = STASH_CONCURRENCY) -> None:
+    """Fetches the frame's media inside the frame, where the replay's session and service
+    worker apply, and marks each element with the resulting Blob (`BLOB_ATTR`), which
+    `resolve_media()` then reads out of the browser in chunks. Also decides which media
+    are the real ones (e.g. the clear Telegram video, not TikTok's decoy clip).
+
+    Images the browser already rendered are left alone: their bytes are taken from the
+    browser's own copy (see `BrowserMedia`). This used to inline everything as data URIs
+    instead, which blew a single video's frame HTML up to 20 MB.
     """
     try:
+        await install_stash(frame)
         await frame.evaluate(
             """
             async (opts) => {
               const maxImageBytes = opts.maxImageBytes ?? 15728640;
               const maxVideoBytes = opts.maxVideoBytes ?? 26214400;
               const concurrency = Math.max(1, Math.min(16, opts.concurrency ?? 6));
+              const blobAttr = opts.blobAttr;
+              const stash = window.__scrapemmStash;
 
               const abs = (u) => {
                 try { return new URL(u, document.baseURI).href; } catch (_) { return null; }
@@ -264,8 +272,10 @@ async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, vide
               const tasks = [];
               let videoTaskCount = 0;
 
-              // Images (img[src] and img[srcset])
+              // Images (img[src] and img[srcset]). Rendered ones are in the browser already.
               document.querySelectorAll('img').forEach((img) => {
+                const cur = img.currentSrc || '';
+                if (img.complete && img.naturalWidth > 0 && cur && !cur.startsWith('data:')) return;
                 let url = img.getAttribute('src');
                 if (!url) {
                   const ss = img.getAttribute('srcset');
@@ -292,13 +302,6 @@ async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, vide
                 el.parentNode ? el.parentNode.insertBefore(img, el) : document.body.appendChild(img);
                 el.remove();
                 tasks.push({ el: img, attr: 'src', url: full, kind: 'image' });
-              });
-
-              // Video poster images
-              document.querySelectorAll('video[poster]').forEach((video) => {
-                const url = video.getAttribute('poster');
-                const full = abs(url);
-                if (full) tasks.push({ el: video, attr: 'poster', url: full, kind: 'image' });
               });
 
               // Prefer non-blurred Telegram videos when both variants exist
@@ -350,41 +353,9 @@ async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, vide
                 return ct.includes('mpegurl') || ct.includes('application/vnd.apple.mpegurl');
               };
 
-              const ab2b64 = (buf) => {
-                const bytes = new Uint8Array(buf);
-                let binary = '';
-                const chunk = 0x8000; // 32k chunks to avoid call stack limits
-                for (let i = 0; i < bytes.length; i += chunk) {
-                  const sub = bytes.subarray(i, i + chunk);
-                  binary += String.fromCharCode.apply(null, sub);
-                }
-                return btoa(binary);
-              };
-
-              const fetchToDataURL = async (url, kind) => {
-                const res = await fetch(url, { credentials: 'include' });
-                if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                const contentType = res.headers.get('content-type') || '';
-                const contentLengthHeader = res.headers.get('content-length');
-                const limit = kind === 'image' ? maxImageBytes : maxVideoBytes;
-                if (contentLengthHeader) {
-                  const len = parseInt(contentLengthHeader);
-                  if (!Number.isNaN(len) && len > limit) {
-                    return { skipped: true, reason: 'too_large_precheck', contentType };
-                  }
-                }
-                if (isStreaming(url, contentType)) {
-                  return { skipped: true, reason: 'streaming', contentType };
-                }
-                const blob = await res.blob();
-                if (blob.size > limit) {
-                  return { skipped: true, reason: 'too_large', contentType: blob.type || contentType };
-                }
-                const buf = await blob.arrayBuffer();
-                const b64 = ab2b64(buf);
-                const mime = blob.type || contentType || 'application/octet-stream';
-                return { dataURL: `data:${mime};base64,${b64}`, contentType: mime };
-              };
+              const stashFor = (url, kind) => stash(url, {
+                limit: kind === 'image' ? maxImageBytes : maxVideoBytes, skipStreaming: true });
+              const hasBlob = (el) => el.hasAttribute(blobAttr);
 
               let idx = 0;
               let inlined = 0;
@@ -397,9 +368,9 @@ async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, vide
                   if (i >= tasks.length) break;
                   const t = tasks[i];
                   try {
-                    const res = await fetchToDataURL(t.url, t.kind);
-                    if (res && res.dataURL) {
-                      t.el.setAttribute(t.attr, res.dataURL);
+                    const res = await stashFor(t.url, t.kind);
+                    if (res && res.ok) {
+                      t.el.setAttribute(blobAttr, res.id);
                       if (t.cleanupSrcset) t.el.removeAttribute('srcset');
                       inlined++;
                       if (t.kind === 'video') videoInlined++;
@@ -500,24 +471,9 @@ async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, vide
                   });
                   for (const u of urls) {
                     try {
-                      const res = await fetch(u, { credentials: 'include' });
+                      const res = await stash(u, {
+                        limit: maxVideoBytes, minSize: 1000, requireVideo: true });
                       if (!res.ok) continue;
-                      const ct = (res.headers.get('content-type') || '').toLowerCase();
-                      const looksVideo = ct.includes('video')
-                        || u.toLowerCase().includes('.mp4')
-                        || u.toLowerCase().includes('mime_type=video');
-                      if (!looksVideo) continue;
-                      const lenH = res.headers.get('content-length');
-                      if (lenH) {
-                        const len = parseInt(lenH);
-                        if (!Number.isNaN(len) && len > maxVideoBytes) continue;
-                      }
-                      const blob = await res.blob();
-                      if (blob.size < 1000 || blob.size > maxVideoBytes) continue;
-                      const buf = await blob.arrayBuffer();
-                      const b64 = ab2b64(buf);
-                      const mime = blob.type || ct || 'video/mp4';
-                      const dataURL = `data:${mime};base64,${b64}`;
                       let vEl = document.querySelector('video');
                       if (!vEl) {
                         vEl = document.createElement('video');
@@ -528,7 +484,7 @@ async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, vide
                       } else {
                         vEl.querySelectorAll('source').forEach(s => s.remove());
                       }
-                      vEl.setAttribute('src', dataURL);
+                      vEl.setAttribute(blobAttr, res.id);
                       videoInlined++;
                       inlined++;
                       return true;
@@ -548,10 +504,7 @@ async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, vide
               // Wombat's patched fetch cannot read blob: URLs, but the original MP4 is usually
               // still present in the archived HTML and reachable via the replay id_/mp_/if_ proxy.
               const tryInlineReplayMp4 = async () => {
-                const needs = [...document.querySelectorAll('video')].filter((v) => {
-                  const s = v.getAttribute('src') || '';
-                  return !s.startsWith('data:');
-                });
+                const needs = [...document.querySelectorAll('video')].filter((v) => !hasBlob(v));
                 if (!needs.length) return false;
 
                 const loc = location.href || '';
@@ -582,10 +535,10 @@ async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, vide
                   for (const mp4 of uniq) {
                     for (const kind of ['id_', 'mp_', 'if_']) {
                       try {
-                        const res = await fetchToDataURL(`${replayBase}/${kind}/${mp4}`, 'video');
-                        if (res && res.dataURL) {
+                        const res = await stashFor(`${replayBase}/${kind}/${mp4}`, 'video');
+                        if (res && res.ok) {
                           video.querySelectorAll('source').forEach((s) => s.remove());
-                          video.setAttribute('src', res.dataURL);
+                          video.setAttribute(blobAttr, res.id);
                           videoInlined++;
                           inlined++;
                           return true;
@@ -599,7 +552,7 @@ async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, vide
 
               const stillNeedsVideo = [...document.querySelectorAll('video')].some((v) => {
                 const s = v.getAttribute('src') || '';
-                return s.startsWith('blob:') || (!s.startsWith('data:') && videoInlined === 0);
+                return !hasBlob(v) && (s.startsWith('blob:') || videoInlined === 0);
               });
               if (stillNeedsVideo) {
                 try { await tryInlineReplayMp4(); } catch (_) { /* ignore */ }
@@ -612,8 +565,10 @@ async def _inline_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, vide
                 "maxImageBytes": int(image_limit),
                 "maxVideoBytes": int(video_limit),
                 "concurrency": int(concurrency),
+                "blobAttr": BLOB_ATTR,
             },
         )
     except Exception:
         # Best-effort; if anything fails, just proceed without inlining
-        logger.debug("Perma.cc media inlining failed; continuing without data URIs.", exc_info=True)
+        logger.debug("Fetching the frame's media in the frame failed; resolve_media() "
+                     "fetches them instead.", exc_info=True)

@@ -1,0 +1,665 @@
+[
+ {
+  "url": "https://www.youtube.com/watch?v=RxJtYsCQ0jo",
+  "expected": {
+   "video": 1
+  },
+  "category": "YouTube"
+ },
+ {
+  "url": "https://www.youtube.com/watch?v=mUBdMLfkI54",
+  "expected": {
+   "video": 1
+  },
+  "category": "YouTube"
+ },
+ {
+  "url": "https://www.youtube.com/watch?v=A4dVOznX6Kk",
+  "expected": {
+   "video": 1
+  },
+  "category": "YouTube"
+ },
+ {
+  "url": "https://www.youtube.com/shorts/1Cgvb17edsQ",
+  "expected": {
+   "video": 1
+  },
+  "category": "YouTube"
+ },
+ {
+  "url": "https://www.youtube.com/shorts/mM0i832urK0",
+  "expected": {
+   "video": 1
+  },
+  "category": "YouTube"
+ },
+ {
+  "url": "https://www.youtube.com/shorts/cE0zgN6pYOc",
+  "expected": {
+   "video": 1
+  },
+  "category": "YouTube"
+ },
+ {
+  "url": "https://www.instagram.com/p/DRJ94KKDhpx",
+  "expected": {
+   "image": 1
+  },
+  "category": "Instagram"
+ },
+ {
+  "url": "https://www.instagram.com/p/DRNcdbPiPCj",
+  "expected": {
+   "image": 1
+  },
+  "category": "Instagram"
+ },
+ {
+  "url": "https://www.instagram.com/p/CqJDbyOP839",
+  "expected": {
+   "image": 1
+  },
+  "category": "Instagram"
+ },
+ {
+  "url": "https://www.instagram.com/p/DMuOe6th94D",
+  "expected": {
+   "video": 1
+  },
+  "category": "Instagram"
+ },
+ {
+  "url": "https://www.instagram.com/reel/DRKtWnhAI0j",
+  "expected": {
+   "video": 1
+  },
+  "category": "Instagram"
+ },
+ {
+  "url": "https://www.instagram.com/reel/DRE38jKDIYb",
+  "expected": {
+   "video": 1
+  },
+  "category": "Instagram"
+ },
+ {
+  "url": "https://www.facebook.com/esta.spencer/posts/pfbid0zTQ51pwQ1ZGvoTnh6dWKaSqMTcjwpis7tcX1XE5YZ7jhnoc9ZCY8TiUw1Ewr8Wq3l",
+  "expected": {},
+  "category": "Facebook"
+ },
+ {
+  "url": "https://www.facebook.com/photo/?fbid=1721085455188778&set=a.107961589834514&_rdc=1&_rdr",
+  "expected": {
+   "image": 1
+  },
+  "category": "Facebook"
+ },
+ {
+  "url": "https://www.facebook.com/photo/?fbid=1287391456760943&set=a.644291054404323",
+  "expected": {
+   "image": 1
+  },
+  "category": "Facebook"
+ },
+ {
+  "url": "https://www.facebook.com/photo/?fbid=1148555903931627&set=a.859126372874583",
+  "expected": {
+   "image": 1
+  },
+  "category": "Facebook"
+ },
+ {
+  "url": "https://www.facebook.com/login/?next=https%3A%2F%2Fwww.facebook.com%2Fphoto%3Ffbid%3D860758296160977%26set%3Da.513585680878242",
+  "expected": {
+   "image": 1
+  },
+  "category": "Facebook"
+ },
+ {
+  "url": "https://www.facebook.com/plugins/post.php?href=https%3A%2F%2Fwww.facebook.com%2FTheWolverLing%2Fposts%2Fpfbid02FRKrQUdWmULer6VnVZsoDshBBdqYbsz4dERZiN52499HzGFSRJQtsrQFdZf8dXXyl&show_text=true&width=500",
+  "expected": {
+   "image": 4
+  },
+  "category": "Facebook"
+ },
+ {
+  "url": "https://www.facebook.com/reel/2038221060315031",
+  "expected": {
+   "video": 1
+  },
+  "category": "Facebook"
+ },
+ {
+  "url": "https://www.facebook.com/reel/1954696035077530",
+  "expected": {
+   "video": 1
+  },
+  "category": "Facebook"
+ },
+ {
+  "url": "https://www.facebook.com/reel/3466446073497470",
+  "expected": {
+   "video": 1
+  },
+  "category": "Facebook"
+ },
+ {
+  "url": "https://www.facebook.com/watch/?v=502482344935053",
+  "expected": {
+   "video": 1
+  },
+  "category": "Facebook"
+ },
+ {
+  "url": "https://www.facebook.com/groups/1973976962823632/posts/3992825270938781/",
+  "expected": {
+   "image": 1
+  },
+  "category": "Facebook"
+ },
+ {
+  "url": "https://t.me/sheyhtamir1974/93691%C2%A0",
+  "expected": {
+   "image": 1
+  },
+  "category": "Telegram"
+ },
+ {
+  "url": "https://t.me/durov/404",
+  "expected": {
+   "image": 1
+  },
+  "category": "Telegram"
+ },
+ {
+  "url": "https://t.me/tglobaleye/16172",
+  "expected": {
+   "image": 2
+  },
+  "category": "Telegram"
+ },
+ {
+  "url": "https://t.me/tglobaleye/16178",
+  "expected": {
+   "video": 1
+  },
+  "category": "Telegram"
+ },
+ {
+  "url": "https://t.me/tglobaleye/6289",
+  "expected": {
+   "video": 1
+  },
+  "category": "Telegram"
+ },
+ {
+  "url": "https://t.me/tglobaleye/16192",
+  "expected": {
+   "image": 2,
+   "video": 1
+  },
+  "category": "Telegram"
+ },
+ {
+  "url": "https://www.tiktok.com/@realdonaldtrump/video/7433870905635409198",
+  "expected": {
+   "video": 1
+  },
+  "category": "TikTok"
+ },
+ {
+  "url": "https://www.tiktok.com/@xxxx.xxxx5743/video/7521704371109793046",
+  "expected": {
+   "video": 1
+  },
+  "category": "TikTok"
+ },
+ {
+  "url": "https://www.tiktok.com/@tomekfoodemprior",
+  "expected": {
+   "image": 1
+  },
+  "category": "TikTok"
+ },
+ {
+  "url": "https://www.tiktok.com/@policebodycam6741",
+  "expected": {
+   "image": 1
+  },
+  "category": "TikTok"
+ },
+ {
+  "url": "https://x.com/PopBase/status/1938496291908030484",
+  "expected": {
+   "image": 1
+  },
+  "category": "X (Twitter)"
+ },
+ {
+  "url": "https://twitter.com/Cow__Momma/status/1729708561934991851/photo/2",
+  "expected": {
+   "image": 1
+  },
+  "category": "X (Twitter)"
+ },
+ {
+  "url": "https://x.com/realDonaldTrump",
+  "expected": {},
+  "category": "X (Twitter)"
+ },
+ {
+  "url": "https://t.co/GcXDN4zbRx",
+  "expected": {
+   "image": 1
+  },
+  "category": "X (Twitter)"
+ },
+ {
+  "url": "https://x.com/HPhobiaWatch/status/1875842972216066547",
+  "expected": {
+   "image": 2
+  },
+  "category": "X (Twitter)"
+ },
+ {
+  "url": "https://x.com/TigerRajaSingh/status/1125050909338169345",
+  "expected": {
+   "video": 1
+  },
+  "category": "X (Twitter)"
+ },
+ {
+  "url": "https://x.com/visegrad24/status/2072633510725071224",
+  "expected": {
+   "image": 1,
+   "video": 3
+  },
+  "category": "X (Twitter)"
+ },
+ {
+  "url": "https://x.com/visegrad24/status/2072633510725071224/video/2",
+  "expected": {
+   "video": 1
+  },
+  "category": "X (Twitter)"
+ },
+ {
+  "url": "https://publish.twitter.com/?query=https%3A%2F%2Ftwitter.com%2FRain2097952%2Fstatus%2F1719525724279976200&widget=Tweet",
+  "expected": {
+   "image": 1
+  },
+  "category": "X (Twitter)"
+ },
+ {
+  "url": "https://bsky.app/profile/eliothiggins.bsky.social/post/3mqrktuon4s2l",
+  "expected": {},
+  "category": "Bluesky"
+ },
+ {
+  "url": "https://bsky.app/profile/mabellogan.bsky.social/post/3mqtbpexyks2i",
+  "expected": {
+   "image": 1
+  },
+  "category": "Bluesky"
+ },
+ {
+  "url": "https://bsky.app/profile/dennishorn.de/post/3mqt2k6c7oc2s",
+  "expected": {
+   "image": 4
+  },
+  "category": "Bluesky"
+ },
+ {
+  "url": "https://bsky.app/profile/acyn.bsky.social/post/3mqspt2uqxz22",
+  "expected": {
+   "video": 1
+  },
+  "category": "Bluesky"
+ },
+ {
+  "url": "https://www.threads.com/@leckerundliebe/post/DdFMDaeGPC3",
+  "expected": {},
+  "category": "Threads"
+ },
+ {
+  "url": "https://www.threads.com/@thefilmforyou/post/DdElcfgE9zu",
+  "expected": {
+   "video": 1
+  },
+  "category": "Threads"
+ },
+ {
+  "url": "https://www.threads.com/@moritz_koerner/post/DdEP-ZtDdg1",
+  "expected": {
+   "image": 1
+  },
+  "category": "Threads"
+ },
+ {
+  "url": "https://www.threads.com/@stefan.naas/post/DdEJ6gWiIb3",
+  "expected": {
+   "image": 3,
+   "video": 1
+  },
+  "category": "Threads"
+ },
+ {
+  "url": "https://www.reddit.com/r/KeineDummenFragen/comments/1wce00w/was_bringt_der_notfallalarm/",
+  "expected": {},
+  "category": "Reddit"
+ },
+ {
+  "url": "https://www.reddit.com/r/mildlyinfuriating/comments/1wc3gkx/furniture_shopping_in_2026/",
+  "expected": {
+   "image": 2
+  },
+  "category": "Reddit"
+ },
+ {
+  "url": "https://www.reddit.com/r/interesting/comments/1wj4ih1/moms_reaction_to_learning_her_missing_16yearold/",
+  "expected": {
+   "video": 1
+  },
+  "category": "Reddit"
+ },
+ {
+  "url": "https://www.reddit.com/r/TopCharacterTropes/comments/1wbxea7/the_moral_dilemma_that_wasnt/",
+  "expected": {
+   "image": 5,
+   "video": 1
+  },
+  "category": "Reddit"
+ },
+ {
+  "url": "https://archive.is/uTVE4",
+  "expected": {
+   "image": 1
+  },
+  "category": "Archive.today"
+ },
+ {
+  "url": "https://archive.is/0VrgI",
+  "expected": {
+   "image": 1
+  },
+  "category": "Archive.today"
+ },
+ {
+  "url": "https://archive.md/SI9Yy",
+  "expected": {
+   "image": 8
+  },
+  "category": "Archive.today"
+ },
+ {
+  "url": "https://archive.li/Ubqsd",
+  "expected": {
+   "image": 1
+  },
+  "category": "Archive.today"
+ },
+ {
+  "url": "http://archive.today/6OttS",
+  "expected": {
+   "image": 2
+  },
+  "category": "Archive.today"
+ },
+ {
+  "url": "http://archive.today/2022.05.05-091515/https:/twitter.com/SamvanRooy1/status/1521438261130014721",
+  "expected": {
+   "image": 2
+  },
+  "category": "Archive.today"
+ },
+ {
+  "url": "https://archive.ph/movd4",
+  "expected": {
+   "image": 1
+  },
+  "category": "Archive.today"
+ },
+ {
+  "url": "https://archive.vn/Edqcv",
+  "expected": {
+   "image": 1
+  },
+  "category": "Archive.today"
+ },
+ {
+  "url": "https://archive.fo/jnN0O",
+  "expected": {
+   "image": 1
+  },
+  "category": "Archive.today"
+ },
+ {
+  "url": "https://archive.md/yACAz",
+  "expected": {
+   "image": 2
+  },
+  "category": "Archive.today"
+ },
+ {
+  "url": "https://perma.cc/N8MR-NS96",
+  "expected": {
+   "video": 1
+  },
+  "category": "Perma.cc"
+ },
+ {
+  "url": "https://perma.cc/HU7Z-B24D",
+  "expected": {
+   "image": 1
+  },
+  "category": "Perma.cc"
+ },
+ {
+  "url": "https://perma.cc/HW47-P32Z",
+  "expected": {
+   "image": 1
+  },
+  "category": "Perma.cc"
+ },
+ {
+  "url": "https://perma.cc/8J8J-2CEB",
+  "expected": {
+   "image": 4
+  },
+  "category": "Perma.cc"
+ },
+ {
+  "url": "https://perma.cc/38CZ-MMFV",
+  "expected": {
+   "image": 1
+  },
+  "category": "Perma.cc"
+ },
+ {
+  "url": "https://perma.cc/ZD7Z-B3U7?type=image",
+  "expected": {
+   "image": 1
+  },
+  "category": "Perma.cc"
+ },
+ {
+  "url": "https://perma.cc/D5GB-S4E9",
+  "expected": {
+   "image": 1
+  },
+  "category": "Perma.cc"
+ },
+ {
+  "url": "https://perma.cc/Z76P-4TE3",
+  "expected": {
+   "image": 1
+  },
+  "category": "Perma.cc"
+ },
+ {
+  "url": "https://perma.cc/T5T9-QQ77",
+  "expected": {
+   "video": 1
+  },
+  "category": "Perma.cc"
+ },
+ {
+  "url": "https://perma.cc/K5L8-V3LZ",
+  "expected": {
+   "video": 1
+  },
+  "category": "Perma.cc"
+ },
+ {
+  "url": "https://web.archive.org/web/20260629131321/https://www.facebook.com/peter.hamilton.54/posts/pfbid0dbCRo43miXqEyeLW9pbyPXrNLAuuNrGJw8nBWGQaNaGs4gcDq4GayR1hkUdkC4Lnl",
+  "expected": {},
+  "category": "Internet Archive"
+ },
+ {
+  "url": "https://web.archive.org/web/20260408100822/https://www.facebook.com/plugins/post.php?href=https%3A%2F%2Fwww.facebook.com%2Fluftari.spartak%2Fposts%2Fpfbid037cXTv7r3rVpd8A5UoGSN1FWaff65bm4C5Yi6FxD2X9qfV9bWcgG7fwM1LMBu2nXhl",
+  "expected": {
+   "image": 1
+  },
+  "category": "Internet Archive"
+ },
+ {
+  "url": "https://web.archive.org/web/20260602042101/https://www.threads.com/@yisangworks/post/DZCPCucmsFy?xmt=AQG0cP3v6OLRdeQGg40ajMQntJ7IM1r3dIK8lPjQDOaK2A",
+  "expected": {
+   "image": 1
+  },
+  "category": "Internet Archive"
+ },
+ {
+  "url": "https://web.archive.org/web/20210604181412/https://www.tiktok.com/@realstewpeters/video/6969789589590379781?is_copy_url=1",
+  "expected": {
+   "video": 1
+  },
+  "category": "Internet Archive"
+ },
+ {
+  "url": "https://web.archive.org/web/20231020082452/https://www.tiktok.com/@greenbrigade2006/video/7291677940834766113?q=madrid%20filistin%20&t=1697788782212",
+  "expected": {
+   "video": 1
+  },
+  "category": "Internet Archive"
+ },
+ {
+  "url": "https://web.archive.org/web/20260618201112/https://www.kwai.com/@SHREKPAPORETOO/video/5199555880897549098?photoId=5199555880897549098&share_item_info=5199555880897549098&fid=150001695016757&timestamp=1781550538452&share_uid=150001695016757&kpn=KWAI&userId=150001380085634&cc=COPY_LINK&language=pt-BR&share_item_type=photo&share_device_id=8090ECD7-ED11-41FE-A603-B0B76BBF3706&share_id=8090ECD7-ED11-41FE-A603-B0B76BBF3706_1781550538452&authorKwaiId=SHREKPAPORETOO&translateKey=news_share_text_081001&shareBucket=br&pwa_source=share&shareCountry=BRA&shareBiz=photo&short_key=xp0cCBGW&PWA_share_N_string=20&request_source=1001&share_redirect_switch_choice=pwa",
+  "expected": {
+   "video": 1
+  },
+  "category": "Internet Archive"
+ },
+ {
+  "url": "https://ghostarchive.org/archive/d63Zd",
+  "expected": {
+   "image": 1
+  },
+  "category": "Other archives"
+ },
+ {
+  "url": "https://ghostarchive.org/archive/gz80n",
+  "expected": {
+   "video": 1
+  },
+  "category": "Other archives"
+ },
+ {
+  "url": "https://www.awesomescreenshot.com/image/40260716?key=c50159e80af3be1d003aa5235d3edaa9",
+  "expected": {
+   "image": 1
+  },
+  "category": "Other archives"
+ },
+ {
+  "url": "https://www.awesomescreenshot.com/video/11862930?key=b021c372bb96716fdbb2316d0eb37c69",
+  "expected": {
+   "video": 1
+  },
+  "category": "Other archives"
+ },
+ {
+  "url": "https://mvau.lt/media/b286c959-00da-4765-8f49-88d4ca87a555",
+  "expected": {
+   "video": 1
+  },
+  "category": "Other archives"
+ },
+ {
+  "url": "https://mvau.lt/media/ccfa5e89-a89d-4a12-aee1-cf68dcb205ce",
+  "expected": {
+   "image": 1
+  },
+  "category": "Other archives"
+ },
+ {
+  "url": "https://factcheckarabic.afp.com/doc.afp.com.9DD6J8",
+  "expected": {
+   "image": 5
+  },
+  "category": "Open web"
+ },
+ {
+  "url": "https://www.vishvasnews.com/viral/fact-check-upsc-has-not-reduced-the-maximum-age-limit-for-ias-and-ips-exams/",
+  "expected": {
+   "image": 1
+  },
+  "category": "Open web"
+ },
+ {
+  "url": "https://health.medicaldialogues.in/fact-check/brain-health-fact-check/fact-check-is-sprite-the-best-remedy-for-headaches-in-the-world-140368",
+  "expected": {
+   "image": 1
+  },
+  "category": "Open web"
+ },
+ {
+  "url": "https://assamese.factcrescendo.com/viral-claim-that-the-video-shows-the-incident-from-uttar-pradesh-and-the-youth-on-the-bike-and-the-youth-being-beaten-and-taken-away-by-the-police-are-the-same-youth-named-abdul-is-false/",
+  "expected": {
+   "image": 5,
+   "video": 1
+  },
+  "category": "Open web"
+ },
+ {
+  "url": "https://factuel.afp.com/doc.afp.com.43ZN7NP",
+  "expected": {
+   "image": 5
+  },
+  "category": "Open web"
+ },
+ {
+  "url": "https://factcheck.afp.com/doc.afp.com.B44R6WE",
+  "expected": {
+   "image": 4
+  },
+  "category": "Open web"
+ },
+ {
+  "url": "https://leadstories.com/365cb414b83e29d26fecae374d55c743a3eac4c7.png",
+  "expected": {
+   "image": 1
+  },
+  "category": "Open web"
+ },
+ {
+  "url": "https://leadstories.com/assets_c/2025/08/193f14f06dd6f15b89bf8050e553ad7fb1be6530-thumb-900xauto-3165872.png",
+  "expected": {
+   "image": 1
+  },
+  "category": "Open web"
+ },
+ {
+  "url": "http://archive.premier.gov.ru/eng/events/news/9424/",
+  "expected": {
+   "image": 1
+  },
+  "category": "Open web"
+ },
+ {
+  "url": "https://www.congress.gov/bill/119th-congress/senate-bill/1383",
+  "expected": {},
+  "category": "Open web"
+ }
+]

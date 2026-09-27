@@ -29,6 +29,8 @@ CHALLENGE_PHRASES: tuple[Signature, ...] = (
                            "type the characters you see in this image",
                            "press and hold to confirm",
                            "unusual traffic from your computer network")),
+    # JS cookie check that re-serves the page once a cookie is set (e.g. NCBI/PMC)
+    ("Cookie check", ("cookies must be enabled",)),
 )
 
 # CAPTCHA widgets. They also appear on regular pages (e.g. in contact forms), hence
@@ -66,11 +68,34 @@ def detect_captcha(content: ScrapedContent) -> Optional[str]:
     if label := _find(markup, CONCLUSIVE_MARKERS):
         return label
 
-    # Everything else counts only if there is no real content to speak of
+    # Everything else counts only if there is no real content to speak of. A video is
+    # real content however little text comes with it: a TikTok capture has barely any,
+    # while its markup mentions "captcha". Matches a <video> tag in the HTML as well as
+    # a video item in multimodal output, so it holds for every output format.
+    if "<video" in markup:
+        return None
     if len(text) <= MAX_CHALLENGE_TEXT_LENGTH:
         return _find(markup, CHALLENGE_PHRASES) or _find(markup, CAPTCHA_WIDGETS)
 
     return None
+
+
+def explain(content: ScrapedContent) -> dict:
+    """Says why `detect_captcha()` decides as it does: every marker present, and whether
+    the page is short enough for the non-conclusive ones to count. For debugging
+    detections a human reported as false."""
+    markup, text = _extract_texts(content)
+    groups = (("conclusive", CONCLUSIVE_MARKERS), ("phrase", CHALLENGE_PHRASES),
+              ("widget", CAPTCHA_WIDGETS))
+    return {
+        "verdict": detect_captcha(content),
+        "text_length": len(text),
+        "short_page": len(text) <= MAX_CHALLENGE_TEXT_LENGTH,
+        "matches": [f"{kind}: {label} ({marker!r})"
+                    for kind, signatures in groups
+                    for label, markers in signatures
+                    for marker in markers if marker in markup],
+    }
 
 
 def _find(markup: str, signatures: tuple[Signature, ...]) -> Optional[str]:

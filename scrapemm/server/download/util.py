@@ -65,6 +65,10 @@ def looks_like_video_file_url(url: str) -> bool:
     return urlparse(url).path.lower().endswith(VIDEO_FILE_EXTENSIONS)
 
 
+def looks_like_pdf_url(url: str) -> bool:
+    return urlparse(url).path.lower().endswith(".pdf")
+
+
 # Hosts whose iframes embed a video that yt-dlp can download. Deliberately a short
 # allowlist of actual video platforms: pages carry plenty of other iframes (ads, comment
 # widgets, maps), and running yt-dlp on each of them would cost a lot of time for nothing.

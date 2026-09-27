@@ -88,9 +88,10 @@ const ICONS: Record<string, string> = {
   'perma.cc': 'i-fa7-solid-link',
   'archive.today': 'i-fa7-solid-box-archive',
   'internet archive': 'i-fa7-solid-building-columns',
-  'headed browser': 'i-fa7-solid-window-maximize',
   'ghostarchive': 'i-fa7-solid-ghost',
   'awesomescreenshot': 'i-fa7-solid-camera',
+  'ncbi': 'i-fa7-solid-book-medical',
+  'browser': 'i-fa7-solid-window-maximize',
   'firecrawl': 'i-fa7-solid-fire',
   'decodo': 'i-fa7-solid-tower-broadcast',
 }

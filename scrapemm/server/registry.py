@@ -14,6 +14,7 @@ are literally the same one.
 
 import logging
 import shutil
+import threading
 import time
 import os
 import re
@@ -138,34 +139,74 @@ def resolve_item(kind: str, identifier: int) -> Optional[Item]:
 # How long a measured size is served before the tree is walked again
 USAGE_TTL = 60.0
 
-_usage_cache: tuple[float, Optional[dict]] = (0.0, None)
+# A walk is never repeated sooner than this many times its own duration, so a registry
+# of millions of files is not re-measured back to back
+WALK_COST_FACTOR = 10
+
+_usage: Optional[dict] = None  # The last complete measurement
+_walk_duration = 0.0
+_walk_lock = threading.Lock()
+_walking = False
 
 
 def usage(max_age: float = USAGE_TTL) -> dict:
-    """Size of the registry, for the dashboard.
+    """Size of the registry, for the dashboard. Returns at once, always.
 
-    Walking the tree is O(files) and the dashboard asks on every load, so the answer is
-    cached: a media directory that grew by a few megabytes in the last minute is not
-    something anybody is watching that closely.
+    Walking the tree is O(files), and a lab's registry holds millions of them: done in
+    the request, it stalled the whole server for as long as the walk took. So this only
+    ever answers from the last measurement and, when that is older than `max_age`, has
+    a new one taken in the background. Until the first walk is done, the sizes are None.
     """
-    global _usage_cache
-    measured_at, cached = _usage_cache
-    if cached is not None and time.time() - measured_at < max_age:
-        return cached
+    refresh(max_age)
+    measured = _usage or {"bytes": None, "files": None, "measured_at": None}
+    # The free space is one statvfs call, so it is always current
+    return {"root": str(registry_root()), "host_root": HOST_DIR, **measured, **_disk_usage()}
 
-    total, count = 0, 0
-    for path in registry_root().rglob("*"):
-        if path.is_file():
+
+def refresh(min_age: float = USAGE_TTL) -> bool:
+    """Starts a background walk unless one is running or the last one is younger than
+    `min_age` (or than its own cost allows). Returns True only if it started one: a walk
+    already under way may have begun before the files a caller wants counted."""
+    global _walking
+    with _walk_lock:
+        if _walking:
+            return False
+        measured_at = (_usage or {}).get("measured_at") or 0.0
+        if time.time() - measured_at < max(min_age, WALK_COST_FACTOR * _walk_duration):
+            return False
+        _walking = True
+    threading.Thread(target=_walk, name="media-usage", daemon=True).start()
+    return True
+
+
+def _walk() -> None:
+    global _usage, _walk_duration, _walking
+    started = time.time()
+    try:
+        total, count = 0, 0
+        pending = [str(registry_root())]
+        while pending:
             try:
-                total += path.stat().st_size
-                count += 1
+                with os.scandir(pending.pop()) as entries:
+                    for entry in entries:
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                pending.append(entry.path)
+                            elif entry.is_file(follow_symlinks=False):
+                                total += entry.stat(follow_symlinks=False).st_size
+                                count += 1
+                        except OSError:
+                            continue
             except OSError:
                 continue
-
-    cached = {"root": str(registry_root()), "host_root": HOST_DIR, "bytes": total,
-              "files": count, "measured_at": time.time(), **_disk_usage()}
-    _usage_cache = (time.time(), cached)
-    return cached
+        _usage = {"bytes": total, "files": count, "measured_at": time.time()}
+        _walk_duration = time.time() - started
+        logger.debug(f"Measured the media registry: {count} files in {_walk_duration:.1f}s.")
+    except Exception:
+        logger.debug("Measuring the media registry failed.", exc_info=True)
+    finally:
+        with _walk_lock:
+            _walking = False
 
 
 def _disk_usage() -> dict:

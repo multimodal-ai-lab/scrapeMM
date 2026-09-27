@@ -21,6 +21,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# A restarted container keeps its filesystem, and with it the lock of the Xvfb that ran
+# before. Xvfb then refuses to start ("Server is already active for display 99"). This
+# script is the container's first process, so no display of ours can be running yet:
+# whatever lock is there is stale.
+DISPLAY_NUMBER="${DISPLAY#:}"
+DISPLAY_NUMBER="${DISPLAY_NUMBER%%.*}"
+rm -f "/tmp/.X${DISPLAY_NUMBER}-lock" "/tmp/.X11-unix/X${DISPLAY_NUMBER}"
+
+# A container that is restarted (rather than recreated), e.g. when Docker itself
+# restarts, keeps /tmp -- including the lock of the Xvfb that died with it. Xvfb then
+# refuses to start ("Server is already active") and the container restart-loops. No
+# other X server ever runs in here, so any lock left over is stale.
+rm -f "/tmp/.X${DISPLAY#:}-lock" "/tmp/.X11-unix/X${DISPLAY#:}"
+
 echo "Starting Xvfb on ${DISPLAY} (${SCREEN_SIZE})..."
 # Xvfb recompiles its keymap on start and whenever a client (x11vnc) connects, and
 # xkbcomp complains each time about keysyms the image's keyboard data lacks. Harmless,
@@ -30,18 +44,28 @@ Xvfb "$DISPLAY" -screen 0 "$SCREEN_SIZE" -nolisten tcp \
 XVFB_PID=$!
 
 # Wait for the display to accept connections before anything tries to use it
+DISPLAY_READY=false
 for _ in $(seq 1 50); do
-    if xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then break; fi
+    if xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; then DISPLAY_READY=true; break; fi
     sleep 0.2
 done
 
-echo "Starting x11vnc on 127.0.0.1:${VNC_PORT}..."
-# -forever: keep serving after a viewer disconnects, so the panel can be reopened
-# -shared: several viewers may watch at once
-# -nopw with -localhost: the socket is reachable only from inside the container; the
-#   web UI's own API key is what actually guards it
-x11vnc -display "$DISPLAY" -rfbport "$VNC_PORT" -localhost -forever -shared \
-       -nopw -quiet -bg -o /tmp/x11vnc.log >/dev/null  # -bg would echo "PORT=..."
+# Neither the display nor VNC may keep the server from starting: without them only the
+# headed browser and the CAPTCHA panel are unavailable, and the dashboard says so.
+# Failing here instead (as `set -e` would) makes the container restart forever
+# without ever serving the UI or the API.
+if [[ "$DISPLAY_READY" == true ]]; then
+    echo "Starting x11vnc on 127.0.0.1:${VNC_PORT}..."
+    # -forever: keep serving after a viewer disconnects, so the panel can be reopened
+    # -shared: several viewers may watch at once
+    # -nopw with -localhost: the socket is reachable only from inside the container; the
+    #   web UI's own API key is what actually guards it
+    x11vnc -display "$DISPLAY" -rfbport "$VNC_PORT" -localhost -forever -shared \
+           -nopw -quiet -bg -o /tmp/x11vnc.log >/dev/null \
+        || echo "WARNING: x11vnc failed to start (see /tmp/x11vnc.log); the CAPTCHA panel is unavailable." >&2
+else
+    echo "WARNING: The display ${DISPLAY} did not come up; the headed browser and the CAPTCHA panel are unavailable." >&2
+fi
 VNC_PID=""
 
 echo "Starting scrapeMM on port ${PORT}..."

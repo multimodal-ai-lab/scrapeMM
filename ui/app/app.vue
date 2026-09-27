@@ -21,8 +21,10 @@ const links = [
   { label: 'Dashboard', icon: 'i-fa7-solid-gauge-high', to: '/' },
   { label: 'Playground', icon: 'i-fa7-solid-play', to: '/playground' },
   { label: 'Jobs', icon: 'i-fa7-solid-clock-rotate-left', to: '/jobs' },
+  { label: 'Test', icon: 'i-fa7-solid-flask', to: '/test' },
   { label: 'CAPTCHA', icon: 'i-fa7-solid-shield-halved', to: '/captcha' },
   { label: 'Blacklist', icon: 'i-fa7-solid-ban', to: '/blacklist' },
+  { label: 'Logs', icon: 'i-fa7-solid-terminal', to: '/logs' },
   { label: 'Secrets', icon: 'i-fa7-solid-key', to: '/secrets' },
   { label: 'Settings', icon: 'i-fa7-solid-gear', to: '/settings' },
 ]
@@ -151,7 +153,10 @@ async function signIn() {
         class="flex-1 p-6 overflow-x-hidden min-w-0 transition-[margin] duration-200 ease-out"
         :class="collapsed ? 'ml-16' : 'ml-56'"
       >
-        <NuxtPage />
+        <!-- The jobs overview is kept alive: coming back from a job shows it exactly as
+             it was left -- filters, sorting, everything loaded and the scroll position,
+             which the router restores once the page is there again -->
+        <NuxtPage :keepalive="{ include: ['JobsOverview'] }" />
       </main>
     </div>
   </UApp>

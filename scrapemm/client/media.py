@@ -98,10 +98,51 @@ async def resolve_content(content: ContentPayload,
 
     mode = resolve_mode(registry, preference)
     if mode == "shared":
+        _adopt_shared(content.items, registry)
         return MultimodalSequence(content.multimodal)
 
     items = await _materialize(content.items, mode, registry, session, base_url, headers)
     return MultimodalSequence(_remap(content.multimodal, items))
+
+
+def _adopt_shared(descriptors: list[ItemDescriptor], registry: RegistryInfo) -> None:
+    """Puts the shared registry's items into this process' item cache at *local* paths.
+
+    ezMM stores absolute paths, and a containerised server writes its own
+    (`/data/media/...`), which do not exist out here. Loaded from the database, each of
+    those items would be "healed": a warning, and the local path written back into the
+    shared registry, from where the server would heal it back again. ezMM consults its
+    cache before the database, so an item placed there correctly is never read -- and
+    never rewritten.
+    """
+    local_root = Path(item_registry.path)
+    for descriptor in descriptors:
+        item_cls = KIND2ITEM.get(descriptor.kind)
+        if item_cls is None or item_registry._get_cached(descriptor.kind, descriptor.id):
+            continue
+        path = _local_path(descriptor, registry, local_root)
+        if path is None:
+            continue  # ezMM's own handling applies, as before
+        item = item_cls(file_path=path, source_url=descriptor.source_url, id=descriptor.id)
+        item_registry._add_to_cache(item, descriptor.id)
+
+
+def _local_path(descriptor: ItemDescriptor, registry: RegistryInfo,
+                local_root: Path) -> Optional[Path]:
+    """Where a shared item's file is on this machine. It is the same registry, so the
+    path relative to the server's root is the path relative to ours."""
+    candidates = []
+    if descriptor.path:
+        if registry.root:
+            try:
+                candidates.append(local_root / Path(descriptor.path).relative_to(registry.root))
+            except ValueError:
+                pass
+        candidates.append(Path(descriptor.path))
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
 
 
 async def _materialize(descriptors: list[ItemDescriptor], mode: str,

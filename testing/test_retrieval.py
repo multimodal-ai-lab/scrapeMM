@@ -18,6 +18,9 @@ pytestmark = pytest.mark.server
     ("https://factcheck.afp.com/doc.afp.com.B44R6WE", dict(image=4)),
     ("https://leadstories.com/365cb414b83e29d26fecae374d55c743a3eac4c7.png", dict(image=1)),
     ("https://leadstories.com/assets_c/2025/08/193f14f06dd6f15b89bf8050e553ad7fb1be6530-thumb-900xauto-3165872.png", dict(image=1)),
+    ("http://archive.premier.gov.ru/eng/events/news/9424/", dict(image=1)),  # HTTP only, drops excess connections
+    ("https://www.congress.gov/bill/119th-congress/senate-bill/1383", dict()),  # Behind a Cloudflare challenge
+    ("https://www.nytimes.com/2026/03/01/world/middleeast/iran-strikes-us-military-facilities.html#:~:text=Video%20verified%20by,Video", dict(image=1)),  # Metered paywall, article in the HTML
 ])
 async def test_generic_retrieval(url: str, expected: dict[str, int]):
     result = await retrieve(url)

@@ -8,8 +8,8 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional, Awaitable, Iterable, Union, TYPE_CHECKING
-from urllib.parse import unquote, urljoin
+from typing import Optional, Awaitable, Callable, Iterable, Union, TYPE_CHECKING
+from urllib.parse import unquote, urljoin, urlparse
 
 import aiohttp
 import tqdm
@@ -20,14 +20,13 @@ from markdownify import markdownify as md
 from playwright.async_api import APIRequestContext, Page, Frame
 
 from scrapemm.server.download import download_video, download_image
-from scrapemm.server.download.images import image_from_binary
 from scrapemm.server.download.util import (
     looks_like_image_file_url,
     looks_like_vector_file_url,
     looks_like_video_embed_url,
 )
-from scrapemm.server.download.videos import (video_from_binary, download_hls_video, is_hls,
-                                      _resolve_ffmpeg_path, _resolve_ffprobe_path)
+from scrapemm.server.download.browser import BrowserMedia, BLOB_ATTR, BLOB_SCHEME, CURRENT_ATTR
+from scrapemm.server.download.videos import _resolve_ffmpeg_path, _resolve_ffprobe_path
 
 if TYPE_CHECKING:
     from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
@@ -103,6 +102,10 @@ def read_urls_from_file(file_path):
 
 
 MAX_MEDIA_PER_PAGE = 32
+# Concurrent media downloads per host. Some servers silently drop connection attempts
+# beyond a couple at once, which costs 7 s of TCP retries each (archive.premier.gov.ru).
+# Measured no slower on image-heavy pages than 4 or 6: the connections get reused.
+MAX_MEDIA_PER_HOST = 2
 URL_REGEX = r"https?:\/\/(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9@:%_\+.~#?&//=]*)"
 DATA_URI_REGEX = r"data:([\w/+.-]+/[\w.+-]+);base64,([A-Za-z0-9+/=]+)"
 MD_HYPERLINK_REGEX = rf'(!?\[([^]^[]*)\]\((.*?)(?: "[^"]*")?\))'
@@ -292,7 +295,7 @@ def _resolve_media_url(uri: str, page_url: Optional[str], domain_root: Optional[
     are returned unchanged.
     """
     uri = uri.strip()
-    if not uri or uri.startswith("data:"):
+    if not uri or uri.startswith(("data:", BLOB_SCHEME)):
         return uri
     if uri.startswith("//"):
         return _normalize_media_url(uri)
@@ -333,6 +336,10 @@ def _extract_media_elements(soup: BeautifulSoup) -> list[Tag]:
             media_elements.append(element)
 
     for element in soup.find_all("img"):
+        if blob := element.get(BLOB_ATTR):
+            element["src"] = BLOB_SCHEME + str(blob)  # Fetched in the browser already
+            _add(element)
+            continue
         src = _best_image_src(element)
         # Skip vector graphics
         if src and looks_like_vector_file_url(src):
@@ -366,12 +373,19 @@ def _extract_media_elements(soup: BeautifulSoup) -> list[Tag]:
 
     # For videos, include either the src attribute (higher precedence) or the first source element
     for video in soup.find_all("video"):
-        if src := _best_video_src(video):
+        if blob := video.get(BLOB_ATTR):
+            video["src"] = BLOB_SCHEME + str(blob)  # Fetched in the browser already
+            _add(video)
+        elif src := _best_video_src(video):
             video["src"] = src
             _add(video)
         elif source := video.find("source"):
-            if src := _best_video_src(source):
+            if blob := source.get(BLOB_ATTR):
+                source["src"] = BLOB_SCHEME + str(blob)
+            elif src := _best_video_src(source):
                 source["src"] = src
+            if current := video.get(CURRENT_ATTR):
+                source[CURRENT_ATTR] = current  # The <video> is about to be replaced
             _add(source)
             # In the HTML DOM, replace the video node with the source node to ensure a clean output
             video.replace_with(source)
@@ -425,12 +439,23 @@ async def resolve_media(
         session: Union[aiohttp.ClientSession, "APIRequestContext"],
         url: str | None = None,
         source_element: Union[Frame, Page, None] = None,
+        media: Optional[BrowserMedia] = None,
         max_video_size: Optional[int] = None,
+        on_browser_done: Optional[Callable[[], Awaitable]] = None,
         **kwargs
 ) -> MultimodalSequence:
     """Downloads all media that are contained in the provided HTML.
     Removes images that are smaller than 256 x 256. Replaces the
-    respective HTML elements with their proper item reference."""
+    respective HTML elements with their proper item reference.
+
+    If the HTML comes from a browser page, `source_element` is the frame it was taken
+    from and `media` the page's `BrowserMedia`: media are then taken from the browser,
+    see there. `on_browser_done` is awaited as soon as the only downloads left are
+    those that need no page (embedded players, via yt-dlp), so the caller can close the
+    page meanwhile. Awaited only if there are media at all."""
+    if source_element is not None and media is None:
+        page = source_element if isinstance(source_element, Page) else source_element.page
+        media = BrowserMedia(page)  # Sees no past responses, but still fetches via the browser
     soup = BeautifulSoup(html, "html.parser")
     domain_root = get_domain_root(url) if url else None
 
@@ -448,6 +473,8 @@ async def resolve_media(
     # 3. Normalize URLs and prepare tasks for remaining elements
     tasks = []
     unique_urls = []  # We use a list to map normalized URLs to their download result to avoid duplicate downloads
+    pageless: set[str] = set()  # Downloads that need no browser page
+    in_browser: set[str] = set()  # Media the browser holds already: no server is asked for them
 
     # Normalize URLs in URI list. Pages reference media protocol-relative (//cdn/x.jpg),
     # root-relative (/x.jpg) and document-relative (img/x.jpg); resolving only the
@@ -458,28 +485,60 @@ async def resolve_media(
 
     # Create retrieval tasks for URL elements
     for element, uri in zip(media_elements, media_uris):
-        if uri and is_url(uri) and uri not in unique_urls:
+        stashed = bool(uri) and uri.startswith(BLOB_SCHEME)
+        if uri and (is_url(uri) or stashed and media) and uri not in unique_urls:
+            # The URL the browser rendered the medium from, if it differs
+            rendered = element.get(CURRENT_ATTR)
+            # A stashed Blob has no URL of its own; it came from this page
+            source_url = url if stashed else None
             if element.name == "iframe":
                 tasks.append(download_embedded_video(uri, session=session,
                                                      max_video_size=max_video_size))
+                pageless.add(uri)
             elif element.name in ["video", "source"]:
-                if source_element:
-                    tasks.append(fetch_video_via_page(source_element, uri))
+                if media:
+                    tasks.append(media.fetch_video(uri, source_element, fallback=rendered,
+                                                   max_size=max_video_size, source_url=source_url))
                 else:
                     tasks.append(
                         download_video(uri, session=session, max_video_size=max_video_size,
                                        headers={"Referer": url} if url else {}, **kwargs))
             else:  # It's an image
-                if source_element:
-                    tasks.append(fetch_image_via_page(source_element, uri, **kwargs))
+                if media:
+                    tasks.append(media.fetch_image(uri, source_element, fallback=rendered,
+                                                   source_url=source_url, **kwargs))
                 else:
                     tasks.append(
                         download_image(uri, session=session, headers={"Referer": url} if url else {}, **kwargs))
             unique_urls.append(uri)
+            if media and (stashed or media.has_copy(uri)):
+                in_browser.add(uri)
 
-    # 4. Download media
-    media_results = await run_with_semaphore(tasks, limit=20, show_progress=False)
-    url_to_medium = dict(zip(unique_urls, media_results))
+    # 4. Download media, at most a few at a time from each host, like a browser does
+    host_gates: dict[str, asyncio.Semaphore] = {}
+
+    async def gated(uri: str, task: Awaitable):
+        if uri in in_browser:
+            return await task
+        gate = host_gates.setdefault(urlparse(uri).netloc, asyncio.Semaphore(MAX_MEDIA_PER_HOST))
+        async with gate:
+            return await task
+
+    # Those that need no page start right away, but are not waited for before the page
+    # can be let go: an embedded video may take minutes (or retry its way to failure)
+    later = [(uri, task) for uri, task in zip(unique_urls, tasks) if uri in pageless]
+    now = [(uri, task) for uri, task in zip(unique_urls, tasks) if uri not in pageless]
+    later_results = asyncio.ensure_future(run_with_semaphore(
+        [gated(uri, task) for uri, task in later], limit=20, show_progress=False))
+    try:
+        now_results = await run_with_semaphore(
+            [gated(uri, task) for uri, task in now], limit=20, show_progress=False)
+        if on_browser_done is not None:
+            await on_browser_done()
+        url_to_medium = dict(zip([uri for uri, _ in now], now_results))
+        url_to_medium.update(zip([uri for uri, _ in later], await later_results))
+    finally:
+        later_results.cancel()  # No-op once done
 
     # 5. Add downloaded media to resolved_media
     for i, uri in enumerate(media_uris):
@@ -524,105 +583,6 @@ async def resolve_media(
             element.decompose()
 
     return MultimodalSequence(str(soup))
-
-
-# Fetches a resource from within the frame so replay/archive service workers
-# intercept it (the shared request context and top document escape that scope).
-# The Blob is encoded via the browser-native FileReader; Blobs are disk-backed in
-# Chromium, so this stays memory-friendly for large video. Base64 is required
-# because Playwright's evaluate can only return JSON-serializable values, so
-# binary cannot cross the CDP boundary directly.
-_IN_FRAME_FETCH_JS = """
-async (url) => {
-    const resp = await fetch(url, { credentials: 'include' });
-    if (!resp.ok) return { ok: false, status: resp.status };
-    const blob = await resp.blob();
-    const dataUrl = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = () => reject(reader.error);
-        reader.readAsDataURL(blob);
-    });
-    return { ok: true, dataUrl, contentType: resp.headers.get('content-type') };
-}
-"""
-
-
-async def _retrieve_media_bytes(
-        source_element: Union[Frame, Page],
-        url: str,
-        timeout: float = 180.0,
-) -> tuple[Optional[bytes], Optional[str]]:
-    """Retrieves the raw bytes of a media URL using the browser's authenticated
-    session, without navigating a tab (which hangs forever on streamed video).
-
-    Two strategies are tried, in order of archive/anti-bot fidelity:
-      1. In-frame ``fetch()`` executed inside ``source_element`` (the frame that
-         renders the media). Running the request in that exact frame is essential
-         for replay-based archives (e.g. Ghostarchive / ReplayWeb.page), where
-         archived media is served by a service worker whose scope only covers the
-         replay ``iframe``; a request from the top document or from the shared
-         request context escapes that scope and 404s against the live web.
-      2. Playwright's shared ``APIRequestContext`` (``context.request``), which
-         reuses the browser context's cookies. Used as a fallback for cross-origin
-         media the in-frame fetch cannot read (e.g. blocked by CORS).
-
-    Returns a ``(content, content_type)`` tuple; ``content`` is ``None`` on failure.
-    """
-    # Strategy 1: in-frame fetch inside the frame that renders the media
-    try:
-        result = await asyncio.wait_for(source_element.evaluate(_IN_FRAME_FETCH_JS, url), timeout=timeout)
-        if result and result.get("ok"):
-            content = base64.b64decode(result["dataUrl"].partition(",")[2])
-            if content:
-                logger.debug(f"Retrieved {url} via in-frame fetch ({len(content)} bytes)")
-                return content, result.get("contentType")
-        else:
-            logger.debug(f"In-frame fetch failed for {url}: {result}")
-    except asyncio.TimeoutError:
-        logger.debug(f"In-frame fetch timed out for {url}")
-    except Exception:
-        logger.debug(f"In-frame fetch error for {url}", exc_info=True)
-
-    # Strategy 2: shared request context (for cross-origin media not reachable in-frame)
-    page = source_element if isinstance(source_element, Page) else source_element.page
-    try:
-        response = await page.context.request.get(url, timeout=timeout * 1000)
-        if response.ok:
-            content = await response.body()
-            logger.debug(f"Retrieved {url} via request context ({len(content)} bytes)")
-            return content, response.headers.get("content-type")
-        logger.debug(f"Request-context fetch failed for {url}: HTTP {response.status}")
-    except Exception:
-        logger.debug(f"Request-context fetch error for {url}", exc_info=True)
-
-    return None, None
-
-
-async def get_url_content_via_page(source_element: Union[Frame, Page], url: str) -> Optional[bytes]:
-    content, _ = await _retrieve_media_bytes(source_element, url)
-    return content
-
-
-async def fetch_image_via_page(source_element: Union[Frame, Page], url: str, **kwargs) -> Optional[Image]:
-    content = await get_url_content_via_page(source_element, url)
-    return image_from_binary(content, source_url=url, **kwargs) if content else None
-
-
-async def fetch_video_via_page(
-        source_element: Union[Frame, Page],
-        url: str,
-        timeout: float = 180.0,
-) -> Optional[Video]:
-    content, content_type = await _retrieve_media_bytes(source_element, url, timeout=timeout)
-
-    # HLS playlists are plain text manifests, not raw video: remux via ffmpeg,
-    # reusing the shared request context so segment downloads stay authenticated.
-    if content_type and is_hls(content_type):
-        page = source_element if isinstance(source_element, Page) else source_element.page
-        return await download_hls_video(url, session=page.context.request)
-
-    return video_from_binary(content, source_url=url) if content else None
 
 
 def is_url(href: str) -> bool:
@@ -682,11 +642,13 @@ async def to_scraped_content(
     if output_format == "html":
         return content
 
-    content.markdown = html2md(html)
     if output_format == "markdown":
+        content.markdown = html2md(html)
         return content
 
     content.multimodal = await to_multimodal_sequence(html, session=session, **kwargs)
+    # After the media: a browser page is closed by then (see `resolve_media()`)
+    content.markdown = html2md(html)
     return content
 
 
@@ -765,11 +727,16 @@ async def normalize_video(video: Video) -> bool:
         if not meta:
             return False
 
+        try:
+            duration = float(meta.get("format", {}).get("duration") or 0)
+        except ValueError:
+            duration = 0
         if is_browser_safe(meta):
             # Already playable; only move the moov atom to the front so that players
             # can start before the whole file has arrived. Streams are copied, not
             # re-encoded, so this is cheap.
             cmd = ["-i", str(input_path), "-c", "copy", "-movflags", "+faststart"]
+            timeout = 60 + duration * 0.1 if duration else 300
         else:
             # Re-encode to the canonical browser format
             cmd = [
@@ -784,6 +751,10 @@ async def normalize_video(video: Video) -> bool:
                 "-b:a", "128k",
                 "-movflags", "+faststart",
             ]
+            # libx264 runs several times faster than real time on a server core;
+            # allow for slow, busy machines all the same
+            timeout = 120 + duration * 2 if duration else 1800
+        timeout = min(timeout, 3 * 3600)
 
         ffmpeg = _resolve_ffmpeg_path()
         if not ffmpeg:
@@ -791,7 +762,7 @@ async def normalize_video(video: Video) -> bool:
             return False
 
         result = await run_command_async([ffmpeg, "-y", "-loglevel", "error", "-hide_banner",
-                                          *cmd, str(temp_path)])
+                                          *cmd, str(temp_path)], timeout=timeout)
         if result is None or not temp_path.exists() or temp_path.stat().st_size == 0:
             logger.warning(f"Could not normalize video {input_path}.")
             temp_path.unlink(missing_ok=True)
@@ -804,6 +775,9 @@ async def normalize_video(video: Video) -> bool:
         logger.warning(f"Error normalizing video {input_path}: {type(e).__name__}: {e}")
         temp_path.unlink(missing_ok=True)
         return False
+    except asyncio.CancelledError:
+        temp_path.unlink(missing_ok=True)  # ffmpeg was killed by run_command_async()
+        raise
 
 
 def _replace_item_file(item: Item, new_file: Path) -> None:
@@ -820,19 +794,30 @@ def _replace_item_file(item: Item, new_file: Path) -> None:
         item_registry.update_file_path(item)
 
 
-async def run_command_async(cmd: list[str]) -> Optional[bytes]:
+async def run_command_async(cmd: list[str], timeout: float = 300) -> Optional[bytes]:
     """Runs a command without blocking the event loop. Returns its stdout,
-    or None if the command failed."""
+    or None if the command failed or did not finish within `timeout` seconds,
+    in which case it is killed: a hung ffmpeg once ran for 53 days."""
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.DEVNULL,  # ffmpeg reads stdin for commands otherwise
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await process.communicate()
     except (FileNotFoundError, OSError) as e:
         logger.debug(f"Could not run {cmd[0]}: {e}")
         return None
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout)
+    except BaseException as e:  # Timeout, or the retrieval was cancelled
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        if isinstance(e, asyncio.TimeoutError):
+            logger.warning(f"Killed {Path(cmd[0]).name} after {timeout:.0f} s without finishing.")
+            return None
+        raise
 
     if process.returncode != 0:
         detail = stderr.decode("utf-8", errors="replace").strip() if stderr else ""
@@ -862,7 +847,7 @@ async def probe_video(path: Path) -> dict | None:
         "-show_streams",
         "-show_format",
         str(path),
-    ])
+    ], timeout=30)
     if stdout:
         try:
             return json.loads(stdout)

@@ -1,10 +1,19 @@
+import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Union, TYPE_CHECKING
 
 import aiohttp
 
 if TYPE_CHECKING:
     from playwright.async_api import APIRequestContext
+
+try:
+    # At import, i.e. server start: loading curl's native library takes about a second,
+    # which inside a request would stall the event loop
+    from curl_cffi.requests import Session as CurlSession
+except ImportError:
+    CurlSession = None
 
 from scrapemm.server.download.common import ssl_context, RELAXED_SSL_DOMAINS, BROWSER_TLS_DOMAINS
 from scrapemm.server.download.util import stream, MediaTooLarge
@@ -25,25 +34,45 @@ MEDIA_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=20)
 _CURL_CFFI_IMPERSONATIONS = ("chrome124", "chrome", "safari")
 
 
+# Per attempt. curl's own default would let a stalled request hold its thread for long.
+CURL_CFFI_TIMEOUT = 30
+
+# Its own threads: in the default pool, curl requests would queue behind yt-dlp
+# downloads, which can take minutes each
+_curl_executor = ThreadPoolExecutor(max_workers=16, thread_name_prefix="curl-cffi")
+
+
 async def _request_via_curl_cffi(
         url: str,
         headers: Optional[dict] = None,
 ) -> Optional[tuple[int, dict, bytes]]:
-    """GET ``url`` with browser TLS impersonation. Returns (status, headers, body) or None."""
-    try:
-        from curl_cffi.requests import AsyncSession
-    except ImportError:
+    """GET ``url`` with browser TLS impersonation. Returns (status, headers, body) or None.
+
+    Runs curl_cffi's *synchronous* client in a worker thread. Its async client drives
+    curl's sockets through the server's event loop (`loop.add_reader`), and when the OS
+    hands a socket number to curl that the loop still attributes to one of its own
+    connections, the loop refuses ("File descriptor N is used by transport"). That
+    failure happens inside curl's socket callback and leaves curl_cffi's shared transfer
+    loop broken, so every later request through it hung and the server stopped
+    recovering. In a thread, curl does its own I/O and never touches the event loop.
+    """
+    if CurlSession is None:
         logger.debug("curl_cffi not available; cannot bypass bot-gated 403 for %s", url)
         return None
+    return await asyncio.get_running_loop().run_in_executor(
+        _curl_executor, _request_via_curl_cffi_sync, url, headers)
 
-    async with AsyncSession() as session:
+
+def _request_via_curl_cffi_sync(url: str, headers: Optional[dict]) -> Optional[tuple[int, dict, bytes]]:
+    with CurlSession() as session:
         for impersonate in _CURL_CFFI_IMPERSONATIONS:
             try:
-                response = await session.get(
+                response = session.get(
                     url,
                     impersonate=impersonate,
                     headers=headers or {},
                     allow_redirects=True,
+                    timeout=CURL_CFFI_TIMEOUT,
                 )
                 status = response.status_code
                 hdrs = dict(response.headers)

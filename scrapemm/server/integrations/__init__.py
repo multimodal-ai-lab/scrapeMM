@@ -14,9 +14,10 @@ from .x import X
 from .youtube import YouTube
 from .perma_cc import PermaCC
 from .archive_today import ArchiveToday
-from .headed_browser import HeadedBrowser
+from .headed_browser import HeadedBrowser, Browser
 from .ghostarchive import Ghostarchive
 from .awesomescreenshot import AwesomeScreenshot
+from .ncbi import NCBI
 
 RETRIEVAL_INTEGRATIONS = [
     X(),
@@ -31,10 +32,14 @@ RETRIEVAL_INTEGRATIONS = [
     PermaCC(),
     ArchiveToday(),
     ArchiveOrg(),
-    HeadedBrowser(),
     Ghostarchive(),
-    AwesomeScreenshot()
+    AwesomeScreenshot(),
+    NCBI(),
 ]
+
+# The Browser method: the shared headed browser on any page of the open web. A method
+# like Firecrawl and Decodo, not an integration, so it is tied to no domain.
+browser = Browser()
 
 DOMAIN_TO_INTEGRATION = {
     domain: integration

@@ -56,9 +56,9 @@ scrapeMM is split in two:
   configuring integrations, watching their status, trying URLs and solving CAPTCHAs.
 * **The client** is the `scrapeMM` package on PyPI. It talks to the server over API requests.
 
-In its core, scrapeMM is a layer on top of the scraping services [Firecrawl](https://github.com/mendableai/firecrawl)
-and [Decodo](https://decodo.com/), with additional integrations for social media and
-archiving services. Media are handled with in-line references in the Markdown string, managed by [ezMM](https://github.com/multimodal-ai-lab/ezmm).
+In its core, scrapeMM retrieves the open web with its own browser, a real Chromium on the
+server, falling back to the scraping services [Firecrawl](https://github.com/mendableai/firecrawl)
+and [Decodo](https://decodo.com/). Additional integrations cover social media and archiving services. Media are handled with in-line references in the Markdown string, managed by [ezMM](https://github.com/multimodal-ai-lab/ezmm).
 
 ## 🚀 Running a server
 Copy the `.env.example` file to `.env` and edit it to suit your needs. Then, run
@@ -185,14 +185,14 @@ yourself when you decide to, and expect older sequences to lose their media when
 | **Dashboard** | Whether each retrieval method can be used right now, and which secret it is missing if not. Plus FFmpeg, the browser and disk usage. |
 | **Playground** | Try URLs and watch the results stream in, rendered with their media. |
 | **Jobs** | Every retrieval this server has run, with per-URL outcomes and the content it produced. |
-| **CAPTCHA** | The backlog of gated URLs, and the solver panel. |
+| **CAPTCHA** | One challenge per gated site with its waiting URLs: solve it in the server's browser, or discard it. |
 | **Secrets** | Set the API credentials. Write-only: the server never gives a value back. |
 | **Settings** | Firecrawl endpoints, hedging, cache and blacklist lifetimes, the domain blacklist. Regenerating the API key (unless `SCRAPEMM_API_KEY` sets it). |
 
 Every card on the dashboard carries its own status colour and names the missing secrets
-as chips you can go and fill in. Firecrawl and Decodo get cards too, even though they are
-scraping methods rather than per-platform integrations, and each card counts the URLs it
-has retrieved.
+as chips you can go and fill in. The Browser, Firecrawl and Decodo get cards too, even though
+they are general retrieval methods rather than per-platform integrations, and each card counts
+the URLs it has retrieved.
 
 | Colour | Means |
 |---|---|
@@ -225,18 +225,30 @@ Settings, or clear the cache there.
 ## 🤖 CAPTCHAs and blacklisted domains
 
 Every scraped page is checked for CAPTCHA challenges (Cloudflare, reCAPTCHA, hCaptcha,
-DataDome, AWS WAF, PerimeterX and others). If a challenge was served instead of the page,
-the response carries a `CaptchaEncounteredError` and the domain goes on a blacklist;
-retrieving any URL of that domain then fails right away with an `UnsupportedDomainError`
-saying why.
+DataDome, AWS WAF, PerimeterX and others). If *all* methods for a URL failed and one of
+them was served a challenge, the response carries a `CaptchaEncounteredError` and the
+site gets a **challenge** on the **CAPTCHA** page of the web UI: the URL waits there, and
+so does every further URL of that site, instead of being scraped into the same check
+again. Per challenge you decide:
 
-A domain is blacklisted only if *all* methods failed, so a CAPTCHA on one method does not
-exclude a domain another method can still scrape. Automatic blacklistings **expire after 7
-days** — CAPTCHA gates are often transient, and excluding a domain forever would quietly
-erode coverage. Domains you add yourself under Settings are permanent: they express a
-decision, not an observation. Domains served by an integration (`perma.cc`,
-`archive.today`, `x.com`, …) are never blacklisted automatically, since that would disable
-the integration for good.
+* **Solve** — the server's own browser opens the page in the panel and you pass the check.
+  The waiting URLs are then retrieved with that browser, whose profile keeps the clearance,
+  and cached: request them again to get the content.
+* **Discard** — the waiting URLs are dropped and the site is blacklisted.
+* **Retry** — retrieve the waiting URLs without solving, while an earlier clearance is
+  still valid.
+
+Archive.today appears in the same list; it keeps its own machinery underneath, including
+a permanent cache of every snapshot it retrieved.
+
+Blacklistings from a discarded challenge **expire after 7 days**, since CAPTCHA gates are
+often transient. Domains you add yourself under Settings are permanent: they express a
+decision, not an observation. Domains served by an integration (`perma.cc`, `x.com`, …)
+get challenges too but are never held or blacklisted, since that would disable the
+integration.
+
+Identical requests in flight at the same time (same URL, same options), say from two
+jobs, are scraped only once and share the result.
 
 ## 🏃 Speeding up retrieval
 
@@ -262,8 +274,10 @@ URL (string)   -->   retrieve()   -->   MultimodalSequence
 The `MultimodalSequence` is a sequence of Markdown-formatted text and media provided by the
 [ezMM](https://github.com/multimodal-ai-lab/ezmm) library.
 
-Web scraping is done with [Firecrawl](https://github.com/mendableai/firecrawl) and
-[Decodo](https://decodo.com/), alongside per-platform integrations.
+Web pages are retrieved, in this order, with scrapeMM's own browser (method `browser`),
+[Firecrawl](https://github.com/mendableai/firecrawl) and [Decodo](https://decodo.com/), the
+last of which is paid. PDFs skip the browser, which cannot extract their text. Per-platform
+integrations come before all three.
 
 Media is collected from `<img>` and `<video>` tags, from CSS background images, and from
 embedded players of the common video platforms (an `<iframe>` pointing at YouTube, Vimeo,

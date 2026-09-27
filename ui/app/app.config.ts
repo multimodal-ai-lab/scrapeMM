@@ -5,8 +5,9 @@ export default defineAppConfig({
       // is what made the whole surface read as dark blue. `neutral` is a true gray, so
       // the only colour left on the page is colour that means something.
       neutral: 'neutral',
-      // Interactive elements get one accent, and it is not a status colour.
-      primary: 'blue',
+      // Interactive elements get one accent, and it is not a status colour: the logo's
+      // blue (see `brand` in assets/css/main.css).
+      primary: 'brand',
       // Status colours, kept distinct from the accent so they still read as signals.
       success: 'green',
       warning: 'amber',

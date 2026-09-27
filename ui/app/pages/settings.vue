@@ -43,6 +43,9 @@ async function save() {
       cache_ttl: numberOrNull(config.value.cache_ttl),
       blacklist_ttl: numberOrNull(config.value.blacklist_ttl),
       max_concurrency: numberOrNull(config.value.max_concurrency),
+      max_browser_pages: numberOrNull(config.value.max_browser_pages),
+      youtube_min_interval: numberOrNull(config.value.youtube_min_interval),
+      youtube_cooldown: numberOrNull(config.value.youtube_cooldown),
       archive_today_interactive_solve: !!config.value.archive_today_interactive_solve,
       archive_today_screenshot_fallback: !!config.value.archive_today_screenshot_fallback,
     }
@@ -146,6 +149,24 @@ onMounted(() => {
           <UFormField label="Max concurrent URLs">
             <UInput v-model="config.max_concurrency" type="number" min="1" />
           </UFormField>
+          <UFormField
+            label="YouTube pace (s)"
+            description="Seconds between two YouTube retrievals. YouTube starts its bot check after bursts; 12 s stays under its ~300 videos an hour."
+          >
+            <UInput v-model="config.youtube_min_interval" type="number" min="0" step="1" placeholder="12" />
+          </UFormField>
+          <UFormField
+            label="YouTube pause after a bot check (s)"
+            description="How long YouTube is left alone once it asked to prove this is no bot. Asking again sooner only extends the block."
+          >
+            <UInput v-model="config.youtube_cooldown" type="number" min="0" step="60" placeholder="1800" />
+          </UFormField>
+          <UFormField
+            label="Max concurrent browser pages"
+            description="Retrievals in the server's browser (the Browser method, the archives) at once; more wait. Lower it if the server runs short of memory."
+          >
+            <UInput v-model="config.max_browser_pages" type="number" min="1" placeholder="32 (default)" />
+          </UFormField>
           <UFormField label="Cache lifetime (s)" description="0 disables the cache.">
             <UInput v-model="config.cache_ttl" type="number" min="0" />
           </UFormField>
@@ -217,7 +238,7 @@ onMounted(() => {
     <UCard v-if="media">
       <template #header><h2 class="font-medium">Media registry</h2></template>
       <p class="text-sm text-muted">
-        {{ media.files }} files at <code class="font-mono">{{ media.root }}</code>
+        {{ media.files ?? 'Still counting the' }} files at <code class="font-mono">{{ media.root }}</code>
         <span v-if="media.host_root"> (host path <code class="font-mono">{{ media.host_root }}</code>)</span>.
       </p>
       <p class="text-xs text-muted mt-2">

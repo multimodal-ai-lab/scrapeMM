@@ -10,7 +10,8 @@ from ezmm.common.items import Video, Image
 from tiktok_research_api import (TikTokResearchAPI, QueryUserInfoRequest, Criteria, Query,
                                  APIErrorResponse)
 
-from scrapemm.common.exceptions import AccessBlockedError, TargetUnavailableError
+from scrapemm.common.exceptions import (AccessBlockedError, RateLimitError, RetrievalFailed,
+                                        TargetUnavailableError)
 from scrapemm.server.download import download_image
 from scrapemm.server.integrations.base import RetrievalIntegration
 from scrapemm.server.integrations import decodo
@@ -114,8 +115,10 @@ class TikTok(RetrievalIntegration):
             sequence = await self._create_video_sequence_from_api(video_data or metadata, video, thumbnail)
             return ScrapedContent(multimodal=sequence)
 
+        except (RetrievalFailed, AccessBlockedError, TargetUnavailableError, RateLimitError):
+            raise  # Already says what went wrong (yt-dlp's failures are classified)
         except Exception as e:
-            raise RuntimeError(f"Error retrieving TikTok video: {e}")
+            raise RuntimeError(f"Error retrieving TikTok video: {e}") from e
 
     async def _query_video_metadata(self, video_id: str,
                                     session: aiohttp.ClientSession) -> dict | None:

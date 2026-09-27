@@ -22,7 +22,7 @@ let rfb: any = null
 function socketUrl() {
   const base = apiBase()
   const origin = base || window.location.origin
-  const url = new URL('/v1/archive-today/vnc', origin)
+  const url = new URL('/v1/captcha/vnc', origin)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   url.searchParams.set('token', token.value || '')
   return url.toString()

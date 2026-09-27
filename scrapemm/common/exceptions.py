@@ -2,6 +2,11 @@ class UnsupportedDomainError(Exception):
     """The domain is not supported by the scraping method or scrapeMM overall."""
 
 
+class DomainBlacklistedError(UnsupportedDomainError):
+    """The domain is not supported because it was explicitly blacklisted,
+    e.g., via the server's web UI."""
+
+
 class RateLimitError(Exception):
     """The service's rate limit has been reached. No further requests
     are allowed at the moment, but can be tried later."""
@@ -29,6 +34,11 @@ class CaptchaEncounteredError(AccessBlockedError):
     that needs to be solved before it can be accessed."""
 
 
+class PaywallError(AccessBlockedError):
+    """The target could be reached, but its content is behind a paywall that
+    scrapeMM could not get around: only the teaser was delivered."""
+
+
 class TargetUnavailableError(Exception):
     """The target cannot be reached at all, e.g., because the DNS
     did not resolve or the target's server is down. Typical case of
@@ -51,11 +61,13 @@ class ServerError(Exception):
 WIRE_EXCEPTIONS: dict[str, type[Exception]] = {
     cls.__name__: cls for cls in (
         UnsupportedDomainError,
+        DomainBlacklistedError,
         RateLimitError,
         QuotaExceededError,
         RetrievalFailed,
         AccessBlockedError,
         CaptchaEncounteredError,
+        PaywallError,
         TargetUnavailableError,
         DiskFull,
         ServerError,

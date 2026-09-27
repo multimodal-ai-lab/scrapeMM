@@ -1,6 +1,24 @@
 @import "tailwindcss";
 @import "@nuxt/ui";
 
+/* The accent colour, taken from the logo (res/logo.png): its core blue is step 500 --
+   the primary in light mode -- and its darker end step 600. The other steps continue
+   in the same hue (OKLCH 258°) with lightness falling evenly, so step 400, the primary
+   on the dark background, is the same blue made lighter rather than a different one. */
+@theme static {
+  --color-brand-50: #f1f6fe;
+  --color-brand-100: #ddeafe;
+  --color-brand-200: #bfd9ff;
+  --color-brand-300: #95c0ff;
+  --color-brand-400: #5097ff;
+  --color-brand-500: #0068e0;
+  --color-brand-600: #0058c0;
+  --color-brand-700: #0149a1;
+  --color-brand-800: #003d8a;
+  --color-brand-900: #05326f;
+  --color-brand-950: #04224b;
+}
+
 /* ---------------------------------------------------------------------------------
    Hover, made to actually work.
 
@@ -198,4 +216,18 @@ button:disabled,
   .chips-leave-to {
     transform: none;
   }
+}
+
+/* ---------------------------------------------------------------------------------
+   Chart colours, by role (see the Test page). They are the app's own colours, so a
+   chart reads like the rest of the UI: outcomes and thresholds take the status
+   colours -- always next to an icon or a label, never on their own -- and plain
+   magnitudes the accent.
+   --------------------------------------------------------------------------------- */
+:root {
+  --viz-good: var(--ui-success);
+  --viz-warning: var(--ui-warning);
+  --viz-critical: var(--ui-error);
+  --viz-seq: var(--ui-primary);
+  --viz-track: var(--ui-bg-accented);
 }

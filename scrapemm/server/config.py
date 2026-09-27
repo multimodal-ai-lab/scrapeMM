@@ -32,7 +32,10 @@ SETTINGS: dict[str, type] = {
     "devtools_local_port": int,
     "browser_user_agent": str,
     "max_concurrency": int,
+    "max_browser_pages": int,
     "disabled_methods": list,
+    "youtube_min_interval": float,
+    "youtube_cooldown": float,
 }
 
 

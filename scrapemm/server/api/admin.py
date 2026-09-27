@@ -20,7 +20,7 @@ from ..auth import api_key_from_environment, regenerate_api_key, require_api_key
 from ..blacklist import blacklist
 from ..cache import cache
 from ..config import SETTINGS, get_config, update_config
-from ..jobs import jobs
+from ..jobs import SORTS, jobs
 from ..toggles import set_enabled
 from ..secrets import (MANAGED_SECRETS, SECRETS, describe_secrets, remove_secret,
                        rotate_key, set_secret)
@@ -123,6 +123,21 @@ async def live() -> StreamingResponse:
     every few seconds of silence. See `live.py` for how it is kept cheap."""
     from ..live import hub
     return StreamingResponse(hub.subscribe(), media_type="application/x-ndjson",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
+
+
+@router.get("/logs/stream")
+async def logs_stream() -> StreamingResponse:
+    """The server's log as NDJSON: the recent backlog first, then every new record as
+    it is logged, and a ping every few seconds of silence. See `logbuffer.py`."""
+    from ..logbuffer import buffer
+
+    async def lines():
+        async for message in buffer.follow():
+            yield _ndjson(message)
+
+    return StreamingResponse(lines(), media_type="application/x-ndjson",
                              headers={"Cache-Control": "no-cache",
                                       "X-Accel-Buffering": "no"})
 
@@ -282,11 +297,27 @@ async def list_jobs(
                                        description="UNIX timestamp, inclusive"),
         until: Optional[float] = Query(default=None,
                                        description="UNIX timestamp, inclusive"),
+        sort: str = Query(default="newest",
+                          description="newest, oldest, longest, shortest, most_urls, "
+                                      "fewest_urls or most_failed"),
+        version: Optional[int] = Query(
+            default=None,
+            description="The version of an earlier answer. If the job history has not "
+                        "changed since, the answer is just {unchanged: true}."),
 ) -> dict:
+    # A live view polls; answering "nothing changed" costs no query at all. Running jobs
+    # still change (their duration grows), but only their results matter to the view,
+    # and every result bumps the version.
+    if version is not None and version == jobs.version:
+        return {"unchanged": True, "version": jobs.version}
+    if sort not in SORTS:
+        raise HTTPException(status_code=400, detail=f"Unknown sort '{sort}'. Allowed: "
+                                                    f"{', '.join(SORTS)}.")
     criteria = dict(status=job_status, url=url, output_format=output_format,
                     method=method, success=success, since=since, until=until)
     return {
-        "jobs": jobs.list_jobs(limit=limit, offset=offset, **criteria),
+        "version": jobs.version,
+        "jobs": jobs.list_jobs(limit=limit, offset=offset, sort=sort, **criteria),
         "total": jobs.count_jobs(**criteria),
         "stats": jobs.stats(),
         "methods": jobs.known_methods(),

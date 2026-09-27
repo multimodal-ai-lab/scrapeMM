@@ -6,6 +6,10 @@ from typing import Optional
 from scrapemm.common.scraping_response import ScrapingResponse, OutputFormat
 
 DEFAULT_CACHE_TTL = 24 * 60 * 60  # 24 hours
+# Every result is cached, whether or not its request reads from the cache, and a page's
+# HTML and Markdown come to about half a MB: without a cap, a day of scraping would pile
+# up gigabytes of them in the server's memory
+MAX_ENTRIES = 1000
 
 # A cache entry is identified by all the parameters that influence the retrieved content:
 # the URL, the requested output format, the methods used, and the video size limit
@@ -44,7 +48,10 @@ class ScrapeCache:
             return
         if len(self._entries) >= self._prune_at:
             self._prune()
+        self._entries.pop(key, None)  # Re-inserted at the end, i.e. as the newest
         self._entries[key] = (time.time(), response)
+        while len(self._entries) > MAX_ENTRIES:
+            del self._entries[next(iter(self._entries))]  # The oldest
 
     def clear(self) -> None:
         self._entries.clear()

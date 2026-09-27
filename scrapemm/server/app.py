@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.routing import Match
 
 from scrapemm.common.paths import APP_NAME
-from . import registry
+from . import logbuffer, registry
 from .api import ROUTERS
 from .auth import log_api_key
 from .jobs import jobs
@@ -43,6 +43,7 @@ DEV_ORIGINS = [o.strip() for o in os.getenv("SCRAPEMM_CORS_ORIGINS", "").split("
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    logbuffer.install()  # First, so the Logs page shows the startup too
     logger.info(f"🚀 scrapeMM server {__version__} starting up.")
     log_api_key()  # Generates one first if the deployment did not set it
     log_summary()
@@ -66,7 +67,7 @@ async def _warm_caches() -> None:
     try:
         from . import status
         await status._playwright_status()
-        await asyncio.to_thread(registry.usage)
+        registry.refresh()  # Measures in its own thread
     except asyncio.CancelledError:
         raise
     except Exception:

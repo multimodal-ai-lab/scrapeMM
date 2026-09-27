@@ -1,5 +1,14 @@
 <script setup lang="ts">
-/** Everything this server has ever retrieved, newest first, and searchable. */
+/**
+ * Everything this server has ever retrieved, searchable, sortable and live.
+ *
+ * Kept alive while you look at a job (see app.vue), so coming back shows exactly what
+ * you left: the same filters, the same sorting, as many jobs loaded and the same scroll
+ * position. It stays current by asking the server every few seconds whether anything
+ * changed at all, which costs next to nothing while nothing does.
+ */
+defineOptions({ name: 'JobsOverview' })
+
 const api = useApi()
 const route = useRoute()
 const router = useRouter()
@@ -8,18 +17,19 @@ const jobs = ref<any[]>([])
 const stats = ref<any>({})
 const methods = ref<string[]>([])
 const total = ref(0)
-const page = ref(1)
-const perPage = 25
+const pageSize = 25
 const loading = ref(false)
+const loadingMore = ref(false)
 const error = ref('')
+let version: number | null = null
 
 // Reka UI (behind USelect) refuses an empty-string option value, because it reserves
 // the empty string for "no selection". So "any" is the sentinel, translated away when
 // the query is built.
 const ANY = 'any'
 
-// Filters live in the query string, so a search can be linked to and survives a reload
-// -- which is the whole point of being able to find a job again.
+// Filters and sorting live in the query string, so a search can be linked to and
+// survives a reload -- which is the whole point of being able to find a job again.
 const filters = reactive({
   url: (route.query.url as string) || '',
   method: (route.query.method as string) || ANY,
@@ -27,8 +37,8 @@ const filters = reactive({
   success: (route.query.success as string) || ANY,
   since: (route.query.since as string) || ANY,
 })
+const sort = ref((route.query.sort as string) || 'newest')
 
-/** A filter counts as set when it is neither empty nor the "any" sentinel. */
 function isSet(value: string) {
   return !!value && value !== ANY
 }
@@ -51,6 +61,15 @@ const PERIODS = [
   { label: 'Last 7 days', value: '7d' },
   { label: 'Last 30 days', value: '30d' },
 ]
+const SORTS = [
+  { label: 'Newest first', value: 'newest', icon: 'i-fa7-solid-arrow-down-wide-short' },
+  { label: 'Oldest first', value: 'oldest', icon: 'i-fa7-solid-arrow-up-wide-short' },
+  { label: 'Longest duration', value: 'longest', icon: 'i-fa7-solid-hourglass-end' },
+  { label: 'Shortest duration', value: 'shortest', icon: 'i-fa7-solid-hourglass-start' },
+  { label: 'Most URLs', value: 'most_urls', icon: 'i-fa7-solid-list-ol' },
+  { label: 'Fewest URLs', value: 'fewest_urls', icon: 'i-fa7-solid-list' },
+  { label: 'Most failures', value: 'most_failed', icon: 'i-fa7-solid-circle-exclamation' },
+]
 
 const methodOptions = computed(() => [
   { label: 'Any method', value: ANY },
@@ -60,10 +79,9 @@ const methodOptions = computed(() => [
 const active = computed(() => Object.values(filters).filter(isSet).length)
 
 /**
- * The filters currently in force, as things you can take off one at a time.
- *
- * Reading them back out of the dropdowns' own option lists means a chip always says
- * what the control says -- "Last 24 hours", not "24h".
+ * The filters currently in force, as things you can take off one at a time. Reading
+ * them back out of the dropdowns' own option lists means a chip always says what the
+ * control says -- "Last 24 hours", not "24h".
  */
 const activeChips = computed(() => {
   const label = (options: { label: string, value: string }[], value: string) =>
@@ -92,9 +110,12 @@ const activeChips = computed(() => {
   return chips
 })
 
-/** Takes one filter off. The URL box empties; the dropdowns go back to "any". */
 function clearFilter(key: keyof typeof filters) {
   filters[key] = key === 'url' ? '' : ANY
+}
+
+function reset() {
+  Object.assign(filters, { url: '', method: ANY, format: ANY, success: ANY, since: ANY })
 }
 
 function sinceTimestamp(period: string): number | null {
@@ -105,91 +126,164 @@ function sinceTimestamp(period: string): number | null {
   return span ? Math.floor(Date.now() / 1000 - span) : null
 }
 
-/** `quiet` refreshes in the background, without the spinner, for running jobs. */
-async function load(quiet = false) {
-  if (!quiet) loading.value = true
+function query(offset: number, limit: number, withVersion = false) {
+  const q = new URLSearchParams({ limit: String(limit), offset: String(offset), sort: sort.value })
+  if (isSet(filters.url)) q.set('url', filters.url)
+  if (isSet(filters.method)) q.set('method', filters.method)
+  if (isSet(filters.format)) q.set('output_format', filters.format)
+  if (isSet(filters.success)) q.set('success', filters.success === 'ok' ? 'true' : 'false')
+  const since = isSet(filters.since) ? sinceTimestamp(filters.since) : null
+  if (since) q.set('since', String(since))
+  if (withVersion && version !== null) q.set('version', String(version))
+  return `/v1/jobs?${q}`
+}
+
+function absorb(data: any) {
+  version = data.version
+  stats.value = data.stats
+  total.value = data.total
+  // Keep the known methods even when a filter narrows the result to none, or the
+  // dropdown would empty itself out from under the filter that is in force
+  if (data.methods?.length) methods.value = data.methods
+}
+
+/** Starts over: after a change of filters or sorting. */
+async function load() {
+  loading.value = true
   error.value = ''
   try {
-    const query = new URLSearchParams({
-      limit: String(perPage),
-      offset: String((page.value - 1) * perPage),
-    })
-    if (isSet(filters.url)) query.set('url', filters.url)
-    if (isSet(filters.method)) query.set('method', filters.method)
-    if (isSet(filters.format)) query.set('output_format', filters.format)
-    if (isSet(filters.success)) {
-      query.set('success', filters.success === 'ok' ? 'true' : 'false')
-    }
-    const since = isSet(filters.since) ? sinceTimestamp(filters.since) : null
-    if (since) query.set('since', String(since))
-
-    const data = await api.get<any>(`/v1/jobs?${query}`)
+    const data = await api.get<any>(query(0, pageSize))
+    absorb(data)
     jobs.value = data.jobs
-    stats.value = data.stats
-    total.value = data.total
-    // Keep the known methods even when a filter narrows the result to none, or the
-    // dropdown would empty itself out from under the filter that is in force.
-    if (data.methods?.length) methods.value = data.methods
   } catch (e: any) {
     error.value = e.message
   } finally {
     loading.value = false
   }
+  await nextTick()
+  if (sentinelInView()) loadMore()
+}
+
+/** The next page, when the end of the list comes into view. */
+async function loadMore() {
+  if (loading.value || loadingMore.value || jobs.value.length >= total.value) return
+  loadingMore.value = true
+  try {
+    const data = await api.get<any>(query(jobs.value.length, pageSize))
+    absorb(data)
+    // New jobs arriving at the top shift the offsets; never list one twice
+    const known = new Set(jobs.value.map((j) => j.id))
+    jobs.value = [...jobs.value, ...data.jobs.filter((j: any) => !known.has(j.id))]
+  } catch (e: any) {
+    error.value = e.message
+    return
+  } finally {
+    loadingMore.value = false
+  }
+  // On a tall screen the end may still be in view; the observer only fires on change
+  await nextTick()
+  if (sentinelInView()) loadMore()
+}
+
+function sentinelInView() {
+  const box = sentinel.value?.getBoundingClientRect()
+  return !!box && box.top < window.innerHeight + 600
+}
+
+/** Keeps what is loaded current, as long as the history actually changed. */
+async function refresh() {
+  if (loading.value || loadingMore.value || document.hidden) return
+  try {
+    const limit = Math.min(Math.max(jobs.value.length, pageSize), 500)
+    const data = await api.get<any>(query(0, limit, true))
+    if (data.unchanged) return
+    absorb(data)
+    // Beyond what the refresh covers, keep what was loaded before
+    const fresh = new Set(data.jobs.map((j: any) => j.id))
+    jobs.value = [...data.jobs, ...jobs.value.slice(limit).filter((j) => !fresh.has(j.id))]
+  } catch {
+    // A missed refresh is no reason to disturb the page; the next one will try again
+  }
 }
 
 function syncQuery() {
-  const query: Record<string, string> = {}
-  for (const [key, value] of Object.entries(filters)) if (isSet(value)) query[key] = value
-  router.replace({ query })
-}
-
-function reset() {
-  Object.assign(filters, { url: '', method: ANY, format: ANY, success: ANY, since: ANY })
+  const q: Record<string, string> = {}
+  for (const [key, value] of Object.entries(filters)) if (isSet(value)) q[key] = value
+  if (sort.value !== 'newest') q.sort = sort.value
+  router.replace({ query: q })
 }
 
 // Typing in the URL box should not fire a request per keystroke
 let debounce: ReturnType<typeof setTimeout> | null = null
-watch(filters, () => {
-  page.value = 1
+watch([filters, sort], () => {
   syncQuery()
+  version = null
   if (debounce) clearTimeout(debounce)
   debounce = setTimeout(() => load(), 250)
 })
-watch(page, () => load())
-onMounted(() => load())
 
-// While a job in view is still running, follow it until it is done
-let poll: ReturnType<typeof setTimeout> | null = null
-watch(jobs, (list) => {
-  if (poll) clearTimeout(poll)
-  poll = list.some((job) => job.status === 'running') ? setTimeout(() => load(true), 3000) : null
-})
-onUnmounted(() => { if (poll) clearTimeout(poll) })
+// Endless scrolling: the next page loads when the sentinel below the list comes near.
+// A scroll listener (one check per frame) rather than an IntersectionObserver: the
+// sentinel only exists once there are jobs, and an observer set up before that watches
+// nothing.
+const sentinel = ref<HTMLElement | null>(null)
+let poller: ReturnType<typeof setInterval> | null = null
+let frame = 0
 
-/**
- * The URLs as they were asked for. Stored with the job the moment it starts, unlike its
- * results, which only exist once each URL is done -- so a running job has its title too.
- */
-function requested(job: any): string[] {
-  const urls: string[] = [...new Set<string>(job.params?.urls || [])]
-  return urls.length ? urls : (job.urls || []).map((u: any) => u.url)
+function onScroll() {
+  if (frame) return
+  frame = requestAnimationFrame(() => {
+    frame = 0
+    if (sentinelInView()) loadMore()
+  })
 }
 
-/** The one status icon a row carries, which now also holds what the badges used to. */
-function look(job: any) {
-  const counts = `${job.succeeded} succeeded, ${job.failed} failed`
+function startWatching() {
+  if (!poller) poller = setInterval(refresh, 4000)
+  window.addEventListener('scroll', onScroll, { passive: true })
+  window.addEventListener('resize', onScroll, { passive: true })
+}
+
+function stopWatching() {
+  if (poller) clearInterval(poller)
+  poller = null
+  window.removeEventListener('scroll', onScroll)
+  window.removeEventListener('resize', onScroll)
+}
+
+onMounted(async () => {
+  startWatching()
+  await load()
+  await nextTick()
+  onScroll()  // A short first page may not fill the screen
+})
+// Kept alive: while a job is open, this page neither polls nor listens
+onActivated(() => {
+  startWatching()
+  refresh()
+})
+onDeactivated(stopWatching)
+onBeforeUnmount(stopWatching)
+
+// --- Presentation ---------------------------------------------------------------
+
+function urlLook(entry: any, job: any) {
+  if (entry.state === 'ok') {
+    return { icon: 'i-fa7-solid-circle-check', color: 'text-success',
+             title: entry.from_cache ? 'Retrieved (from cache)' : 'Retrieved' }
+  }
+  if (entry.state === 'failed') {
+    return { icon: 'i-fa7-solid-circle-exclamation', color: 'text-error', title: 'Failed' }
+  }
   if (job.status === 'running') {
-    return { icon: 'i-fa7-solid-circle-notch', color: 'text-info animate-spin',
-             title: `Running · ${job.urls?.length || 0} of ${job.url_count} done` }
+    return { icon: 'i-fa7-solid-circle-notch', color: 'text-info animate-spin', title: 'In progress' }
   }
-  if (job.status !== 'completed') {
-    return { icon: 'i-fa7-solid-circle-xmark', color: 'text-error',
-             title: `${job.status} · ${counts}` }
-  }
-  if (job.failed) {
-    return { icon: 'i-fa7-solid-circle-exclamation', color: 'text-error', title: counts }
-  }
-  return { icon: 'i-fa7-solid-circle-check', color: 'text-success', title: counts }
+  // Pending in a job that has ended: it was never retrieved
+  return { icon: 'i-fa7-solid-circle-stop', color: 'text-dimmed', title: 'Not retrieved: the job was interrupted' }
+}
+
+function resultLink(job: any, url: string) {
+  return { path: `/jobs/${job.id}`, query: { result: url } }
 }
 
 const copied = ref('')
@@ -202,25 +296,18 @@ async function copy(id: string) {
 
 <template>
   <div class="space-y-5">
-    <div class="flex items-center justify-between gap-4">
-      <div>
-        <h1 class="text-2xl font-semibold">Jobs</h1>
-        <p class="text-sm text-muted mt-1">
-          {{ stats.jobs }} jobs · {{ stats.urls }} URLs ·
-          <span class="text-success">{{ stats.succeeded }} succeeded</span> ·
-          <span :class="stats.failed ? 'text-error' : ''">{{ stats.failed }} failed</span>
-        </p>
-      </div>
-      <UButton
-        class="transition-transform duration-150 hover:scale-105"
-        icon="i-fa7-solid-rotate" color="neutral" variant="subtle" :loading="loading"
-        label="Refresh" @click="load()"
-      />
+    <div>
+      <h1 class="text-2xl font-semibold">Jobs</h1>
+      <p class="text-sm text-muted mt-1">
+        {{ stats.jobs }} jobs · {{ stats.urls }} URLs ·
+        <span class="text-success">{{ stats.succeeded }} succeeded</span> ·
+        <span :class="stats.failed ? 'text-error' : ''">{{ stats.failed }} failed</span>
+      </p>
     </div>
 
     <UAlert v-if="error" color="error" variant="subtle" :description="error" />
 
-    <!-- Filters -->
+    <!-- Filters and sorting -->
     <div class="flex flex-wrap items-center gap-2">
       <UInput
         v-model="filters.url" placeholder="Search URLs…"
@@ -238,6 +325,10 @@ async function copy(id: string) {
       <USelect v-model="filters.format" :items="FORMATS" class="w-40" />
       <USelect v-model="filters.success" :items="OUTCOMES" class="w-40" />
       <USelect v-model="filters.since" :items="PERIODS" class="w-40" />
+      <USelect
+        v-model="sort" :items="SORTS" class="w-48" aria-label="Sort the jobs"
+        :icon="SORTS.find((s) => s.value === sort)?.icon"
+      />
     </div>
 
     <!-- Chips and count share one row that is always present and always the same
@@ -249,14 +340,13 @@ async function copy(id: string) {
           class="surface-card inline-flex items-center gap-1.5 rounded-full
                  pl-2.5 pr-1.5 py-1 text-xs text-muted
                  hover:text-highlighted transition-colors"
-          :title="`Remove this filter`"
+          title="Remove this filter"
           @click="clearFilter(chip.key)"
         >
           <UIcon :name="chip.icon" class="size-2.5 text-dimmed" />
           <span class="max-w-40 truncate">{{ chip.text }}</span>
           <UIcon name="i-fa7-solid-xmark" class="size-2.5" />
         </button>
-
         <button
           v-if="activeChips.length > 1" key="clear-all" type="button"
           class="text-xs text-dimmed hover:text-highlighted transition-colors px-1"
@@ -265,7 +355,6 @@ async function copy(id: string) {
           Clear all
         </button>
       </TransitionGroup>
-
       <p
         class="text-xs text-dimmed shrink-0 transition-opacity duration-200"
         :class="active ? 'opacity-100' : 'opacity-0'"
@@ -276,9 +365,9 @@ async function copy(id: string) {
 
     <!-- Results -->
     <div v-if="loading && !jobs.length" class="space-y-2">
-      <div v-for="n in 6" :key="n" class="surface-card rounded-xl p-4 space-y-2">
-        <USkeleton class="h-4 w-2/3" />
+      <div v-for="n in 5" :key="n" class="surface-card rounded-xl p-4 space-y-2">
         <USkeleton class="h-3 w-1/3" />
+        <USkeleton class="h-9 w-full" />
       </div>
     </div>
 
@@ -292,83 +381,100 @@ async function copy(id: string) {
       </p>
     </UCard>
 
-    <TransitionGroup v-else tag="div" name="list" class="space-y-2 relative">
-      <NuxtLink
-        v-for="job in jobs" :key="job.id" :to="`/jobs/${job.id}`" class="block group"
-      >
-        <div
-          class="surface-card rounded-xl p-3.5"
-        >
-          <!-- The URLs are what somebody is actually looking for, so they lead. -->
-          <div class="flex items-start justify-between gap-3">
-            <div class="min-w-0 flex-1">
-              <div class="flex items-center gap-1.5 min-w-0">
-                <UIcon
-                  :name="look(job).icon" class="size-3.5 shrink-0"
-                  :class="look(job).color" :title="look(job).title"
-                />
-                <span class="font-medium truncate" :title="requested(job)[0]">
-                  {{ requested(job)[0] }}
-                </span>
-                <UBadge
-                  v-if="requested(job).length > 1" color="neutral" variant="subtle" size="sm"
-                  :label="`+${requested(job).length - 1}`"
-                  :title="requested(job).slice(1).join('\n')"
-                />
-              </div>
+    <div v-else class="space-y-3">
+      <div v-for="job in jobs" :key="job.id" class="surface-card rounded-xl p-3 space-y-2.5 group">
+        <!-- The job: when, how long, how, and its id -->
+        <div class="flex items-center justify-between gap-3">
+          <NuxtLink
+            :to="`/jobs/${job.id}`"
+            class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-dimmed min-w-0
+                   hover:text-default transition-colors"
+          >
+            <span class="inline-flex items-center gap-1" :title="absoluteTime(job.created_at)">
+              <UIcon name="i-fa7-solid-clock" class="size-3" />
+              {{ timeAgo(job.created_at) }}
+            </span>
+            <span class="inline-flex items-center gap-1" title="How long the job took">
+              <UIcon name="i-fa7-solid-stopwatch" class="size-3" />
+              {{ seconds(job.duration) }}
+            </span>
+            <span class="inline-flex items-center gap-1">
+              <UIcon name="i-fa7-solid-list" class="size-3" />
+              {{ job.url_count }} URL{{ job.url_count === 1 ? '' : 's' }}
+            </span>
+            <span class="inline-flex items-center gap-1">
+              <UIcon name="i-fa7-solid-file-lines" class="size-3" />
+              {{ job.params.output_format }}
+            </span>
+            <span v-if="job.methods?.length" class="inline-flex items-center gap-1">
+              <UIcon name="i-fa7-solid-wrench" class="size-3" />
+              {{ job.methods.join(', ') }}
+            </span>
+            <span v-if="job.status === 'running'" class="text-info">
+              running · {{ job.done }} of {{ job.url_count }} done
+            </span>
+            <span v-else-if="job.status === 'interrupted'">interrupted</span>
+          </NuxtLink>
 
-              <div
-                class="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-xs text-dimmed"
-              >
-                <span
-                  class="inline-flex items-center gap-1"
-                  :title="absoluteTime(job.created_at)"
-                >
-                  <UIcon name="i-fa7-solid-clock" class="size-3" />
-                  {{ timeAgo(job.created_at) }}
-                </span>
-                <span
-                  v-if="job.total_retrieval_time" class="inline-flex items-center gap-1"
-                  title="Total time spent retrieving"
-                >
-                  <UIcon name="i-fa7-solid-stopwatch" class="size-3" />
-                  {{ seconds(job.total_retrieval_time) }}
-                </span>
-                <span class="inline-flex items-center gap-1">
-                  <UIcon name="i-fa7-solid-file-lines" class="size-3" />
-                  {{ job.params.output_format }}
-                </span>
-                <span v-if="job.methods?.length" class="inline-flex items-center gap-1">
-                  <UIcon name="i-fa7-solid-wrench" class="size-3" />
-                  {{ job.methods.join(', ') }}
-                </span>
-
-                <!-- The id belongs with the other metadata, not on a line of its own:
-                     it is for support and debugging, and now short enough to show in
-                     full. Still quiet until the row is hovered. -->
-                <button
-                  type="button"
-                  class="reveal-on-hover inline-flex items-center gap-1 font-mono
-                         opacity-0 transition-[opacity,color] duration-150
-                         group-hover:opacity-100 focus-visible:opacity-100
-                         hover:text-default"
-                  :title="`${job.id} — click to copy`"
-                  @click.prevent.stop="copy(job.id)"
-                >
-                  <UIcon name="i-fa7-solid-hashtag" class="size-3" />
-                  {{ copied === job.id ? 'copied' : job.id }}
-                </button>
-              </div>
-            </div>
-          </div>
-
+          <!-- For support and debugging: quiet until the job is hovered -->
+          <button
+            type="button"
+            class="shrink-0 inline-flex items-center gap-1 font-mono text-xs leading-none
+                   text-dimmed opacity-0 transition-[opacity,color] duration-150
+                   group-hover:opacity-100 focus-visible:opacity-100 hover:text-default"
+            :title="`${job.id} — click to copy`"
+            @click="copy(job.id)"
+          >
+            <UIcon name="i-fa7-solid-hashtag" class="size-3" />
+            {{ copied === job.id ? 'copied' : job.id }}
+          </button>
         </div>
-      </NuxtLink>
 
-      <UPagination
-        v-if="total > perPage" key="pagination" v-model:page="page" :total="total"
-        :items-per-page="perPage" class="justify-center pt-2"
-      />
-    </TransitionGroup>
+        <!-- Its URLs, one per row, each leading to its own result -->
+        <div class="space-y-1.5">
+          <NuxtLink
+            v-for="entry in job.urls" :key="entry.url" :to="resultLink(job, entry.url)"
+            class="flex items-center gap-2.5 rounded-lg px-3 py-2 min-w-0
+                   bg-elevated/50 hover:bg-elevated transition-colors"
+          >
+            <UIcon
+              :name="urlLook(entry, job).icon" class="size-3.5 shrink-0"
+              :class="urlLook(entry, job).color" :title="urlLook(entry, job).title"
+            />
+            <div class="min-w-0 flex-1 flex flex-col">
+              <UrlLabel :url="entry.url" class="text-sm" />
+              <span
+                v-if="entry.state === 'failed'" class="text-xs text-error/90 truncate"
+                :title="entry.error?.message"
+              >{{ describeError(entry.error?.type) }}</span>
+            </div>
+            <span v-if="entry.state === 'ok'" class="shrink-0 text-xs text-dimmed flex items-center gap-2">
+              <span v-if="entry.from_cache" class="inline-flex items-center gap-1" title="From cache">
+                <UIcon name="i-fa7-solid-bolt" class="size-3" />
+              </span>
+              <span>{{ entry.method }}</span>
+              <span v-if="entry.retrieval_time">{{ seconds(entry.retrieval_time) }}</span>
+            </span>
+          </NuxtLink>
+          <NuxtLink
+            v-if="job.url_count > job.urls.length" :to="`/jobs/${job.id}`"
+            class="block px-3 text-xs text-muted hover:text-default transition-colors"
+          >
+            + {{ job.url_count - job.urls.length }} more URL{{ job.url_count - job.urls.length === 1 ? '' : 's' }}
+          </NuxtLink>
+        </div>
+      </div>
+
+      <!-- Endless scrolling -->
+      <div ref="sentinel" class="h-8 flex items-center justify-center">
+        <UIcon
+          v-if="loadingMore" name="i-fa7-solid-circle-notch"
+          class="size-4 text-dimmed animate-spin"
+        />
+        <span v-else-if="jobs.length >= total && total > pageSize" class="text-xs text-dimmed">
+          All {{ total }} jobs are shown.
+        </span>
+      </div>
+    </div>
   </div>
 </template>

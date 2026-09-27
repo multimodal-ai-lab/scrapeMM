@@ -15,9 +15,9 @@ blacklist, the Archive.today CAPTCHA -- happens in the server's web UI, not from
 """
 
 from .common import (APP_NAME, AccessBlockedError, CaptchaEncounteredError, DiskFull,
-                     QuotaExceededError, RateLimitError, RetrievalFailed, ScrapedContent,
-                     ScrapingResponse, ServerError, TargetUnavailableError,
-                     UnsupportedDomainError, logger)
+                     DomainBlacklistedError, PaywallError, QuotaExceededError,
+                     RateLimitError, RetrievalFailed, ScrapedContent, ScrapingResponse, ServerError,
+                     TargetUnavailableError, UnsupportedDomainError, logger)
 from .client import Settings, configure, retrieve, settings
 
 __version__ = "1.0.0"
@@ -32,6 +32,8 @@ __all__ = [
     "AccessBlockedError",
     "CaptchaEncounteredError",
     "DiskFull",
+    "DomainBlacklistedError",
+    "PaywallError",
     "QuotaExceededError",
     "RateLimitError",
     "RetrievalFailed",

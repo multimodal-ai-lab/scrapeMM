@@ -1,15 +1,21 @@
 import asyncio
 import logging
+import random
+import re
 import sys
 import tempfile
+import time
 from datetime import datetime
 from typing import Any, Optional
 
 import aiohttp
 from ezmm import MultimodalSequence, Video, Image
 from yt_dlp import YoutubeDL
+from yt_dlp.utils import (DownloadError, ExtractorError, GeoRestrictedError,
+                          UnsupportedError, UserNotLive, YoutubeDLError)
 
 from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError, AccessBlockedError, RateLimitError
+from scrapemm.server.config import get_config_var
 from scrapemm.server.download import download_image
 
 logger = logging.getLogger("scrapeMM")
@@ -43,6 +49,155 @@ def _format_selector() -> str:
     return "/".join([f"b{capped}", "b", f"bv*{capped}[ext=mp4]", f"bv*{capped}", "bv*"])
 
 
+# --- YouTube's bot check ------------------------------------------------------------
+#
+# After a burst of requests from one IP address, YouTube answers every further one with
+# "Sign in to confirm you're not a bot" -- and keeps doing so for a while. Nothing short
+# of a different address reliably gets past it, so the aim is not to trigger it: all
+# YouTube retrievals on this server start at a steady pace (yt-dlp's documented guest
+# limit is about 300 videos an hour), and once the check does come up, YouTube is left
+# alone for a while rather than asked again, which only extends the flag.
+
+# Seconds between the starts of two YouTube retrievals, with up to +50% jitter
+DEFAULT_YOUTUBE_MIN_INTERVAL = 12.0
+# Seconds YouTube is not asked again after it demanded the bot check
+DEFAULT_YOUTUBE_COOLDOWN = 30 * 60.0
+
+
+class _YouTubeGate:
+    """The one pace all YouTube retrievals of this process keep, and the pause after a
+    bot check. Server-wide, because yt-dlp's own sleep options only space the requests
+    of one call, while the server runs many calls at once."""
+
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self._next_start = 0.0
+        self.blocked_until = 0.0
+        self.reason = ""
+
+    def check(self) -> None:
+        """Fails at once while YouTube is being left alone."""
+        remaining = self.blocked_until - time.time()
+        if remaining > 0:
+            until = datetime.fromtimestamp(self.blocked_until).strftime("%H:%M")
+            raise RateLimitError(
+                f"YouTube demanded its bot check ({self.reason}), so YouTube retrievals are "
+                f"paused until {until} to let the flag on this server's address expire. "
+                f"Asking again now would only extend it.")
+
+    async def wait_turn(self) -> None:
+        self.check()
+        interval = float(get_config_var("youtube_min_interval", DEFAULT_YOUTUBE_MIN_INTERVAL))
+        async with self._lock:
+            delay = self._next_start - time.time()
+            if delay > 0:
+                logger.debug(f"Pacing YouTube: waiting {delay:.1f}s for the next slot.")
+                await asyncio.sleep(delay)
+            self._next_start = time.time() + interval * random.uniform(1.0, 1.5)
+        self.check()  # It may have tripped while this one waited
+
+    def trip(self, reason: str) -> None:
+        cooldown = float(get_config_var("youtube_cooldown", DEFAULT_YOUTUBE_COOLDOWN))
+        if self.blocked_until > time.time():
+            return  # Already paused; one warning is enough
+        self.blocked_until = time.time() + cooldown
+        self.reason = reason
+        span = f"{cooldown / 60:.0f} min" if cooldown >= 60 else f"{cooldown:.0f} s"
+        logger.warning(f"🤖 YouTube demanded its bot check. Pausing YouTube retrievals for "
+                       f"{span} so the flag on this address can expire.")
+
+
+youtube_gate = _YouTubeGate()
+
+
+def _is_youtube(url: str) -> bool:
+    return any(host in url for host in ("youtube.com", "youtu.be", "youtube-nocookie.com"))
+
+
+def _is_bot_wall(error: Exception) -> bool:
+    """Whether YouTube refused because it takes this server for a bot (or is rate
+    limiting it), as opposed to this one video being unavailable."""
+    return isinstance(error, RateLimitError) or (
+        isinstance(error, AccessBlockedError) and "no bot" in str(error))
+
+
+class NotASingleVideo(RetrievalFailed):
+    """The URL is a channel, playlist or profile rather than one video."""
+
+
+# What yt-dlp's error messages mean, checked in order against the lower-cased message.
+# First match wins, so the more specific phrases come first.
+_ERROR_PATTERNS: list[tuple[tuple[str, ...], type[Exception], str]] = [
+    (("the following content is not available on this app",),
+     RetrievalFailed, "yt-dlp is outdated for this site; update it"),
+    (("rate-limit", "rate limit", "too many requests", "http error 429"),
+     RateLimitError, "Rate limit reached"),
+    (("sign in to confirm", "not a bot"),
+     AccessBlockedError, "The platform demands a login to prove this is no bot"),
+    (("private video", "this video is private", "members-only", "join this channel",
+      "login required", "log in", "sign in", "requires authentication"),
+     AccessBlockedError, "Only accessible when logged in or subscribed"),
+    (("confirm your age", "age-restricted", "age restricted", "inappropriate for some users"),
+     AccessBlockedError, "Age-restricted"),
+    (("not available in your country", "geo restrict", "geo-restrict",
+      "not available from your location", "blocked it in your country"),
+     AccessBlockedError, "Not available in the server's region"),
+    (("copyright", "not available to everyone", "http error 403", "forbidden"),
+     AccessBlockedError, "Access forbidden"),
+    # Before the generic "is not available" below, which would swallow these
+    (("no video formats", "there is no video", "requested format is not available",
+      "no video in this post"),
+     RetrievalFailed, "The target has no downloadable video"),
+    (("live event will begin", "premieres in", "is not currently live", "is offline"),
+     RetrievalFailed, "The video has not started yet"),
+    (("has been removed", "been deleted", "account has been terminated",
+      "account associated with this video has been terminated", "no longer available"),
+     TargetUnavailableError, "The content has been removed"),
+    # Not a bare "not found": that would also match a missing ffmpeg
+    (("video unavailable", "is not available", "does not exist", "http error 404",
+      "404: not found", "empty media response"),
+     TargetUnavailableError, "The content is not available"),
+    (("cannot parse data", "unable to extract", "unsupported url"),
+     RetrievalFailed, "yt-dlp cannot extract this page"),
+    (("timed out", "connection reset", "connection refused", "name resolution",
+      "network is unreachable", "http error 5", "remote end closed"),
+     TargetUnavailableError, "The platform could not be reached"),
+]
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _classify(error: Exception) -> Exception:
+    """Turns a yt-dlp failure into the scrapeMM exception that says what happened, so
+    the engine can report it plainly and move on to the next method. Only failures that
+    are neither recognised nor declared expected by yt-dlp remain a RuntimeError: those
+    are the ones worth a traceback."""
+    # DownloadError is only the envelope yt-dlp reports errors in; the cause is inside
+    cause = error
+    if isinstance(error, DownloadError) and error.exc_info and error.exc_info[1]:
+        cause = error.exc_info[1]
+    message = _ANSI.sub("", str(getattr(cause, "orig_msg", None) or cause)).removeprefix("ERROR: ")
+
+    if isinstance(cause, GeoRestrictedError):
+        return AccessBlockedError(f"Not available in the server's region: {message}")
+    if isinstance(cause, UnsupportedError):
+        return RetrievalFailed(f"yt-dlp does not support this URL: {message}")
+    if isinstance(cause, UserNotLive):
+        return RetrievalFailed(f"The stream is not live: {message}")
+
+    lowered = message.lower()
+    for phrases, exception_type, summary in _ERROR_PATTERNS:
+        if any(phrase in lowered for phrase in phrases):
+            if exception_type is RetrievalFailed and "update it" in summary:
+                logger.warning("yt-dlp needs an update to download from this site again.")
+            return exception_type(f"{summary}: {message}")
+
+    if isinstance(cause, ExtractorError) and cause.expected:
+        # yt-dlp knows this failure and blames the content, not itself
+        return RetrievalFailed(message)
+    return RuntimeError(f"Could not download video with yt-dlp: {message}")
+
+
 def _run_ytdlp_sync(
         url: str,
         temp_path: str,
@@ -52,6 +207,9 @@ def _run_ytdlp_sync(
     via asyncio.to_thread so it does not stall the event loop."""
     with YoutubeDL(ydl_opts) as ydl:
         metadata = ydl.extract_info(url, download=True)
+
+    if metadata and metadata.get("_type") in ("playlist", "multi_video"):
+        raise NotASingleVideo(f"{url} is a channel or playlist, not a single video.")
 
     video = None
     if ext := metadata.get("ext"):
@@ -90,6 +248,10 @@ async def download_video_with_ytdlp(
             quiet=True,  # Silence logs in console
             logger=logger_yt_dlp,  # Reroute logs to dedicated logger
             noplaylist=True,  # Disable playlist downloading
+            # noplaylist only covers a video inside a playlist. A channel or playlist URL
+            # would otherwise have its entries downloaded one after another; this way
+            # they are merely listed, and the URL is recognised as no single video.
+            extract_flat="in_playlist",
             retries=3,
             ignoreerrors=False,
             **kwargs
@@ -102,8 +264,12 @@ async def download_video_with_ytdlp(
         if ffmpeg := _resolve_ffmpeg_path():
             ydl_opts["ffmpeg_location"] = ffmpeg
 
-        if "youtube" in url or "youtu.be" in url:
+        if youtube := _is_youtube(url):
             ydl_opts['extractor_args'] = dict(youtube=dict(player_client=["default"]))
+            # IPv4 only: YouTube judges an IPv6 address together with its whole /64, and
+            # more harshly
+            ydl_opts['source_address'] = "0.0.0.0"
+            await youtube_gate.wait_turn()
 
         # Run blocking yt-dlp work in a thread pool to avoid stalling the event loop.
         video, metadata = await asyncio.to_thread(_run_ytdlp_sync, url, temp_path, ydl_opts)
@@ -125,30 +291,15 @@ async def download_video_with_ytdlp(
 
         return video, thumbnail, metadata
 
+    except (NotASingleVideo, RateLimitError):
+        raise  # The latter: the YouTube pause, raised before yt-dlp even ran
+    except YoutubeDLError as e:
+        classified = _classify(e)
+        if _is_youtube(url) and _is_bot_wall(classified):
+            youtube_gate.trip(str(classified).split(":")[0])
+        raise classified from e
     except Exception as e:
-        if "The following content is not available on this app" in str(e):
-            logger.warning(f"You should update yt-dlp to re-enable YouTube downloads.")
-            raise e
-        elif ("Video unavailable" in str(e)
-              or "HTTP Error 404: Not Found" in str(e)
-              or "Instagram sent an empty media response" in str(e)):
-            raise TargetUnavailableError(f"Target content not found (Error 404).")
-        elif "Cannot parse data; please report this issue" in str(e):
-            raise RetrievalFailed(f"yt-dlp is unable to parse the target content.")
-        elif "There is no video in this post" in str(e) or "No video formats found" in str(e):
-            raise RetrievalFailed(f"Target content has no video.")
-        elif "Error 403: Forbidden" in str(e):
-            raise AccessBlockedError(f"Access to target content forbidden.")
-        elif "Sign in to confirm you’re not a bot" in str(e):
-            raise AccessBlockedError(f"Login required to access target content.")
-        elif "This video has been removed" in str(e):
-            raise AccessBlockedError(f"Target content has been removed.")
-        elif "This content isn't available to everyone" in str(e):
-            raise AccessBlockedError(f"Target content not available to everyone.")
-        elif "rate-limit reached" in str(e):
-            raise RateLimitError(f"Rate limit reached: {e}")
-        else:
-            raise RuntimeError(f"Could not download video with yt-dlp: {e}")
+        raise RuntimeError(f"Could not download video with yt-dlp: {e}") from e
 
 
 def fmt_count(v):

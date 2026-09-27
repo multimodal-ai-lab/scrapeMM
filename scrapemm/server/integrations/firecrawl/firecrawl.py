@@ -12,6 +12,7 @@ from scrapemm.server.config import get_config_var, update_config
 from scrapemm.common.exceptions import (UnsupportedDomainError, TargetUnavailableError,
                                         AccessBlockedError, RetrievalFailed)
 from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
+from scrapemm.server.captcha_detect import detect_captcha
 from scrapemm.server.download.common import HEADERS
 from scrapemm.server.util import read_urls_from_file, get_domain, to_scraped_content
 
@@ -185,6 +186,12 @@ class Firecrawl:
                     wait_for=1_000,
                     store_in_cache=False,
                     block_ads=not domain in NO_AD_BLOCKING_DOMAINS,
+                    # On a 401/403/429 the default ("auto") escalates to a stealth proxy,
+                    # which only Firecrawl's cloud engines provide. Self-hosted, that left
+                    # just the PDF and document engines, and the error ("Engines tried:
+                    # [pdf, document]") hid the actual block -- mostly a Cloudflare
+                    # challenge, which the engine now gets to see and handle.
+                    proxy="basic",
                     **kwargs
                 )
                 break
@@ -218,6 +225,16 @@ class Firecrawl:
 
         if not html:
             raise RuntimeError("No HTML content found in Firecrawl response.")
+
+        # Without the proxy escalation (see `proxy` above), Firecrawl hands back the
+        # site's error page as a successful scrape. A challenge page goes on to the
+        # engine, which recognises it and queues the challenge; any other error page is
+        # no content.
+        status = getattr(document.metadata, "status_code", None) if document.metadata else None
+        if status and status >= 400 and not detect_captcha(ScrapedContent(html=html)):
+            error = (TargetUnavailableError if status in (404, 410) or status >= 500
+                     else AccessBlockedError)
+            raise error(f"Firecrawl got HTTP {status} from {url}.")
 
         return await to_scraped_content(html, session=session, output_format=output_format,
                                         url=url, max_video_size=max_video_size)

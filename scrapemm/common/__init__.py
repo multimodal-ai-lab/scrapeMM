@@ -11,8 +11,8 @@ import os
 import sys
 
 from .exceptions import (AccessBlockedError, CaptchaEncounteredError, DiskFull,
-                         QuotaExceededError, RateLimitError, RetrievalFailed,
-                         TargetUnavailableError, UnsupportedDomainError,
+                         DomainBlacklistedError, PaywallError, QuotaExceededError, RateLimitError,
+                         RetrievalFailed, TargetUnavailableError, UnsupportedDomainError,
                          ServerError, exception_from_wire, exception_to_wire)
 from .paths import APP_NAME
 from .scraping_response import (ScrapingResponse, ScrapedContent,

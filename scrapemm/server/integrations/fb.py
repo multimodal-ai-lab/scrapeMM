@@ -1,6 +1,8 @@
 import html as html_lib
+import json
 import logging
 import re
+from datetime import datetime, timezone
 from urllib.parse import parse_qs, urlparse
 
 import aiohttp
@@ -48,6 +50,9 @@ FB_VIDEO_URL_REGEXES = tuple(
 FB_OG_DESCRIPTION_REGEX = re.compile(
     r'<meta\s+property="og:description"\s+content="(.*?)"', re.DOTALL
 )
+FB_OG_TITLE_REGEX = re.compile(r'<meta\s+property="og:title"\s+content="(.*?)"', re.DOTALL)
+FB_MESSAGE_TEXT_REGEX = re.compile(r'"message":\{"text":"((?:[^"\\]|\\.)*)"')
+FB_CREATION_TIME_REGEX = re.compile(r'"creation_time":(\d+)')
 
 JS_GET_PHOTO_IMAGE = """
     () => {
@@ -109,11 +114,47 @@ def _extract_video_urls(html: str) -> list[str]:
 
 
 def _extract_post_text(html: str) -> str:
-    """Returns the post's caption, taken from the og:description meta tag."""
+    """Returns the post's caption. og:description holds it, but truncated for long
+    posts, so the full text is looked up in the embedded JSON by that prefix."""
     match = FB_OG_DESCRIPTION_REGEX.search(html)
     if not match:
         return ""
-    return postprocess_markdown(html_lib.unescape(match.group(1)))
+    description = html_lib.unescape(match.group(1))
+    prefix = description.removesuffix("...").strip()[:60]
+    if prefix:
+        for raw in FB_MESSAGE_TEXT_REGEX.findall(html):
+            try:
+                text = json.loads(f'"{raw}"')
+            except json.JSONDecodeError:
+                continue
+            if text.startswith(prefix):
+                return postprocess_markdown(text)
+    return postprocess_markdown(description)
+
+
+def _is_unavailable_page(html: str) -> bool:
+    """Whether Facebook served its "This content isn't available" page. That message
+    is rendered client-side (and localized), so it is recognized by what is missing
+    instead: a page that loaded fine, with no login form, but without any post metadata
+    and without a single video object."""
+    return ('id="login_form"' not in html
+            and not FB_OG_TITLE_REGEX.search(html)
+            and '"__typename":"Video"' not in html)
+
+
+def _extract_post_header(html: str) -> str:
+    """Returns the post's author, date and text as Markdown, read off the page itself.
+    Empty if the page carries no post (e.g. a login wall)."""
+    text = _extract_post_text(html)
+    if not text:
+        return ""
+    lines = ["**Facebook Post**"]
+    if author := FB_OG_TITLE_REGEX.search(html):
+        lines.append(f"Author: {html_lib.unescape(author.group(1))}")
+    if created := FB_CREATION_TIME_REGEX.search(html):
+        date = datetime.fromtimestamp(int(created.group(1)), tz=timezone.utc)
+        lines.append(f"Posted: {date:%Y-%m-%d %H:%M} UTC")
+    return "\n".join(lines) + f"\n\n{text}"
 
 
 class Facebook(RetrievalIntegration):
@@ -164,8 +205,12 @@ class Facebook(RetrievalIntegration):
 
         # The URL is not indicative, so try all methods
 
-        # Get the text first
+        # Get the text first, straight from the page: it is public for public posts
         content = []
+        html = await self._fetch_page(url)
+        if header := _extract_post_header(html or ""):
+            content.append(header)
+
         try:
             video = await self._get_video(url, **kwargs)
             content.append(video.multimodal)
@@ -178,12 +223,13 @@ class Facebook(RetrievalIntegration):
         except Exception:
             pass
 
-        try:
-            from scrapemm.server.integrations.decodo import decodo
-            scraped = await decodo.scrape(url, session=kwargs.get("session"), output_format="markdown")
-            content.append(scraped.markdown)
-        except Exception:
-            pass
+        if not header:
+            try:
+                from scrapemm.server.integrations.decodo import decodo
+                scraped = await decodo.scrape(url, session=kwargs.get("session"), output_format="markdown")
+                content.append(scraped.markdown)
+            except Exception:
+                logger.debug(f"Could not retrieve the text of {url} via Decodo.", exc_info=True)
 
         if content:
             return ScrapedContent(multimodal=MultimodalSequence(content))
@@ -212,9 +258,11 @@ class Facebook(RetrievalIntegration):
             )
             return ScrapedContent(multimodal=sequence)
         except RetrievalFailed as e:
-            if "unable to parse" not in str(e):
+            message = str(e).lower()
+            if "cannot parse data" not in message and "unable to parse" not in message:
                 raise
-            # Most likely a fact-check interstitial, whose page yt-dlp cannot read
+            # A fact-check interstitial or an unavailable post, neither of which yt-dlp
+            # can read; the page itself tells them apart
             logger.debug(f"yt-dlp could not parse {url}; reading the video off the page.")
             return await self._get_video_from_page(url, **kwargs)
 
@@ -231,6 +279,10 @@ class Facebook(RetrievalIntegration):
 
         video_urls = _extract_video_urls(html)
         if not video_urls:
+            if _is_unavailable_page(html):
+                raise TargetUnavailableError(
+                    "The Facebook content is not available: it was removed, its "
+                    "visibility was restricted, or it never existed.")
             raise RetrievalFailed(f"No video found in the Facebook page for {url}.")
 
         session = kwargs.get("session")

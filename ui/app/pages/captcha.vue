@@ -1,14 +1,12 @@
 <script setup lang="ts">
 /**
- * Solving the CAPTCHAs that stand between scrapeMM and some content.
+ * The CAPTCHAs standing between scrapeMM and some content, one challenge per site.
  *
- * Only Archive.today gates scrapeMM today, so it is the only section here -- but the
- * page is named and laid out for the general case, because it will not be the last
- * service to put a human check in the way.
- *
- * The rhythm it supports: a gated request never blocks. The URL goes into a buffer and
- * the whole buffer is retrieved the moment a session exists, so one solved check clears
- * a batch rather than a single page.
+ * A gated URL never blocks its batch: it is queued with its site's challenge, and so is
+ * every further URL of that site until somebody decides. Per challenge, that decision is
+ * either to solve the check in the server's own browser -- after which the queue is
+ * retrieved and cached, so asking again returns the content -- or to discard it, which
+ * drops the queue and keeps the site blacklisted for a while.
  */
 const api = useApi()
 const route = useRoute()
@@ -16,86 +14,98 @@ const route = useRoute()
 const state = ref<any>(null)
 const error = ref('')
 const notice = ref('')
-const busy = ref(false)
+const busy = ref<string | null>(null)  // The domain an action is running for
 const timeout = ref(300)
+const expanded = ref<Set<string>>(new Set())
 const panel = ref<HTMLElement | null>(null)
 
 let poller: ReturnType<typeof setInterval> | null = null
 
-const solving = computed(() => state.value?.captcha?.running === true)
-const waiting = computed(() => state.value?.buffer?.length ?? 0)
+const session = computed(() => state.value?.session)
+const solving = computed(() => session.value?.running === true)
+const challenges = computed<any[]>(() => state.value?.challenges || [])
+const waiting = computed(() => challenges.value.reduce((n, c) => n + c.waiting, 0))
 
 async function load() {
   try {
-    state.value = await api.get<any>('/v1/archive-today')
+    state.value = await api.get<any>('/v1/captcha')
   } catch (e: any) {
     error.value = e.message
   }
 }
 
-async function startSession() {
-  busy.value = true
+async function act(domain: string, run: () => Promise<void>) {
+  busy.value = domain
   error.value = ''
   notice.value = ''
   try {
-    await api.post('/v1/archive-today/session', { timeout: Number(timeout.value) })
+    await run()
     await load()
-    // Cosmetic: never let it turn a started session into a reported failure.
+  } catch (e: any) {
+    error.value = e.message
+  } finally {
+    busy.value = null
+  }
+}
+
+function solve(domain: string) {
+  return act(domain, async () => {
+    await api.post(`/v1/captcha/${encodeURIComponent(domain)}/solve`,
+      { timeout: Number(timeout.value) })
+    await nextTick()
+    // Cosmetic: never let it turn a started session into a reported failure
     try {
       panel.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     } catch { /* the panel is on screen already */ }
-  } catch (e: any) {
-    error.value = e.message
-  } finally {
-    busy.value = false
-  }
+  })
 }
 
-async function cancelSession() {
-  busy.value = true
-  try {
-    await api.del('/v1/archive-today/session')
-    await load()
-  } catch (e: any) {
-    error.value = e.message
-  } finally {
-    busy.value = false
-  }
+function retry(domain: string) {
+  return act(domain, async () => {
+    const result = await api.post<any>(`/v1/captcha/${encodeURIComponent(domain)}/retry`)
+    notice.value = result.remaining
+      ? `Retrieved ${result.retrieved}; ${result.remaining} still gated — solve the check to continue.`
+      : `Retrieved and cached all ${result.retrieved} queued URL(s).`
+  })
 }
 
-async function drain() {
-  busy.value = true
-  error.value = ''
-  notice.value = ''
-  try {
-    const result = await api.post<any>('/v1/archive-today/drain')
-    notice.value = `Retrieved and cached ${result.cached} snapshot page(s).`
-    await load()
-  } catch (e: any) {
-    error.value = e.message
-  } finally {
-    busy.value = false
-  }
+function discard(domain: string, waitingCount: number) {
+  if (!confirm(`Discard the ${domain} challenge? Its ${waitingCount} queued URL(s) are `
+    + 'dropped, and the site is blacklisted for a while.')) return
+  return act(domain, async () => {
+    const result = await api.del<any>(`/v1/captcha/${encodeURIComponent(domain)}`)
+    notice.value = `Discarded ${domain} and its ${result.dropped} queued URL(s).`
+  })
 }
 
-async function clearBuffer() {
-  busy.value = true
-  try {
-    const result = await api.del<any>('/v1/archive-today/buffer')
-    notice.value = `Forgot ${result.dropped} buffered URL(s).`
-    await load()
-  } catch (e: any) {
-    error.value = e.message
-  } finally {
-    busy.value = false
-  }
+function cancel() {
+  return act(session.value?.domain || '', async () => { await api.del('/v1/captcha/session') })
+}
+
+/** The panel shows the normal page, no check: logged as a false detection, then the
+ *  queue is retrieved anyway. */
+function reportNoCaptcha() {
+  return act(session.value?.domain || '', async () => {
+    await api.post('/v1/captcha/session/no-captcha')
+  })
+}
+
+function toggle(domain: string) {
+  const next = new Set(expanded.value)
+  if (next.has(domain)) next.delete(domain)
+  else next.add(domain)
+  expanded.value = next
 }
 
 onMounted(async () => {
   await load()
-  // Arriving from the dashboard's "Awaiting CAPTCHA" card means the intent was to
-  // solve one, so the session starts without a second click.
-  if (route.query.solve !== undefined && !solving.value) await startSession()
+  // Arriving from the dashboard's "Awaiting CAPTCHA" card means the intent was to solve
+  // one, so it starts without a second click: the named one, or else the oldest
+  const wanted = route.query.solve
+  if (wanted !== undefined && !solving.value && state.value?.solvable) {
+    const domain = (typeof wanted === 'string' && wanted) || challenges.value[0]?.domain
+    if (domain) await solve(domain)
+  }
   // While a session runs, the countdown and the outcome only exist server-side
   poller = setInterval(load, 3000)
 })
@@ -104,108 +114,151 @@ onBeforeUnmount(() => { if (poller) clearInterval(poller) })
 
 <template>
   <div class="space-y-6">
-    <div>
-      <h1 class="text-2xl font-semibold">CAPTCHA</h1>
-      <p class="text-sm text-muted max-w-2xl mt-1">
-        Some services put a human check between scrapeMM and their content. Gated
-        requests never block: they are buffered, and everything buffered is retrieved
-        the moment you pass a check here.
-      </p>
+    <div class="flex items-start justify-between gap-4 flex-wrap">
+      <div>
+        <h1 class="text-2xl font-semibold">CAPTCHA</h1>
+        <p class="text-sm text-muted max-w-2xl mt-1">
+          When a site puts a human check in the way, its URLs are queued instead of
+          failing over and over. Solve the check in the server's browser to retrieve the
+          queue, or discard it.
+        </p>
+      </div>
+      <UFormField label="Time to solve" class="shrink-0">
+        <UInput
+          v-model="timeout" type="number" min="60" step="60" class="w-28"
+          :disabled="solving" :ui="{ trailing: 'pe-2' }"
+        >
+          <template #trailing><span class="text-xs text-muted">s</span></template>
+        </UInput>
+      </UFormField>
     </div>
 
     <UAlert v-if="error" color="error" variant="subtle" :description="error" />
     <UAlert v-if="notice" color="success" variant="subtle" :description="notice" />
+    <UAlert
+      v-if="state && !state.solvable && challenges.length" color="warning" variant="subtle"
+      description="This server has no display, so there is no browser to solve a check in. Discard challenges, or run the server with its virtual display."
+    />
 
-    <section class="space-y-2.5">
-      <h2 class="text-xs font-semibold uppercase tracking-wider text-dimmed">
-        Archive.today
-      </h2>
-      <p class="text-sm text-muted">
-        Snapshot pages are gated by a reCAPTCHA, and a solved one lasts about five
-        minutes.
-      </p>
-
-      <div v-if="state" class="grid gap-2.5 sm:grid-cols-3">
-        <StatCard
-          label="Awaiting a solve" icon="i-fa7-solid-lock"
-          :value="`${waiting}`"
-          :tone="waiting ? 'warning' : 'neutral'"
-          :detail="waiting ? 'URLs buffered' : 'nothing waiting'"
-        />
-        <StatCard
-          label="Pages cached" icon="i-fa7-solid-box-archive"
-          :value="`${state.cached_pages}`" tone="neutral"
-          detail="kept forever — a capture never changes"
-        />
-        <StatCard
-          label="Stored session" icon="i-fa7-solid-key"
-          :value="state.has_stored_session ? 'Yes' : 'No'" tone="neutral"
-          detail="expires ~5 min after it was established"
-        />
-      </div>
-    </section>
-
-    <div ref="panel">
+    <!-- The live browser, while somebody is solving -->
+    <div v-if="solving || session?.message" ref="panel">
       <UCard>
-      <template #header>
-        <div class="flex items-center justify-between gap-3 flex-wrap">
-          <h2 class="font-medium">Solver</h2>
-          <div class="flex items-center gap-2">
-            <UInput
-              v-if="!solving" v-model="timeout" type="number" min="60" step="60"
-              class="w-24" :ui="{ trailing: 'pe-1' }"
-            >
-              <template #trailing><span class="text-xs text-muted">s</span></template>
-            </UInput>
-            <UButton
-              v-if="!solving" icon="i-fa7-solid-shield-halved" :loading="busy"
-              label="Start session" @click="startSession"
-            />
-            <UButton
-              v-else color="error" variant="soft" icon="i-fa7-solid-xmark" :loading="busy"
-              label="Cancel" @click="cancelSession"
-            />
+        <template #header>
+          <div class="flex items-center justify-between gap-3 flex-wrap">
+            <h2 class="font-medium flex items-center gap-2">
+              <UIcon name="i-fa7-solid-shield-halved" class="size-4 text-dimmed" />
+              {{ solving ? `Solving ${session.domain}` : `Last session · ${session.domain}` }}
+            </h2>
+            <div class="flex items-center gap-3">
+              <span
+                v-if="solving && session.seconds_remaining != null"
+                class="text-sm text-muted tabular-nums"
+              >{{ Math.ceil(session.seconds_remaining) }}s left</span>
+              <UButton
+                v-if="session.can_report_no_captcha" color="neutral" variant="soft"
+                icon="i-fa7-solid-eye-slash" label="No CAPTCHA here"
+                title="The page shows its normal content and no check. Logs this as a possible false detection and retrieves the queue."
+                :disabled="busy !== null" @click="reportNoCaptcha"
+              />
+              <UButton
+                v-if="solving" color="error" variant="soft" icon="i-fa7-solid-xmark"
+                :loading="busy === session.domain" label="Cancel" @click="cancel"
+              />
+            </div>
           </div>
-        </div>
-      </template>
-
-      <UAlert
-        v-if="state?.captcha?.message" class="mb-4"
-        :color="state.captcha.state === 'passed' ? 'success'
-          : state.captcha.state === 'failed' ? 'error' : 'info'"
-        variant="subtle" :description="state.captcha.message"
-      />
-
-      <p v-if="solving && state.captcha.seconds_remaining != null" class="text-sm text-muted mb-3">
-        {{ Math.ceil(state.captcha.seconds_remaining) }}s left to pass the check.
-      </p>
-
-        <VncPanel :active="solving" />
+        </template>
+        <UAlert
+          v-if="session.message" :class="solving ? 'mb-4' : ''"
+          :color="session.state === 'passed' ? 'success'
+            : session.state === 'failed' ? 'error' : 'info'"
+          variant="subtle" :description="session.message"
+        />
+        <VncPanel v-if="solving" :active="solving" />
       </UCard>
     </div>
 
-    <UCard>
-      <template #header>
-        <div class="flex items-center justify-between gap-2 flex-wrap">
-          <h2 class="font-medium">Buffer</h2>
-          <div class="flex gap-2">
+    <!-- Challenges -->
+    <section class="space-y-2.5">
+      <h2 class="text-xs font-semibold uppercase tracking-wider text-dimmed">
+        Waiting for a decision
+        <span v-if="challenges.length" class="normal-case font-normal tracking-normal">
+          · {{ challenges.length }} site{{ challenges.length === 1 ? '' : 's' }},
+          {{ waiting }} URL{{ waiting === 1 ? '' : 's' }}
+        </span>
+      </h2>
+
+      <div v-if="!state" class="space-y-2">
+        <USkeleton v-for="n in 2" :key="n" class="h-24 w-full" />
+      </div>
+
+      <UCard v-else-if="!challenges.length">
+        <p class="text-sm text-muted flex items-center gap-2">
+          <UIcon name="i-fa7-solid-circle-check" class="size-4 text-success" />
+          No CAPTCHA is in the way right now.
+        </p>
+      </UCard>
+
+      <UCard v-for="c in challenges" v-else :key="c.domain">
+        <div class="flex items-start justify-between gap-4 flex-wrap">
+          <div class="min-w-0 space-y-1">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="font-medium">{{ c.domain }}</span>
+              <UBadge color="warning" variant="subtle" size="sm" :label="c.captcha" />
+              <UBadge
+                v-if="c.held" color="neutral" variant="outline" size="sm"
+                label="new URLs are queued"
+                title="Further URLs of this site wait here instead of being scraped into the same check"
+              />
+            </div>
+            <p class="text-xs text-dimmed flex flex-wrap gap-x-3">
+              <span>{{ c.waiting }} URL{{ c.waiting === 1 ? '' : 's' }} waiting</span>
+              <span v-if="c.first_seen" :title="absoluteTime(c.first_seen)">
+                first hit {{ timeAgo(c.first_seen) }}
+              </span>
+              <span v-if="c.last_seen && c.last_seen !== c.first_seen" :title="absoluteTime(c.last_seen)">
+                last {{ timeAgo(c.last_seen) }}
+              </span>
+              <span v-if="c.kind === 'archive_today' && state.archive_today_cached_pages">
+                {{ state.archive_today_cached_pages }} pages cached for good
+              </span>
+            </p>
+          </div>
+
+          <div class="flex items-center gap-2 shrink-0">
             <UButton
-              size="xs" variant="ghost" icon="i-fa7-solid-download" :loading="busy"
-              label="Retrieve with stored session" @click="drain"
+              icon="i-fa7-solid-shield-halved" label="Solve"
+              :loading="busy === c.domain && !solving"
+              :disabled="solving || !state.solvable" @click="solve(c.domain)"
             />
             <UButton
-              size="xs" color="error" variant="ghost" icon="i-fa7-solid-trash"
-              :loading="busy" label="Clear" @click="clearBuffer"
+              color="neutral" variant="ghost" icon="i-fa7-solid-rotate" label="Retry"
+              title="Retrieve the queue without solving: works while an earlier clearance is still valid"
+              :disabled="solving || busy !== null" @click="retry(c.domain)"
+            />
+            <UButton
+              color="error" variant="ghost" icon="i-fa7-solid-trash" label="Discard"
+              :disabled="busy !== null" @click="discard(c.domain, c.waiting)"
             />
           </div>
         </div>
-      </template>
-      <p v-if="!waiting" class="text-sm text-muted">Nothing waiting.</p>
-      <ul v-else class="text-sm font-mono space-y-1 max-h-72 overflow-y-auto">
-        <li v-for="url in state.buffer" :key="url" class="truncate" :title="url">
-          {{ url }}
-        </li>
-      </ul>
-    </UCard>
+
+        <button
+          type="button" class="mt-3 text-xs text-muted hover:text-default inline-flex items-center gap-1"
+          @click="toggle(c.domain)"
+        >
+          <UIcon
+            name="i-fa7-solid-chevron-right" class="size-2.5 transition-transform"
+            :class="expanded.has(c.domain) ? 'rotate-90' : ''"
+          />
+          {{ expanded.has(c.domain) ? 'Hide' : 'Show' }} queued URLs
+        </button>
+        <ul
+          v-if="expanded.has(c.domain)"
+          class="mt-2 text-sm font-mono space-y-1 max-h-72 overflow-y-auto"
+        >
+          <li v-for="url in c.urls" :key="url" class="truncate" :title="url">{{ url }}</li>
+        </ul>
+      </UCard>
+    </section>
   </div>
 </template>

@@ -38,6 +38,7 @@ import json
 import logging
 import re
 import time
+from contextlib import suppress
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,7 +56,8 @@ from scrapemm.server.paths import (SNAPSHOT_CACHE_PATH, PAGE_CACHE_DIR,
                                    BUFFER_PATH)
 from scrapemm.common.scraping_response import ScrapedContent
 from scrapemm.server.download.common import HEADERS as _DEFAULT_HEADERS
-from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget, remote_view_hint
+from scrapemm.server.integrations.headed_browser import (HeadedBrowser, ContentTarget,
+                                                        release_page, remote_view_hint)
 from scrapemm.server.secrets import get_secret, set_secret
 from scrapemm.server.util import parse_cookies, to_scraped_content
 
@@ -240,6 +242,68 @@ def _blocked_hint(subject: str) -> str:
         f"installed (it ships with scrapeMM), or the machine's IP may be blocked by "
         f"archive.today, or an intercepting proxy is rewriting the connection."
     )
+
+
+# Once the gate is up it stays up until somebody solves it, so every further request
+# would only find it again -- after waiting for a fetch, or in browser mode for one of the
+# busy browser slots (minutes, in a test run). So a seen gate is remembered: while the
+# stored clearance is the one it was seen with, and not longer than this, URLs are
+# buffered and refused at once. Solving in the CAPTCHA panel stores a new clearance.
+GATE_MEMORY = 300  # seconds; long enough to spare a batch, short enough to notice a lifted gate
+_gate_seen: Optional[tuple[float, Optional[str]]] = None  # (when, the clearance then)
+
+
+# While nobody knows whether the gate is up, one request finds out and the rest wait for
+# its verdict: a batch arrives all at once, and without this every URL of it fetched into
+# the same gate in parallel (15-25 s each under a test run's load) before any could be
+# remembered. `_open_seen` is when a page last came through; while that is recent, no
+# request waits.
+_verdict: Optional[asyncio.Future] = None
+_open_seen: float = 0.0
+VERDICT_WAIT = 90  # seconds a request waits for another one's verdict at most
+
+
+def _remember_gate() -> None:
+    global _gate_seen
+    _gate_seen = (time.time(), ArchiveToday._clearance())
+    _settle_verdict()
+
+
+def _forget_gate() -> None:
+    global _gate_seen, _open_seen
+    _gate_seen = None
+    _open_seen = time.time()
+    _settle_verdict()
+
+
+def _settle_verdict() -> None:
+    global _verdict
+    if _verdict is not None and not _verdict.done():
+        _verdict.set_result(None)
+    _verdict = None
+
+
+async def _await_verdict_or_lead() -> bool:
+    """Returns once this request may fetch: at once if the gate's state is known, after
+    another request's verdict if one is finding out, and otherwise as the one that does
+    -- which is what it returns True for."""
+    global _verdict
+    if _gate_known_up() or time.time() - _open_seen < GATE_MEMORY:
+        return False
+    if _verdict is not None and not _verdict.done():
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(_verdict), timeout=VERDICT_WAIT)
+        return False
+    # This request finds out; its outcome settles the verdict (see `_get`)
+    _verdict = asyncio.get_running_loop().create_future()
+    return True
+
+
+def _gate_known_up() -> bool:
+    if _gate_seen is None:
+        return False
+    seen_at, clearance = _gate_seen
+    return time.time() - seen_at < GATE_MEMORY and clearance == ArchiveToday._clearance()
 
 
 def _interactive_solve_enabled() -> bool:
@@ -586,6 +650,9 @@ class ArchiveToday(HeadedBrowser):
     is used in either case to let a human pass the access check, via the remote-view tunnel.
     """
     name = "Archive.today"
+    # Queues its gated requests itself (see `_RequestBuffer`), with a session that can be
+    # reused over plain HTTP; the generic challenge machinery leaves it to that
+    handles_captchas = True
     # Every mirror is accepted as input, but all of them are served via CANONICAL_DOMAIN
     domains = [
         "archive.today",
@@ -700,8 +767,34 @@ class ArchiveToday(HeadedBrowser):
             return await to_scraped_content(cached, session=session,
                                             output_format=output_format, url=url)
 
+        # Known to be gated: answer at once instead of fetching into the same gate.
+        # (Attended mode asks a human at the gate, so it still goes and looks.)
+        leading = False
+        if not _interactive_solve_enabled():
+            leading = await _await_verdict_or_lead()
+            if _gate_known_up():
+                return await self._gated(url, session, output_format)
+
+        try:
+            return await self._fetch(url, **kwargs)
+        finally:
+            # Whatever the outcome (a missing capture, an error), the request finding out
+            # must never leave the others waiting for a verdict that will not come
+            if leading:
+                _settle_verdict()
+
+    async def _fetch(self, url: str, **kwargs) -> ScrapedContent:
+        session: aiohttp.ClientSession = kwargs["session"]
+        output_format = kwargs.get("output_format", "multimodal")
         if await self._ensure_fetch_mode() == FETCH_BROWSER:
-            return await self._get_via_browser(url, **kwargs)
+            try:
+                content = await self._get_via_browser(url, **kwargs)
+            except CaptchaEncounteredError:
+                _buffer.add(url)
+                _remember_gate()
+                raise
+            _forget_gate()
+            return content
 
         try:
             content_html = await self._retrieve_content(session, url)
@@ -711,13 +804,21 @@ class ArchiveToday(HeadedBrowser):
             logger.info(f"Plain HTTP could not render {url}; falling back to the browser for it.")
             return await self._get_via_browser(url, **kwargs)
         if content_html is not None:
+            _forget_gate()
             _pages.put(url, content_html)
             _buffer.discard(url)
             return await to_scraped_content(content_html, session=session,
                                             output_format=output_format, url=url)
 
-        # Gated. Remember the URL so the next session picks it up, and do not make the
-        # caller wait for a human: five-minute sessions make that pointless at any scale.
+        _remember_gate()
+        return await self._gated(url, session, output_format)
+
+    async def _gated(self, url: str, session: aiohttp.ClientSession,
+                     output_format) -> ScrapedContent:
+        """Answers for a URL behind the gate: buffers it for the next session and raises
+        the CAPTCHA error -- or serves the screenshot fallback, if enabled."""
+        # Remember the URL so the next session picks it up, and do not make the caller
+        # wait for a human: five-minute sessions make that pointless at any scale.
         _buffer.add(url)
 
         # Fall back to the ungated screenshot and metadata, if enabled. Not cached: it is
@@ -935,7 +1036,7 @@ class ArchiveToday(HeadedBrowser):
                 logger.warning("Archive.today session could not be established.", exc_info=True)
                 return False
             finally:
-                await page.close()
+                await release_page(page)
 
         self._store_cookies(cookies)
         return True

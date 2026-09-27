@@ -14,9 +14,17 @@ const props = defineProps<{
   retrievalTime?: number | null
   fromCache?: boolean
   success?: boolean
+  // With `collapsible`, the header toggles the content; `collapsed` is where it starts
+  collapsible?: boolean
+  collapsed?: boolean
 }>()
 
 const token = useToken()
+const open = ref(!(props.collapsible && props.collapsed))
+
+function toggle() {
+  if (props.collapsible) open.value = !open.value
+}
 
 /** Splits the sequence into text runs and media items, in order. */
 const parts = computed(() => {
@@ -114,17 +122,26 @@ function compact(n: number): string {
 </script>
 
 <template>
-  <UCard>
+  <!-- No divider between header and body: the spacing separates them well enough -->
+  <UCard
+    :ui="{ root: `divide-y-0 transition-[background-color,transform,box-shadow] duration-200
+                  ${collapsible ? 'hover:bg-elevated hover:-translate-y-px hover:shadow-md' : ''}`,
+           header: open ? 'pb-0 sm:pb-0' : '',
+           body: open ? '' : 'hidden' }"
+  >
     <template #header>
-      <div class="flex items-start justify-between gap-3">
+      <div
+        class="flex items-start justify-between gap-3"
+        :class="collapsible ? 'cursor-pointer select-none' : ''"
+        @click="toggle"
+      >
         <div class="min-w-0">
           <a
-            :href="url" target="_blank" rel="noopener noreferrer"
-            class="font-medium hover:underline break-all inline-flex items-center gap-1.5
-                   transition-colors hover:text-primary"
+            :href="url" target="_blank" rel="noopener noreferrer" @click.stop
+            class="inline-flex items-center gap-1.5 max-w-full hover:underline"
           >
             <UIcon name="i-fa7-solid-link" class="size-3 shrink-0 text-dimmed" />
-            {{ url }}
+            <UrlLabel :url="url" />
           </a>
           <div class="flex flex-wrap items-center gap-2 mt-1.5">
             <UBadge
@@ -192,6 +209,15 @@ function compact(n: number): string {
             </span>
           </div>
         </div>
+
+        <UButton
+          v-if="collapsible" color="neutral" variant="ghost" size="sm" square
+          class="shrink-0" :aria-expanded="open"
+          :aria-label="open ? 'Collapse this result' : 'Expand this result'"
+          icon="i-fa7-solid-chevron-down"
+          :ui="{ leadingIcon: `transition-transform duration-200 ${open ? 'rotate-180' : ''}` }"
+          @click.stop="toggle"
+        />
       </div>
     </template>
 
@@ -217,12 +243,12 @@ function compact(n: number): string {
             <MarkdownView v-if="part.kind === 'text'" :source="part.value" />
             <img
               v-else-if="part.item.kind === 'image'" :src="mediaUrl(part.item)"
-              class="max-w-full rounded border border-default" :alt="part.item.ref"
+              class="max-w-full rounded-lg" :alt="part.item.ref"
               loading="lazy"
             >
             <video
               v-else-if="part.item.kind === 'video'" :src="mediaUrl(part.item)" controls
-              class="max-w-full rounded border border-default"
+              class="max-w-full rounded-lg"
             />
             <audio v-else :src="mediaUrl(part.item)" controls class="w-full" />
           </template>

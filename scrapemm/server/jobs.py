@@ -195,24 +195,28 @@ class JobStore:
                   status: Optional[str] = None, url: Optional[str] = None,
                   output_format: Optional[str] = None, method: Optional[str] = None,
                   success: Optional[bool] = None, since: Optional[float] = None,
-                  until: Optional[float] = None) -> list[dict]:
+                  until: Optional[float] = None, sort: str = "newest") -> list[dict]:
         where, args = self._filters(url, status, output_format, method, success,
                                     since, until)
-        query = (f"SELECT * FROM jobs{where} ORDER BY created_at DESC LIMIT ? OFFSET ?")
+        order = SORTS.get(sort, SORTS["newest"])
+        query = f"SELECT * FROM jobs{where} ORDER BY {order}, created_at DESC LIMIT ? OFFSET ?"
         with self._lock:
-            rows = self._connection.execute(query, [*args, limit, offset]).fetchall()
+            # `now` stands in for the end of jobs still running, when sorting by duration
+            rows = self._connection.execute(
+                query.replace(":now", str(time.time())), [*args, limit, offset]).fetchall()
             jobs = [_job_row(row) for row in rows]
-            # The list view shows each job's URLs and timings, so they come along rather
-            # than costing one request per row.
-            for job in jobs:
-                summary = self._connection.execute(
-                    "SELECT url, success, method, retrieval_time, from_cache "
-                    "FROM results WHERE job_id = ? ORDER BY created_at",
-                    (job["id"],)).fetchall()
-                job["urls"] = [dict(row) for row in summary]
-                times = [r["retrieval_time"] for r in summary if r["retrieval_time"]]
-                job["total_retrieval_time"] = sum(times) if times else None
-                job["methods"] = sorted({r["method"] for r in summary if r["method"]})
+            # Every listed job's URLs in one query, rather than one query per job
+            ids = [job["id"] for job in jobs]
+            by_job: dict[str, list[sqlite3.Row]] = {job_id: [] for job_id in ids}
+            if ids:
+                for row in self._connection.execute(
+                        "SELECT job_id, url, success, method, retrieval_time, from_cache, "
+                        f"errors FROM results WHERE job_id IN ({','.join('?' * len(ids))}) "
+                        "ORDER BY created_at", ids):
+                    by_job[row["job_id"]].append(row)
+
+        for job in jobs:
+            _summarize(job, by_job[job["id"]])
         return jobs
 
     def count_jobs(self, status: Optional[str] = None, url: Optional[str] = None,
@@ -244,6 +248,14 @@ class JobStore:
                 (job_id,)).fetchall()
         job = _job_row(row)
         job["results"] = [_result_row(r) for r in results]
+        job["duration"] = _duration(job)
+        # Live counts: the stored ones are only written once the job finishes, so a
+        # running job would otherwise show none of what it has done so far
+        done = {r["url"] for r in job["results"]}
+        job["succeeded"] = sum(1 for r in job["results"] if r["success"])
+        job["failed"] = len(job["results"]) - job["succeeded"]
+        requested = list(dict.fromkeys(job["params"].get("urls") or [])) or list(done)
+        job["pending"] = [url for url in requested if url not in done]
         return job
 
     def delete_job(self, job_id: str) -> bool:
@@ -278,11 +290,13 @@ class JobStore:
     def stats(self) -> dict:
         with self._lock:
             jobs = self._connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-            results = self._connection.execute("SELECT COUNT(*) FROM results").fetchone()[0]
-            succeeded = self._connection.execute(
-                "SELECT COUNT(*) FROM results WHERE success = 1").fetchone()[0]
+            # One pass over the results for all three figures
+            results, succeeded, cached = self._connection.execute(
+                "SELECT COUNT(*), COALESCE(SUM(success), 0), COALESCE(SUM(from_cache), 0) "
+                "FROM results").fetchone()
         return {"jobs": jobs, "urls": results, "succeeded": succeeded,
-                "failed": results - succeeded}
+                "failed": results - succeeded, "from_cache": cached,
+                "cache_hit_rate": cached / results if results else None}
 
     def method_counts(self) -> dict[str, int]:
         """How many URLs each method has successfully retrieved. Only successes count:
@@ -339,6 +353,73 @@ def _truncate(content: dict) -> dict:
             content[field] = value[:MAX_STORED_CONTENT]
             content["truncated"].append(field)
     return content
+
+
+# How the job list can be ordered. Fixed SQL per key, so no input ever reaches the query.
+SORTS = {
+    "newest": "jobs.created_at DESC",
+    "oldest": "jobs.created_at ASC",
+    "longest": "(COALESCE(jobs.finished_at, :now) - jobs.created_at) DESC",
+    "shortest": "(COALESCE(jobs.finished_at, :now) - jobs.created_at) ASC",
+    "most_urls": "jobs.url_count DESC",
+    "fewest_urls": "jobs.url_count ASC",
+    "most_failed": "jobs.failed DESC",
+}
+
+# URLs listed per job in the overview; the detail view has them all
+URL_PREVIEW = 5
+
+# When a URL failed on several methods, the error that says most about why. A CAPTCHA or
+# a missing target explains the whole failure; "method X returned nothing" rarely does.
+ERROR_PRIORITY = ["DomainBlacklistedError", "CaptchaEncounteredError", "TargetUnavailableError",
+                  "AccessBlockedError", "RateLimitError", "QuotaExceededError",
+                  "UnsupportedDomainError", "TimeoutError", "RetrievalFailed"]
+
+
+def _summarize(job: dict, results: list[sqlite3.Row]) -> None:
+    """Adds what the overview shows of a job: its first URLs in the order they were
+    requested -- with the result of each that is done, so a running job lists the rest
+    as pending -- plus its counts and timings."""
+    done = {row["url"]: row for row in results}
+    requested = list(dict.fromkeys(job["params"].get("urls") or [])) or list(done)
+
+    job["urls"] = []
+    for url in requested[:URL_PREVIEW]:
+        row = done.get(url)
+        if row is None:
+            job["urls"].append({"url": url, "state": "pending"})
+            continue
+        entry = {"url": url, "state": "ok" if row["success"] else "failed",
+                 "method": row["method"], "retrieval_time": row["retrieval_time"],
+                 "from_cache": bool(row["from_cache"])}
+        if not row["success"]:
+            entry["error"] = _main_error(json.loads(row["errors"]) if row["errors"] else {})
+        job["urls"].append(entry)
+
+    # Live counts: the stored ones are only written once the job finishes
+    job["done"] = len(done)
+    job["succeeded"] = sum(1 for row in results if row["success"])
+    job["failed"] = len(done) - job["succeeded"]
+    job["duration"] = _duration(job)
+    job["methods"] = sorted({row["method"] for row in results if row["method"]})
+    # The full list can be long and is on the detail page; only its size matters here
+    job["params"] = {k: v for k, v in job["params"].items() if k != "urls"}
+
+
+def _duration(job: dict) -> float:
+    """How long the job took, start to finish -- or so far, while it runs. Not the sum
+    of its URLs' retrieval times: those run concurrently and would add up to far more."""
+    return (job["finished_at"] or time.time()) - job["created_at"]
+
+
+def _main_error(errors: dict) -> Optional[dict]:
+    """The most telling of a URL's errors, as {type, message}."""
+    if not errors:
+        return None
+    ranked = sorted(errors.values(), key=lambda e: ERROR_PRIORITY.index(e.get("type"))
+                    if e.get("type") in ERROR_PRIORITY else len(ERROR_PRIORITY))
+    error = ranked[0]
+    return {"type": error.get("type"), "message": (error.get("message") or "")[:300]}
 
 
 def _job_row(row: sqlite3.Row) -> dict:

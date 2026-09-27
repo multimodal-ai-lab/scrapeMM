@@ -27,6 +27,7 @@ def test_every_method_gets_a_card():
     Decodo needs a secret, and a dashboard that never mentioned it would leave that
     quietly unexplained."""
     keys = status.all_keys()
+    assert "browser" in keys
     assert "firecrawl" in keys
     assert "decodo" in keys
     assert "archive.today" in keys
@@ -99,9 +100,7 @@ async def test_probe_gives_up_on_a_hanging_integration(monkeypatch):
 async def test_headed_browser_probe_does_not_start_a_browser(monkeypatch):
     """A dashboard poll must never launch the shared browser: it would fight the
     CAPTCHA panel and the running retrievals over the profile lock."""
-    from scrapemm.server.integrations import NAME_TO_INTEGRATION
-
-    integration = NAME_TO_INTEGRATION["headed browser"]
+    from scrapemm.server.integrations import browser as integration
 
     async def fail(*args, **kwargs):
         raise AssertionError("the probe must not start the shared browser")

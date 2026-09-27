@@ -23,7 +23,7 @@ from ..auth import check_token
 
 logger = logging.getLogger(APP_NAME)
 
-router = APIRouter(tags=["archive.today"])
+router = APIRouter(tags=["captcha"])
 
 VNC_HOST = os.getenv("SCRAPEMM_VNC_HOST", "127.0.0.1")
 VNC_PORT = int(os.getenv("SCRAPEMM_VNC_PORT", "5900"))
@@ -35,7 +35,7 @@ SUBPROTOCOL = "binary"
 CHUNK = 64 * 1024
 
 
-@router.websocket("/v1/archive-today/vnc")
+@router.websocket("/v1/captcha/vnc")
 async def vnc(websocket: WebSocket, token: Optional[str] = Query(default=None)) -> None:
     if not check_token(token):
         await websocket.close(code=4401, reason="Invalid or missing API key.")

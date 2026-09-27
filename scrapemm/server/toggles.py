@@ -17,20 +17,34 @@ logger = logging.getLogger(APP_NAME)
 
 CONFIG_KEY = "disabled_methods"
 
+# Former names of methods, by their current one. A method switched off under its old name
+# stays off, and requests naming it the old way keep working.
+ALIASES = {"headed browser": "browser"}
+
+
+def resolve_alias(name: str) -> str:
+    """The current name of a method that may be named the old way. Leaves every other
+    name exactly as it is, case included."""
+    return ALIASES.get(str(name).lower(), name)
+
+
+def _key(name: str) -> str:
+    return resolve_alias(name).lower()
+
 
 def disabled() -> set[str]:
     """The lower-cased names of every disabled integration or method."""
-    return {str(name).lower() for name in (get_config_var(CONFIG_KEY) or [])}
+    return {_key(name) for name in (get_config_var(CONFIG_KEY) or [])}
 
 
 def is_enabled(name: str) -> bool:
-    return name.lower() not in disabled()
+    return _key(name) not in disabled()
 
 
 def set_enabled(name: str, enabled: bool) -> bool:
     """Turns one method on or off. Returns the new state."""
     current = disabled()
-    key = name.lower()
+    key = _key(name)
     if enabled:
         current.discard(key)
     else:

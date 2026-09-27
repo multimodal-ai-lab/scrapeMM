@@ -4,13 +4,13 @@ import asyncio
 import logging
 import os
 import shutil
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 
 import aiohttp
 import m3u8
 from ezmm import Video
-from ezmm.util import ts_to_mp4
 
 from scrapemm.server.download.util import (looks_like_hls_url, looks_like_video_file_url,
                                     exceeds_max_size)
@@ -126,7 +126,7 @@ async def download_hls_video(
         playlist_content = await request_static(playlist_url, session, get_text=True, **kwargs)
 
         if not playlist_content:
-            logger.debug(f"Failed to download playlist: {playlist_url}")
+            logger.warning(f"Failed to download the HLS playlist {playlist_url}.")
             return None
 
         playlist = m3u8.loads(playlist_content)
@@ -202,6 +202,9 @@ async def download_hls_video(
         )
         # Keep playlist order; skipping failed segments matches the previous behaviour
         video_segments = [data for data in downloaded if data]
+        if len(video_segments) < len(segment_urls):
+            logger.warning(f"{len(segment_urls) - len(video_segments)} of {len(segment_urls)} "
+                           f"segments of HLS video {playlist_url} could not be downloaded.")
 
         if max_video_size is not None:
             total = sum(len(data) for data in video_segments)
@@ -213,7 +216,7 @@ async def download_hls_video(
         # Combine all segments
         if video_segments:
             ts_bytes = b''.join(video_segments)
-            mp4_bytes = ts_to_mp4(ts_bytes)
+            mp4_bytes = await _ts_to_mp4(ts_bytes)
 
             # Create Video object with MP4 content
             video = Video(binary_data=mp4_bytes, source_url=playlist_url)
@@ -221,8 +224,10 @@ async def download_hls_video(
             return video
 
     except Exception as e:
-        logger.debug(f"Error downloading HLS video from {playlist_url}"
-                     f"\n{type(e).__name__}: {e}")
+        # A warning, not debug: the page is still returned, just without its video, and
+        # this line is the only trace of why.
+        logger.warning(f"Could not download HLS video {playlist_url}: "
+                       f"{type(e).__name__}: {e}")
 
     return None
 
@@ -244,6 +249,31 @@ async def is_maybe_video_url(url: str, session: Union[aiohttp.ClientSession, "AP
     except Exception:
         logger.debug(f"Error probing video URL {url}", exc_info=True)
         return False
+
+
+async def _ts_to_mp4(ts_bytes: bytes) -> bytes:
+    """Remuxes an MPEG-TS video into MP4, without re-encoding.
+
+    With the FFmpeg `_resolve_ffmpeg_path()` finds, not ezMM's `ts_to_mp4()`: that one
+    uses the static FFmpeg 7.0.2 bundled with imageio-ffmpeg, which crashes (SIGSEGV) on
+    some streams, e.g. Bluesky's, which the system FFmpeg remuxes fine. Also runs
+    asynchronously, so a long video does not block the event loop."""
+    ffmpeg_path = _resolve_ffmpeg_path()
+    if not ffmpeg_path:
+        raise RuntimeError("FFmpeg not found; cannot remux the HLS segments to MP4.")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ts_path, mp4_path = Path(tmp) / "video.ts", Path(tmp) / "video.mp4"
+        ts_path.write_bytes(ts_bytes)
+        proc = await asyncio.create_subprocess_exec(
+            ffmpeg_path, "-loglevel", "error", "-hide_banner", "-y", "-i", str(ts_path),
+            "-c", "copy", "-f", "mp4", str(mp4_path),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0 or not mp4_path.is_file():
+            raise RuntimeError(f"FFmpeg exited with {proc.returncode}: "
+                               f"{stderr.decode(errors='ignore').strip()[-500:]}")
+        return mp4_path.read_bytes()
 
 
 async def _ffmpeg_remux_hls_to_mp4(playlist_url: str) -> Optional[bytes]:

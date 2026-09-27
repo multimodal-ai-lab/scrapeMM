@@ -36,6 +36,10 @@ services:
     #   dns:
     #     - 8.8.8.8
     shm_size: ${SCRAPEMM_SHM_SIZE:-1gb}  # Chromium crashes on the default 64 MB
+    # Podman caps a container at 2048 PIDs by default (Docker: unlimited). Every
+    # Chromium renderer runs ~40 threads, so a busy browser exhausts that cap and
+    # the server fails with "can't start new thread".
+    pids_limit: 32768
 
   # --- Self-hosted Firecrawl (profile: firecrawl) --------------------------------
   # Pinned by FIRECRAWL_VERSION so an upstream change cannot alter your deployment
