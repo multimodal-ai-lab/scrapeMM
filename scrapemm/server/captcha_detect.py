@@ -42,8 +42,12 @@ CHALLENGE_PHRASES: tuple[Signature, ...] = (
 CAPTCHA_WIDGETS: tuple[Signature, ...] = (
     ("reCAPTCHA", ("g-recaptcha", "grecaptcha", "google.com/recaptcha")),
     ("hCaptcha", ("h-captcha", "hcaptcha.com")),
+    # Not "cdn-cgi/challenge-platform" as such: Cloudflare injects its passive bot
+    # detection, /cdn-cgi/challenge-platform/scripts/jsd/main.js, into ordinary pages,
+    # which made every short page behind Cloudflare a "Turnstile" (e.g. Perma.cc replay
+    # errors). Its challenge pages load /cdn-cgi/challenge-platform/h/.../orchestrate.
     ("Cloudflare Turnstile", ("cf-turnstile", "challenges.cloudflare.com",
-                              "cdn-cgi/challenge-platform")),
+                              "cdn-cgi/challenge-platform/h/")),
     ("Arkose FunCaptcha", ("funcaptcha", "arkoselabs")),
     ("GeeTest CAPTCHA", ("geetest",)),
     # Markup of unknown CAPTCHA implementations. The bare word "captcha" is deliberately
@@ -58,6 +62,10 @@ MAX_CHALLENGE_TEXT_LENGTH = 1500
 
 SCRIPT_REGEX = re.compile(r"<(script|style|noscript)\b.*?</\1>", re.DOTALL | re.IGNORECASE)
 TAG_REGEX = re.compile(r"<[^>]+>")
+# A JSON key named "captcha" is configuration, not a challenge: every TikTok page ships
+# {"captcha": "//verification-..."} in its api-domains script, which flagged TikTok's
+# not-yet-rendered page shell as a CAPTCHA
+JSON_CAPTCHA_KEY_REGEX = re.compile(r"""["']captcha["']\s*:""")
 
 
 def detect_captcha(content: ScrapedContent) -> Optional[str]:
@@ -127,4 +135,5 @@ def _extract_texts(content: ScrapedContent) -> tuple[str, str]:
         if text is None:
             text = TAG_REGEX.sub(" ", SCRIPT_REGEX.sub(" ", content.html))
 
-    return "\n".join(markup_parts).lower(), " ".join((text or "").split())
+    markup = JSON_CAPTCHA_KEY_REGEX.sub("", "\n".join(markup_parts).lower())
+    return markup, " ".join((text or "").split())

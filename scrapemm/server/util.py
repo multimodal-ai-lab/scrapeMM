@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 import base64
 import binascii
 import inspect
@@ -473,7 +474,16 @@ async def resolve_media(
     if source_element is not None and media is None:
         page = source_element if isinstance(source_element, Page) else source_element.page
         media = BrowserMedia(page)  # Sees no past responses, but still fetches via the browser
-    domain_root = get_domain_root(url) if url else None
+    # Relative references resolve against the document they were found in: a frame's
+    # own URL, not the page's. A replay's images sit at /replay-web-page/... on the
+    # replay host (rejouer.perma.cc); resolved against the record page (perma.cc), they
+    # pointed at nothing, which went unnoticed only while the rendered copy was found.
+    base_url = url
+    with suppress(Exception):
+        document_url = source_element.url if source_element is not None else None
+        if isinstance(document_url, str) and document_url.startswith(("http://", "https://")):
+            base_url = document_url
+    domain_root = get_domain_root(base_url) if base_url else None
 
     # 1. Identify all potential media elements and their URLs. Parsing, decoding and
     # rewriting the HTML are CPU-bound -- a second and more for a page with hundreds
@@ -504,7 +514,7 @@ async def resolve_media(
     # root-relative ones silently drops the rest.
     for i, uri in enumerate(media_uris):
         if uri:
-            media_uris[i] = _resolve_media_url(uri, page_url=url, domain_root=domain_root)
+            media_uris[i] = _resolve_media_url(uri, page_url=base_url, domain_root=domain_root)
 
     # Create retrieval tasks for URL elements
     for element, uri in zip(media_elements, media_uris):

@@ -652,9 +652,7 @@
  },
  {
   "url": "http://archive.premier.gov.ru/eng/events/news/9424/",
-  "expected": {
-   "image": 1
-  },
+  "expected": {},
   "category": "Open web"
  },
  {

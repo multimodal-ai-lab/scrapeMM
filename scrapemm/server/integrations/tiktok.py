@@ -234,9 +234,34 @@ class TikTok(RetrievalIntegration):
 
     async def _get_photo(self, url: str, session: aiohttp.ClientSession,
                          output_format: OutputFormat = "multimodal") -> ScrapedContent:
-        content = await decodo.scrape(url, session, output_format="html")
-        html = self._prepare_photo_html(content.html)
-        return await to_scraped_content(html, session=session, output_format=output_format, url=url)
+        """Decodo first; the shared browser if Decodo brings no post. Decodo often gets
+        only TikTok's page shell -- scripts, no rendered post -- while the browser gets
+        the post even when TikTok lays its CAPTCHA over it (the content is loaded
+        underneath). A CAPTCHA that really hides the post is then one the browser met,
+        which a human can solve in the CAPTCHA panel."""
+        from scrapemm.server.captcha_detect import detect_captcha
+        try:
+            content = await decodo.scrape(url, session, output_format="html")
+            html = self._prepare_photo_html(content.html)
+            scraped = await to_scraped_content(html, session=session,
+                                               output_format=output_format, url=url)
+            if "<img" in html and not detect_captcha(scraped):
+                return scraped
+            reason = "no post in the page"
+        except Exception as e:
+            reason = f"{type(e).__name__}: {e}"
+        logger.info(f"Decodo's copy of {url} is unusable ({reason}); rendering it in the "
+                    f"browser.")
+        from scrapemm.server.integrations import browser
+        rendered = await browser._get(url, output_format=output_format, session=session)
+        # The page's title says "Log in | TikTok" even when the post is there, under a
+        # login dialog; the post's own markup is what counts. A page without it that
+        # shows a CAPTCHA is passed on as it is: the engine queues it for a human.
+        html = rendered.html or ""
+        if ('data-e2e="video-desc"' not in html and "photomode" not in html
+                and not detect_captcha(rendered)):
+            raise RetrievalFailed(f"TikTok's page at {url} shows no post.")
+        return rendered
 
     @staticmethod
     def _prepare_photo_html(html: str) -> str:

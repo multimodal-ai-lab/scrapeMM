@@ -393,7 +393,19 @@ def _on_new_tab(page: Page) -> None:
     human = _shown_human_tab()
     if human is None or page is human or page.url.startswith(_BACKGROUND_TAB_PREFIX):
         return
-    _run_soon(_bring_to_front(human))
+    _run_soon(keep_in_front(human, settle=0.3))
+
+
+async def keep_in_front(page: Page, settle: float = 0.0) -> None:
+    """Brings the page to the front, unless it is there already. Needlessly bringing it
+    there is not harmless: it activates the window, which ends a drag in progress (a
+    slider CAPTCHA reset itself that way)."""
+    if settle:
+        await asyncio.sleep(settle)  # For the new tab to take the front first, if it does
+    with suppress(Exception):
+        if await asyncio.wait_for(page.evaluate("document.visibilityState"), 5) == "visible":
+            return
+    await _bring_to_front(page)
 
 
 async def _bring_to_front(page: Page) -> None:

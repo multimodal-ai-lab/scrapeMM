@@ -36,6 +36,17 @@ _VIDEO_PENDING_JS = r"""() => !document.querySelector('video')
     && /https:(?:\\?\/){2}video[^"'\s<>]+?\.mp4/i.test(document.documentElement.outerHTML)"""
 
 
+# The media of a frame: <img> elements, how many have loaded, how many are large
+_MEDIA_STATE_JS = """() => {
+    const imgs = [...document.images];
+    return {imgs: imgs.length,
+            loaded: imgs.filter(i => i.complete && i.naturalWidth > 0).length,
+            large: imgs.filter(i => i.naturalWidth >= 256 && i.naturalHeight >= 256).length,
+            pending: imgs.filter(i => !i.complete).length,
+            videos: document.querySelectorAll('video').length,
+            text: document.body ? document.body.innerText.length : 0};
+}"""
+
 # Whether a frame shows anything: text, or a medium
 _SHOWS_CONTENT_JS = f"""() => !!(
     (document.body && document.body.innerText.trim())
@@ -331,6 +342,9 @@ async def _settle_media_frame(frame: Frame) -> None:
         logger.debug(f"The replayed page at {frame.url[:120]} names a video but shows none.")
     except Exception:
         pass  # E.g. mid-navigation; the media are collected as they are
+    with suppress(Exception):
+        logger.debug(f"Replay frame {frame.url[:100]} before collecting: "
+                     f"{await frame.evaluate(_MEDIA_STATE_JS)}")
 
 
 async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video_limit: int = MAX_VIDEO_BYTES,

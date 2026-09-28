@@ -205,6 +205,7 @@ class BrowserMedia:
         self._http: Optional[aiohttp.ClientSession] = None  # See `_http_session()`
         self._cookie_hosts: set[str] = set()
         self.stats: Counter = Counter()  # Where the media came from, for the log
+        self._last_failure: dict[str, str] = {}  # Why fetching a medium failed, by URL
         try:
             page.on("response", self._record)
         except Exception:
@@ -334,8 +335,13 @@ class BrowserMedia:
                     if found := await step(candidate, frame, limit, timeout):
                         return found
         except TimeoutError:
-            logger.debug(f"Gave up on the medium {url[:120]} after {timeout:.0f} s.")
+            self._last_failure[url] = f"no answer within {timeout:.0f} s"
 
+        # Visible at info level: a medium silently missing from a result is hard to trace
+        # (archive.org once stopped serving an image its index still listed, HTTP 404)
+        reason = self._last_failure.get(url) or (fallback and self._last_failure.get(fallback))
+        logger.info(f"Dropped the medium {url[:150]}: "
+                    f"{reason or 'the browser has no copy and could not fetch it'}.")
         self.stats["failed"] += 1
         return None, None
 
@@ -436,22 +442,34 @@ class BrowserMedia:
         """`Network.loadNetworkResource`: the browser's own network stack -- its TLS
         fingerprint, cookies and HTTP cache -- without CORS, streamed in chunks. Bypasses
         service workers, so it cannot replay archived media."""
-        try:
-            session = await self._cdp()
-            resource = (await asyncio.wait_for(session.send("Network.loadNetworkResource", {
-                "frameId": self._frame_id, "url": url,
-                "options": {"disableCache": False, "includeCredentials": True},
-            }), timeout=timeout))["resource"]
-        except Exception as e:
-            logger.debug(f"Browser network fetch of {url} failed: {e}")
-            return None
+        for attempt in range(len(THROTTLE_BACKOFF) + 1):
+            try:
+                session = await self._cdp()
+                resource = (await asyncio.wait_for(session.send("Network.loadNetworkResource", {
+                    "frameId": self._frame_id, "url": url,
+                    "options": {"disableCache": False, "includeCredentials": True},
+                }), timeout=timeout))["resource"]
+            except Exception as e:
+                logger.debug(f"Browser network fetch of {url} failed: {e}")
+                self._last_failure[url] = f"{type(e).__name__}: {e}"
+                return None
+            status = resource.get("httpStatusCode")
+            if status not in THROTTLE_STATUSES or attempt == len(THROTTLE_BACKOFF):
+                break
+            if stream := resource.get("stream"):
+                with suppress(Exception):
+                    await session.send("IO.close", {"handle": stream})
+            logger.info(f"{urlparse(url).netloc} throttles media (HTTP {status}); retrying "
+                        f"{url[:120]} in {THROTTLE_BACKOFF[attempt]:.0f} s.")
+            await asyncio.sleep(THROTTLE_BACKOFF[attempt])
 
         stream = resource.get("stream")
         headers = resource.get("headers") or {}
         try:
             if not resource.get("success") or not stream:
-                logger.debug(f"Browser network fetch of {url} failed: HTTP "
-                             f"{resource.get('httpStatusCode')} {resource.get('netErrorName', '')}")
+                reason = f"HTTP {resource.get('httpStatusCode')} {resource.get('netErrorName', '')}"
+                logger.debug(f"Browser network fetch of {url} failed: {reason}")
+                self._last_failure[url] = reason.strip()
                 return None
             if _too_large(headers, limit):
                 return None
@@ -483,16 +501,34 @@ class BrowserMedia:
         whose bodies pass through its pipe in one message (see `READ_CHUNK`)."""
         try:
             session = await self._http_session(url)
-            async with session.get(url, timeout=MEDIA_TIMEOUT, allow_redirects=True) as response:
-                if response.status != 200 or _too_large(dict(response.headers), limit):
-                    return None
-                content = await asyncio.wait_for(stream(response, max_size=limit), timeout=timeout)
-                if not content:
-                    return None
-                return content, response.headers.get("content-type")
+            for attempt in range(len(THROTTLE_BACKOFF) + 1):
+                async with session.get(url, timeout=MEDIA_TIMEOUT, allow_redirects=True) as response:
+                    if response.status in THROTTLE_STATUSES and attempt < len(THROTTLE_BACKOFF):
+                        logger.info(f"{urlparse(url).netloc} throttles media (HTTP "
+                                    f"{response.status}); retrying {url[:120]} in "
+                                    f"{THROTTLE_BACKOFF[attempt]:.0f} s.")
+                        await asyncio.sleep(THROTTLE_BACKOFF[attempt])
+                        continue
+                    if response.status != 200:
+                        self._last_failure[url] = f"HTTP {response.status}"
+                        return None
+                    if _too_large(dict(response.headers), limit):
+                        return None
+                    content = await asyncio.wait_for(stream(response, max_size=limit), timeout=timeout)
+                    if not content:
+                        return None
+                    return content, response.headers.get("content-type")
+            return None
         except Exception as e:
             logger.debug(f"Direct download of {url} failed: {type(e).__name__}: {e}")
+            self._last_failure[url] = f"{type(e).__name__}: {e}"
             return None
+
+
+# Answers that mean "not now" rather than "not at all": retried after these pauses
+# (archive.org answers 429 once a client fetches too much, and 503 while overloaded)
+THROTTLE_STATUSES = {429, 503}
+THROTTLE_BACKOFF = (2.0, 6.0)
 
 
 def _same_origin(url: str, other: str) -> bool:
