@@ -1,4 +1,5 @@
 import asyncio
+import re
 from contextlib import suppress
 import logging
 import time
@@ -54,6 +55,18 @@ _SHOWS_CONTENT_JS = f"""() => !!(
     (document.body && document.body.innerText.trim())
     || document.querySelector('img, video, [{BLOB_ATTR}]'))"""
 
+# Whether a frame shows the replayer's "not in this archive" page (pywb's), rather than a
+# capture: that text, little else, and no media. Under load, the replay of a real capture
+# showed it for a while (its archive not yet indexed, or its app navigating), and that
+# page was taken for the result: "no capture", for records that have one.
+_REPLAY_MISS_JS = """() => {
+    const text = (document.body ? document.body.innerText : '').toLowerCase();
+    return text.length < 2000 && !document.querySelector('img, video')
+        && (text.includes('not found in this archive') || text.includes('archived page not found'));
+}"""
+# How long a frame showing that page gets to turn into the capture before a reload
+REPLAY_MISS_WAIT = 10
+
 # A retrieval is not tried again after this many seconds, so that the attempts (see
 # `PermaCC._extract_content()`) stay well within the browser's 10-minute limit
 RETRY_BUDGET = 240
@@ -77,9 +90,21 @@ class PermaCC(HeadedBrowser):
         came up empty (only the app's shell) or replaced one of its frames while it was
         being read ("Frame was detached"). Either way, the record is loaded once more;
         if the replay still shows nothing, the capture's screenshot is taken instead, which
-        Perma.cc keeps for most records (as `?type=image`)."""
+        Perma.cc keeps for most records (as `?type=image`).
+
+        Captures of YouTube's player pages go to the screenshot straight away: their
+        replay yields YouTube's page shell without the video, or crashes its tab's
+        renderer (at ~800 MB, on the production host) -- which under load also cost the
+        videos of other archive replays running at the same time."""
         loop = asyncio.get_running_loop()
         start = loop.time()
+        shot = _screenshot_url(page.url)
+        if shot and _replays_poorly(await _captured_url(page)):
+            logger.info(f"{page.url} captures a YouTube player page; taking its screenshot "
+                        f"({shot}).")
+            with suppress(PlaywrightError):
+                await page.goto(shot, wait_until="domcontentloaded", timeout=60_000)
+        missing = False
         for attempt in range(2):
             try:
                 target = await self._extract_capture(page)
@@ -92,10 +117,14 @@ class PermaCC(HeadedBrowser):
             if renderer_crashed(page):
                 # Nothing on this page answers any more; `_browse()` retries on a new one
                 raise PlaywrightError("Target crashed")
-            if target is not None and await _shows_content(target):
+            missing = target is not None and await _shows_replay_miss(target)
+            if target is not None and not missing and await _shows_content(target):
                 return target
             if attempt == 0 and loop.time() - start < RETRY_BUDGET:
-                if target is not None:
+                if missing:
+                    logger.info(f"The replay at {page.url} says its page is not in the "
+                                f"archive; loading the record again.")
+                elif target is not None:
                     logger.info(f"The replay at {page.url} came up empty; loading the "
                                 f"record again.")
                 with suppress(PlaywrightError):
@@ -106,17 +135,23 @@ class PermaCC(HeadedBrowser):
         # The replay rendered the capture, twice, and it holds nothing to show
         replayed_empty = target is not None
         shot = _screenshot_url(page.url)
+        if missing and shot is None:
+            raise TargetUnavailableError(
+                f"The replay of the Perma.cc record at {page.url} says the page is not in "
+                f"its archive, twice.")
         if shot is None or loop.time() - start >= RETRY_BUDGET:
             return None
-        logger.info(f"The replay at {page.url} shows nothing; taking the capture's "
-                    f"screenshot ({shot}).")
+        logger.info(f"The replay at {page.url} "
+                    f"{'still says its page is not in the archive' if missing else 'shows nothing'}"
+                    f"; taking the capture's screenshot ({shot}).")
         try:
             await page.goto(shot, wait_until="domcontentloaded", timeout=60_000)
             if replayed_empty and "type=image" not in page.url:
                 # Perma.cc sends a record without a screenshot back to the replay
                 raise TargetUnavailableError(
                     f"The Perma.cc capture at {shot.split('?')[0]} is empty (the replay "
-                    f"shows nothing, and there is no screenshot).")
+                    f"{'says the page is not in its archive' if missing else 'shows nothing'}, "
+                    f"and there is no screenshot).")
             target = await self._extract_capture(page)
         except PlaywrightError:
             logger.debug(f"The screenshot at {shot} could not be read.", exc_info=True)
@@ -328,11 +363,49 @@ class PermaCC(HeadedBrowser):
             return 0
 
 
+async def _shows_replay_miss(frame: Frame) -> bool:
+    """Whether the frame shows pywb's "not in this archive" page, and keeps showing it
+    for REPLAY_MISS_WAIT seconds (see `_REPLAY_MISS_JS`)."""
+    deadline = asyncio.get_running_loop().time() + REPLAY_MISS_WAIT
+    while True:
+        try:
+            if not await frame.evaluate(_REPLAY_MISS_JS):
+                return False
+        except PlaywrightError:
+            return False
+        if asyncio.get_running_loop().time() >= deadline:
+            return True
+        await asyncio.sleep(1)
+
+
 async def _shows_content(frame: Frame) -> bool:
     try:
         return bool(await frame.evaluate(_SHOWS_CONTENT_JS))
     except PlaywrightError:
         return False
+
+
+# Captured pages whose replay never shows their content: YouTube's player pages
+_POOR_REPLAYS = re.compile(
+    r"^https?://(?:(?:www|m)\.)?(?:youtube\.com/(?:watch|shorts/|live/|embed/)|youtu\.be/)",
+    re.IGNORECASE)
+
+
+def _replays_poorly(url: Optional[str]) -> bool:
+    return bool(url and _POOR_REPLAYS.match(url))
+
+
+async def _captured_url(page: Page) -> Optional[str]:
+    """The URL a Perma.cc record captured, as its page's playback script names it."""
+    with suppress(Exception):
+        return await page.evaluate("""() => {
+            for (const s of document.querySelectorAll('script')) {
+                const m = /const url = "([^"]*)"/.exec(s.textContent);
+                if (m) return JSON.parse('"' + m[1] + '"');
+            }
+            return null;
+        }""")
+    return None
 
 
 def _screenshot_url(url: str) -> Optional[str]:
@@ -756,19 +829,33 @@ _lookup_gate: Optional[asyncio.Semaphore] = None
 _rate_limited_until = 0.0
 
 
+# Query parameters that only track how a link was shared, never which content it is
+_TRACKING_PARAMS = re.compile(
+    r"^(utm_.*|fbclid|gclid|dclid|msclkid|mc_cid|mc_eid|igsh|igshid|si|s|t|ref|ref_src|"
+    r"ref_url|feature|lang|is_from_webapp|is_copy_url|sender_device|share_.*|_rdc|_rdr|"
+    r"rdid|mibextid|xmt|__cft__.*|__tn__)$", re.IGNORECASE)
+
+
 def _lookup_candidates(url: str) -> list[str]:
-    """The spellings of `url` worth looking up, in order: as given, then without its
-    query and fragment (tracking parameters rarely match the archived link), and for X
-    the other of its two domains."""
-    from urllib.parse import urlsplit, urlunsplit
+    """The spellings of `url` worth looking up, in order: as given; without the query
+    parameters that only track sharing (utm_*, fbclid, ?s=, ...) and the fragment; and
+    for X the other of its two domains.
+
+    Only tracking parameters go: the query often *is* the content -- a YouTube video
+    is `watch?v=...`. Dropping the whole query once matched three different videos to
+    the same Perma.cc capture of some other video.
+    """
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
     candidates = [url]
     parts = urlsplit(url)
-    if parts.query or parts.fragment:
-        candidates.append(urlunsplit(parts._replace(query="", fragment="")))
+    kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+            if not _TRACKING_PARAMS.match(k)]
+    cleaned = parts._replace(query=urlencode(kept), fragment="")
+    candidates.append(urlunsplit(cleaned))
     host = parts.netloc.lower().removeprefix("www.")
     swap = {"x.com": "twitter.com", "twitter.com": "x.com"}.get(host)
     if swap:
-        candidates.append(urlunsplit(parts._replace(netloc=swap, query="", fragment="")))
+        candidates.append(urlunsplit(cleaned._replace(netloc=swap)))
     return list(dict.fromkeys(candidates))
 
 

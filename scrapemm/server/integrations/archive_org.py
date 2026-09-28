@@ -20,6 +20,23 @@ _VIDEO_DECOYS = ("playback1.mp4", "ttwstatic.com", "webapp-desktop/playback")
 
 # Once the player fetched a video, how long its <video> element still gets to appear
 SERVED_VIDEO_GRACE = 5.0
+# How long a video page whose video was not collected gets once more (see
+# `_collect_video()`)
+SECOND_VIDEO_WAIT_MS = 25_000
+
+
+async def _collected_video(frame: Frame) -> bool:
+    """Whether the frame holds a video that `resolve_media()` will take: one fetched into
+    the page already (BLOB_ATTR), or one with a source that is not a decoy."""
+    try:
+        return bool(await frame.evaluate(
+            """({attr, decoys}) => [...document.querySelectorAll('video, video source')].some(v => {
+                if (v.hasAttribute(attr)) return true;
+                const src = (v.getAttribute('src') || '').toLowerCase();
+                return !!src && !src.startsWith('blob:') && !decoys.some(d => src.includes(d));
+            })""", {"attr": BLOB_ATTR, "decoys": list(_VIDEO_DECOYS)}))
+    except PlaywrightError:
+        return False
 
 
 class ArchiveOrg(HeadedBrowser):
@@ -182,6 +199,25 @@ class ArchiveOrg(HeadedBrowser):
         logger.debug("Archive.org primary video did not appear before timeout; continuing.")
         return fallback
 
+    async def _collect_video(self, page: Page, frame: Frame) -> Frame:
+        """Waits for the replayed player's video and collects the frame's media. If no
+        video was collected -- under load, the archived player mounted after the wait, or
+        its fetch of the video came too late to be seen -- the page gets one more wait
+        and collection: in busy production suite runs, the TikTok and Kwai captures lost
+        their videos that way, while they came through alone every time."""
+        for attempt in range(2):
+            frame = await self._wait_for_primary_video(
+                page, preferred=frame, timeout_ms=30000 if attempt == 0 else SECOND_VIDEO_WAIT_MS)
+            await _stash_media_in_frame(frame)
+            await self._inline_served_video(frame, page)
+            if await _collected_video(frame):
+                return frame
+            if attempt == 0:
+                logger.info(f"No video collected yet at {page.url}; waiting for the "
+                            f"archived player once more.")
+        logger.info(f"The archived player at {page.url} yielded no video.")
+        return frame
+
     async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
         if "503 Service Unavailable".lower() in (await page.content()).lower():
             raise TargetUnavailableError("Archive.org is currently unavailable (Error 503).")
@@ -196,20 +232,15 @@ class ArchiveOrg(HeadedBrowser):
                 if frame:
                     await self._wait_playback_frame_ready(frame)
                     if wants_video:
-                        frame = await self._wait_for_primary_video(page, preferred=frame)
+                        return await self._collect_video(page, frame)
                     await _stash_media_in_frame(frame)
-                    if wants_video:
-                        await self._inline_served_video(frame, page)
                     return frame
 
             # Rewritten snapshot without playback iframe (content already on the top frame).
             target: Frame = page.main_frame
             if wants_video:
                 await self._wait_playback_frame_ready(target)
-                target = await self._wait_for_primary_video(page, preferred=target)
-                await _stash_media_in_frame(target)
-                await self._inline_served_video(target, page)
-                return target
+                return await self._collect_video(page, target)
             return page
 
         except PlaywrightError:

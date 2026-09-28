@@ -537,8 +537,11 @@ def _classify(url: str, method_name: str, content: Optional[ScrapedContent],
                                         f"without any text or media.")
 
     # ...nor an archive's own "no such capture" page (Perma.cc's and the Wayback
-    # Machine's replayers answer a miss with a page of their own, which scraped fine)
-    if marker := _replay_miss(content):
+    # Machine's replayers answer a miss with a page of their own, which scraped fine).
+    # Not for the Perma.cc integration: its replay shows that page for a while also for
+    # records that do have the capture (under load), so the integration judges it itself,
+    # on the capture's frame, after waiting and reloading (see `PermaCC._extract_content`)
+    if method_name not in ("Perma.cc", chain.label("perma_cc")) and (marker := _replay_miss(content)):
         logger.info(f"Method {method_name} got the archive's \"not archived\" page for {url}.")
         return "error", TargetUnavailableError(
             f"The archive has no capture of this page: its replay says \"{marker}\".")
