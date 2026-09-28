@@ -322,18 +322,22 @@ async def list_jobs(
     criteria = dict(status=job_status, url=url, output_format=output_format,
                     method=method, success=success, since=since, until=until,
                     outcome=outcome)
-    return {
-        "version": jobs.version,
-        "jobs": jobs.list_jobs(limit=limit, offset=offset, sort=sort, **criteria),
-        "total": jobs.count_jobs(**criteria),
-        "stats": jobs.stats(),
-        "methods": jobs.known_methods(),
-    }
+    # In a thread: a filtered query over a large history can take seconds, and on the
+    # event loop that would freeze every retrieval in flight
+    def answer() -> dict:
+        return {
+            "version": jobs.version,
+            "jobs": jobs.list_jobs(limit=limit, offset=offset, sort=sort, **criteria),
+            "total": jobs.count_jobs(**criteria),
+            "stats": jobs.stats(),
+            "methods": jobs.known_methods(),
+        }
+    return await asyncio.to_thread(answer)
 
 
 @router.get("/jobs/{job_id}")
 async def get_job(job_id: str) -> dict:
-    job = jobs.get_job(job_id)
+    job = await asyncio.to_thread(jobs.get_job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"No job '{job_id}'.")
     return job

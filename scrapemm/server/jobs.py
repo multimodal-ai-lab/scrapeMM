@@ -112,6 +112,12 @@ class JobStore:
             logger.info(f"Classified the outcome of {len(rows)} stored results.")
         self._connection.execute(
             "CREATE INDEX IF NOT EXISTS results_outcome_idx ON results(outcome, outcome_kind)")
+        # Covers every per-URL job filter (see `_filters`), so they never read the rows
+        # themselves: the outcome columns sit behind the large `content` column, and
+        # reading them walked its overflow pages across the whole table.
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS results_filter_idx "
+            "ON results(job_id, url, success, method, outcome, outcome_kind)")
 
     # --- Writing ------------------------------------------------------------------
 
