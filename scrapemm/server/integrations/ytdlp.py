@@ -223,7 +223,7 @@ _ERROR_PATTERNS: list[tuple[tuple[str, ...], type[Exception], str]] = [
     (("video unavailable", "is not available", "does not exist", "http error 404",
       "404: not found", "empty media response"),
      TargetUnavailableError, "The content is not available"),
-    (("cannot parse data", "unable to extract", "unsupported url"),
+    (("cannot parse data", "unable to extract", "unsupported url", "no suitable extractor"),
      RetrievalFailed, "yt-dlp cannot extract this page"),
     (("timed out", "connection reset", "connection refused", "name resolution",
       "network is unreachable", "http error 5", "remote end closed"),

@@ -661,5 +661,26 @@
   "url": "https://www.congress.gov/bill/119th-congress/senate-bill/1383",
   "expected": {},
   "category": "Open web"
+ },
+ {
+  "url": "https://www.facebook.com/permalink.php?story_fbid=pfbid02yJMC3foQksvEcJX5ySQMmPZEeRyUSK1EjDEdUcK8SSe6RRmHqeZHf7MNtygMt1fTl&#038;id=61556745955761",
+  "expected": {
+   "image": 1
+  },
+  "category": "Facebook"
+ },
+ {
+  "url": "https://www.facebook.com/permalink.php?story_fbid=pfbid02CPn7q8czyPAQpMrJ3GWDeCpM1TXDofU5NpwtaeTEieNApvtQsBjLVKFp7ShUCopvl&#038;id=100078635210746",
+  "expected": {
+   "image": 1
+  },
+  "category": "Facebook"
+ },
+ {
+  "url": "https://www.facebook.com/plugins/video.php?height=310&href=https://web.facebook.com/reel/2235520617213502/&show_text=true&width=560&t=0",
+  "expected": {
+   "video": 1
+  },
+  "category": "Facebook"
  }
 ]

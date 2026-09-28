@@ -3,7 +3,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import aiohttp
 from ezmm import MultimodalSequence
@@ -53,6 +53,19 @@ FB_OG_DESCRIPTION_REGEX = re.compile(
 FB_OG_TITLE_REGEX = re.compile(r'<meta\s+property="og:title"\s+content="(.*?)"', re.DOTALL)
 FB_MESSAGE_TEXT_REGEX = re.compile(r'"message":\{"text":"((?:[^"\\]|\\.)*)"')
 FB_CREATION_TIME_REGEX = re.compile(r'"creation_time":(\d+)')
+FB_UNAVAILABLE_MARKERS = ('"tracePolicy":"comet.error"', '"currMedia":null')
+UNAVAILABLE_MESSAGE = ("The Facebook content is not available: it was removed, its "
+                       "visibility was restricted, or it never existed.")
+
+# Query parameters of Facebook's embed plugins (plugins/post.php, plugins/video.php).
+# Embed codes often carry the target in an unencoded 'href', so the target's own query
+# parameters and the plugin's run together; these tell them apart.
+FB_PLUGIN_PARAMS = {
+    "href", "width", "height", "show_text", "t", "appid", "app_id", "show_captions",
+    "autoplay", "mute", "allowfullscreen", "lazy", "adapt_container_width",
+    "hide_cover", "show_facepile", "small_header", "tabs", "locale", "sdk",
+    "container_width", "ref", "colorscheme", "layout", "size", "share", "action",
+}
 
 JS_GET_PHOTO_IMAGE = """
     () => {
@@ -132,12 +145,19 @@ def _extract_post_text(html: str) -> str:
     return postprocess_markdown(description)
 
 
+def _shows_error_page(html: str) -> bool:
+    """Whether the page is Facebook's "This content isn't available right now" (removed,
+    private or restricted content), recognized by language-independent markers: the
+    error route that post pages render, or a photo page whose photo came back null."""
+    return any(marker in html for marker in FB_UNAVAILABLE_MARKERS)
+
+
 def _is_unavailable_page(html: str) -> bool:
-    """Whether Facebook served its "This content isn't available" page. That message
-    is rendered client-side (and localized), so it is recognized by what is missing
-    instead: a page that loaded fine, with no login form, but without any post metadata
-    and without a single video object."""
-    return ('id="login_form"' not in html
+    """Whether Facebook served its "This content isn't available" page. Besides the
+    explicit markers, it is recognized by what is missing: a page that loaded fine,
+    with no login form, but without any post metadata and without a single video object."""
+    return _shows_error_page(html) or (
+            'id="login_form"' not in html
             and not FB_OG_TITLE_REGEX.search(html)
             and '"__typename":"Video"' not in html)
 
@@ -208,6 +228,8 @@ class Facebook(RetrievalIntegration):
         # Get the text first, straight from the page: it is public for public posts
         content = []
         html = await self._fetch_page(url)
+        if html and _shows_error_page(html):
+            raise TargetUnavailableError(UNAVAILABLE_MESSAGE)
         if header := _extract_post_header(html or ""):
             content.append(header)
 
@@ -280,9 +302,7 @@ class Facebook(RetrievalIntegration):
         video_urls = _extract_video_urls(html)
         if not video_urls:
             if _is_unavailable_page(html):
-                raise TargetUnavailableError(
-                    "The Facebook content is not available: it was removed, its "
-                    "visibility was restricted, or it never existed.")
+                raise TargetUnavailableError(UNAVAILABLE_MESSAGE)
             raise RetrievalFailed(f"No video found in the Facebook page for {url}.")
 
         session = kwargs.get("session")
@@ -358,15 +378,15 @@ class Facebook(RetrievalIntegration):
                 except PlaywrightTimeoutError:
                     raise TimeoutError("Timed out loading Facebook photo page.")
 
-                image_url = await page.evaluate(JS_GET_PHOTO_IMAGE)
-
-            except TimeoutError:
-                raise
+                html = await page.content()
+                if not _shows_error_page(html):
+                    image_url = await page.evaluate(JS_GET_PHOTO_IMAGE)
 
             finally:
-                html = await page.content()
                 await browser.close()
 
+        if _shows_error_page(html):
+            raise TargetUnavailableError(UNAVAILABLE_MESSAGE)
         if not image_url:
             raise RetrievalFailed("Could not locate image on Facebook photo page.")
 
@@ -446,19 +466,40 @@ class Facebook(RetrievalIntegration):
         raise NotImplementedError("No method available to retrieve Facebook profiles.")
 
     def _normalize_url(self, url: str) -> str:
-        """If the URL is a login Facebook URL, i.e., of the form https://www.facebook.com/login/?next=...
-        or https://www.facebook.com/plugins/post.php?href=..., extracts the actual post's URL."""
-        if url.startswith(
-                "https://www.facebook.com/login/?next="
-        ):  # Login redirect URLs
-            query = urlparse(url).query
-            return parse_qs(query).get("next", [])[0] or url
-        elif url.startswith(
-                "https://www.facebook.com/plugins/post.php?href="
-        ):  # Post embedding links
-            query = urlparse(url).query
-            return parse_qs(query).get("href", [])[0] or url
+        """Turns the URL into the canonical www.facebook.com URL of the target: undoes
+        HTML escaping ('&#038;' from WordPress embeds), unifies web./m./mbasic. hosts,
+        and unwraps login redirects (login/?next=...) and embed plugins (plugins/post.php
+        or plugins/video.php?href=...)."""
+        url = html_lib.unescape(url.strip())
+        url = re.sub(r"^(?:https?://)?(?:(?:www|web|m|mbasic|touch)\.)?facebook\.com(?=[/?#]|$)",
+                     "https://www.facebook.com", url, flags=re.IGNORECASE)
+        parsed = urlparse(url)
+        if parsed.netloc != "www.facebook.com":
+            return url
+        if parsed.path.rstrip("/") == "/login":
+            target = parse_qs(parsed.query).get("next", [""])[0]
+            return self._normalize_url(target) if target.startswith("http") else url
+        if parsed.path.startswith("/plugins/"):
+            target = self._extract_plugin_href(parsed.query)
+            return self._normalize_url(target) if target.startswith("http") else url
         return url
+
+    @staticmethod
+    def _extract_plugin_href(query: str) -> str:
+        """Returns the target URL of an embed plugin's query. The 'href' may be
+        URL-encoded or not; in the latter case, the parameters following it belong to
+        the target until one is a known plugin parameter."""
+        parts = query.split("&")
+        for i, part in enumerate(parts):
+            if part.startswith("href="):
+                href = [part.removeprefix("href=")]
+                for following in parts[i + 1:]:
+                    if following.split("=", 1)[0].lower() in FB_PLUGIN_PARAMS:
+                        break
+                    href.append(following)
+                href = "&".join(href)
+                return unquote(href) if re.match(r"https?%3A", href, re.I) else href
+        return ""
 
     def _is_video_url(self, url: str) -> bool:
         """Checks if the URL is a Facebook video URL."""
