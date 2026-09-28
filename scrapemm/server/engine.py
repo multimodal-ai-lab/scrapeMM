@@ -599,22 +599,105 @@ async def _run_archives(archives: list[str], url: str, session: aiohttp.ClientSe
     until one yields the page. Returns (method label, content), or None; failures are
     filed into `errors`. Each outcome is judged like a live method's, so an archived
     CAPTCHA or paywall teaser does not count either."""
+    platform = chain.platform_of(url)
+    deadline = time.monotonic() + PLATFORM_ARCHIVE_BUDGET if platform else None
     for key in archives:
         name = chain.label(key)
+        if key == "wayback":
+            routine = _wayback(url, session, errors, output_format, max_video_size)
+        elif key == "perma_cc":
+            routine = _perma_cc(url, session, errors, output_format, max_video_size)
+        else:
+            errors[name] = NotImplementedError(f"No archive method '{key}'.")
+            continue
         try:
-            if key == "wayback":
-                content = await _wayback(url, session, errors, output_format, max_video_size)
-            elif key == "perma_cc":
-                content = await _perma_cc(url, session, errors, output_format, max_video_size)
+            if deadline is None:
+                content = await routine
+            elif (remaining := deadline - time.monotonic()) <= 0:
+                routine.close()
+                errors[name] = RetrievalFailed(
+                    f"Not tried: the {PLATFORM_ARCHIVE_BUDGET:.0f} s for archived copies of "
+                    f"{platform} URLs were used up.")
+                continue
             else:
-                raise NotImplementedError(f"No archive method '{key}'.")
+                content = await asyncio.wait_for(routine, remaining)
+        except asyncio.TimeoutError:
+            errors[name] = RetrievalFailed(
+                f"{name} did not deliver within the {PLATFORM_ARCHIVE_BUDGET:.0f} s allowed "
+                f"for archived copies of {platform} URLs.")
+            continue
         except Exception as e:
             logger.warning(f"Archive method {name} failed for {url}: {type(e).__name__}: {e}")
             errors[name] = e
             continue
-        if content is not None:
-            return name, content
+        if content is None:
+            continue
+        if platform and (problem := _unusable_platform_copy(url, platform, content)):
+            logger.info(f"Rejected {name}'s copy of {url}: {problem}")
+            errors[name] = _rejection(problem, errors)
+            continue
+        return name, content
     return None
+
+
+# Seconds the archive stage may take for a platform URL, all archives together. Its
+# integration has already failed, mostly for good (a removed post, a bot check), and an
+# archive of a platform page seldom holds the content: better an answer in under a minute
+# than a replay of a YouTube page for minutes.
+PLATFORM_ARCHIVE_BUDGET = 45.0
+
+# Visible text of a platform's login or consent page, lower case. Checked in archived
+# copies of platform URLs only, where such a page is what the archive captured instead of
+# the content.
+LOGIN_WALL_MARKERS = (
+    "you must log in to continue", "log in to continue", "log into facebook",
+    "log in or sign up to view", "see more on facebook",
+    "before you continue to youtube", "consent.youtube.com",
+    "confirm you're not a bot", "confirm you\u2019re not a bot",
+    "log in to instagram", "sign up to see photos and videos",
+    "log in to tiktok", "don't miss what's happening",
+)
+
+
+def _unusable_platform_copy(url: str, platform: str,
+                            content: ScrapedContent) -> Optional[str]:
+    """Why an archived copy of a platform URL is not the platform's content, or None if it
+    is: it must carry a video for a video URL, some image or video otherwise, and must not
+    be a login or consent page."""
+    images, videos = _media_counts(content)
+    text = (content.markdown or (str(content.multimodal) if content.multimodal else "")).lower()
+    if marker := next((m for m in LOGIN_WALL_MARKERS if m in text), None):
+        return f"the archived copy shows {platform}'s login or consent page (\"{marker}\")."
+    if chain.is_video_url(url):
+        if not videos:
+            return f"the archived copy of this {platform} video lacks the video."
+    elif not images and not videos:
+        return (f"the archived copy carries none of the {platform} post's media, so it is "
+                f"most likely a login wall.")
+    return None
+
+
+def _media_counts(content: ScrapedContent) -> tuple[int, int]:
+    """(images, videos) in the content: the downloaded media for multimodal output, the
+    media referenced in the HTML or Markdown otherwise."""
+    if content.multimodal is not None:
+        return len(content.multimodal.images), len(content.multimodal.videos)
+    markup = content.html or content.markdown or ""
+    videos = len(re.findall(r"<video\b|\.mp4\b|\[video:", markup, re.I))
+    images = len(re.findall(r"<img\b|!\[", markup, re.I))
+    return images, videos
+
+
+def _rejection(problem: str, errors: dict) -> Exception:
+    """The error that records a rejected archived copy. Unavailable ("yellow") when nothing
+    else explains the failure; a mere RetrievalFailed when a method already found the
+    target unavailable, so that finding -- the integration's own, typically -- stays the
+    decisive one (see `scrapemm.common.outcome`)."""
+    from scrapemm.common.outcome import UNAVAILABLE_KINDS, _error_type
+    message = problem[0].upper() + problem[1:]
+    if any(_error_type(e) in UNAVAILABLE_KINDS for e in errors.values()):
+        return RetrievalFailed(message)
+    return AccessBlockedError(message)
 
 
 async def _wayback(url: str, session: aiohttp.ClientSession, errors: dict,

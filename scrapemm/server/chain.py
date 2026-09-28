@@ -27,6 +27,13 @@ Semantics, as `resolve()` and the engine apply them
   there too. The archive stage applies unchanged.
 * **Plain HTTP is for the open web.** It is skipped for domains that have an integration
   (a plain GET of a tweet or a TikTok page yields a login wall, never the content).
+* **Archived copies of platform URLs must carry the platform's content.** For a domain
+  with its own integration, an archived copy counts only with at least one image or video
+  -- a video, for video URLs (`VIDEO_URL`) -- and not if it shows a login or consent page:
+  a captured Facebook login wall is no post. Otherwise the copy is rejected and the
+  integration's own verdict (unavailable, blocked, ...) stands. The archive stage of a
+  platform URL also has a time budget (`engine.PLATFORM_ARCHIVE_BUDGET`), so that it adds
+  seconds to a URL the platform already refused, not minutes.
 * **Archive URLs are not looked up in archives.** For a URL of an archive service itself
   (web.archive.org, perma.cc, archive.today, ...) the archive stage is skipped.
 * **Outcomes.** The first method whose result passes the checks (not empty, no CAPTCHA,
@@ -48,6 +55,7 @@ holds the order.
 """
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
@@ -171,6 +179,30 @@ DOMAIN_ROUTES: dict[str, list[str]] = {
 
 # Integrations whose URLs are archives themselves, which the archive stage skips
 ARCHIVE_INTEGRATIONS = {"internet archive", "perma.cc", "archive.today", "ghostarchive"}
+
+# Platform URLs whose content is a video: an archived copy of one counts only if it holds
+# the video (see `engine._unusable_platform_copy()`). A Wayback capture of a YouTube watch
+# page has the thumbnails and the comments, never the video.
+VIDEO_URL = re.compile(r"""(?ix)
+      youtube\.com/(watch|shorts/|live/|embed/|v/) | youtu\.be/
+    | tiktok\.com/(@[^/]+/video/|v/|t/) | (vm|vt)\.tiktok\.com/
+    | facebook\.com/(reel/|watch|[^/?]+/videos/|video\.php) | fb\.watch/
+    | instagram\.com/(reel|reels|tv)/
+    | (x|twitter)\.com/[^/]+/status/\d+/video/
+    | kwai\.com/.*/video/
+""")
+
+
+def is_video_url(url: str) -> bool:
+    return bool(VIDEO_URL.search(url))
+
+
+def platform_of(url: str) -> Optional[str]:
+    """The platform integration responsible for the URL's domain (X, TikTok, YouTube, ...),
+    or None for the open web and for archive services' own URLs."""
+    from .integrations import get_integrations_for_url
+    names = [n for n in get_integrations_for_url(url) if n.lower() not in ARCHIVE_INTEGRATIONS]
+    return names[0] if names else None
 
 
 def canonical(name: str) -> str:
