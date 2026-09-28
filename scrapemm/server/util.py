@@ -118,6 +118,11 @@ async def _in_html_thread(function, *args, **kwargs):
 # beyond a couple at once, which costs 7 s of TCP retries each (archive.premier.gov.ru).
 # Measured no slower on image-heavy pages than 4 or 6: the connections get reused.
 MAX_MEDIA_PER_HOST = 2
+# Longest a single medium fetched through the page may take (embedded players excepted).
+# The page is returned without it rather than not at all: in a browser retrieval, a
+# medium that took longer ran into the 10-minute limit, which failed the whole page
+# (thequint.com, over a trickling ad video).
+MAX_SECONDS_PER_MEDIUM = 300
 URL_REGEX = r"https?:\/\/(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9@:%_\+.~#?&//=]*)"
 DATA_URI_REGEX = r"data:([\w/+.-]+/[\w.+-]+);base64,([A-Za-z0-9+/=]+)"
 MD_HYPERLINK_REGEX = rf'(!?\[([^]^[]*)\]\((.*?)(?: "[^"]*")?\))'
@@ -535,12 +540,23 @@ async def resolve_media(
     # 4. Download media, at most a few at a time from each host, like a browser does
     host_gates: dict[str, asyncio.Semaphore] = {}
 
+    async def bounded(uri: str, task: Awaitable):
+        if uri in pageless:
+            # Not these: an embedded YouTube video may queue for minutes behind the
+            # others (YouTube's pacing), and still arrive
+            return await task
+        try:
+            return await asyncio.wait_for(task, MAX_SECONDS_PER_MEDIUM)
+        except TimeoutError:
+            logger.info(f"Gave up on the medium {uri[:120]} after {MAX_SECONDS_PER_MEDIUM} s.")
+            return None
+
     async def gated(uri: str, task: Awaitable):
         if uri in in_browser:
-            return await task
+            return await bounded(uri, task)
         gate = host_gates.setdefault(urlparse(uri).netloc, asyncio.Semaphore(MAX_MEDIA_PER_HOST))
         async with gate:
-            return await task
+            return await bounded(uri, task)
 
     # Those that need no page start right away, but are not waited for before the page
     # can be let go: an embedded video may take minutes (or retry its way to failure)

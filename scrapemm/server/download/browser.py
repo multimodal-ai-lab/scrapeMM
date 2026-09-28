@@ -325,9 +325,16 @@ class BrowserMedia:
             if frame is not None and await self._is_replay_frame(frame):
                 steps = steps[0::2] + steps[1::2]  # All copies first
 
-        for step, candidate in steps:
-            if found := await step(candidate, frame, limit, timeout):
-                return found
+        # `timeout` bounds the medium as a whole, not each step: the steps' own timeouts
+        # added up, and a stream that kept trickling (thequint.com's ad video) held the
+        # retrieval until the browser's 10-minute limit failed the entire page
+        try:
+            async with asyncio.timeout(timeout):
+                for step, candidate in steps:
+                    if found := await step(candidate, frame, limit, timeout):
+                        return found
+        except TimeoutError:
+            logger.debug(f"Gave up on the medium {url[:120]} after {timeout:.0f} s.")
 
         self.stats["failed"] += 1
         return None, None

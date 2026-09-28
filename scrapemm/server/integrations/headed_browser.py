@@ -20,6 +20,7 @@ from seleniumbase import cdp_driver
 from seleniumbase.undetected.cdp_driver.browser import Browser
 
 from scrapemm.common import RetrievalFailed
+from scrapemm.common.exceptions import TargetUnavailableError
 from scrapemm.server.config import get_config_var
 from scrapemm.server.download.browser import BrowserMedia, annotate_rendered_media
 from scrapemm.server.paths import BROWSER_PROFILE_PATH
@@ -630,6 +631,11 @@ CLOUDFLARE_SOLVE_ATTEMPTS = 3
 # behind a challenge then waited out the full retrieval timeout (thip.media, 10 minutes)
 CLOUDFLARE_SOLVE_TIMEOUT = 120
 
+# Reading a page that navigates meanwhile (see `HeadedBrowser._html_and_source()`)
+REDIRECT_READ_ATTEMPTS = 3
+ANUBIS_WAIT = 20  # Seconds for Anubis' proof of work, which takes a second or two
+_ANUBIS_MARKER = "anubis_challenge"  # The id of the script holding its challenge
+
 # The challenge page, not the bot-management scripts ordinary Cloudflare pages carry too
 _CLOUDFLARE_CHALLENGE_EXPR = ("/^just a moment/i.test(document.title) || !!document.querySelector("
                               "'#challenge-form, #challenge-running, #challenge-error-text')")
@@ -703,6 +709,9 @@ class HeadedBrowser(RetrievalIntegration):
     generic retrieval method built on it."""
     name = "Headed Browser"
     domains = []
+    # Whether a page answering 404/410 counts as missing rather than as content. Off for
+    # the archive integrations: a replay may pass on the archived page's own status.
+    fails_on_not_found = False
 
     # Shared UC browser for all HeadedBrowser integrations (Perma.cc, Archive.org, …).
     _browser: ClassVar[Optional[Browser]] = None
@@ -1026,6 +1035,13 @@ class HeadedBrowser(RetrievalIntegration):
                 # often burns many seconds on archive/analytics assets after content is ready.
                 try:
                     response = await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+                    # The final document's status: goto follows redirects (www -> bare)
+                    if (self.fails_on_not_found and response is not None
+                            and response.status in (404, 410)):
+                        # The site's "not found" page is no content; the engine then
+                        # turns to the archives
+                        raise TargetUnavailableError(
+                            f"{url} does not exist on the live site (HTTP {response.status}).")
                     if response is not None and "pdf" in response.headers.get("content-type", ""):
                         # The browser shows a PDF in its viewer, from which there is no
                         # text to extract. Failing at once lets the next method (e.g.
@@ -1139,16 +1155,45 @@ class HeadedBrowser(RetrievalIntegration):
                 await page.wait_for_load_state("domcontentloaded", timeout=30_000)
             logger.info(f"☁️ Passed the Cloudflare challenge at {page.url}.")
 
-    @staticmethod
     async def _html_and_source(
-            target: ContentTarget, page: Page
+            self, target: ContentTarget, page: Page
     ) -> tuple[Optional[str], Page | Frame]:
-        """Resolve HTML and a Frame/Page suitable for in-page media fetch."""
+        """Resolve HTML and a Frame/Page suitable for in-page media fetch.
+
+        A page may still be replacing itself: an interstitial that redirects once its
+        script is done, such as Anubis' proof-of-work check (newsmobile.in), navigates
+        right while its HTML is read, and Playwright then refuses ("the page is
+        navigating"). The new document is waited for and read instead."""
         if isinstance(target, ElementHandle):
             html = await target.evaluate("el => el.outerHTML")
             source = await target.owner_frame() or page
             return html, source
-        return await target.content(), target
+        for attempt in range(REDIRECT_READ_ATTEMPTS):
+            last = attempt == REDIRECT_READ_ATTEMPTS - 1
+            try:
+                html = await target.content()
+            except PlaywrightError as e:
+                if last or "is navigating" not in str(e):
+                    raise
+                logger.debug(f"{page.url} was navigating while being read; waiting for it.")
+                await self._await_new_document(page)
+                continue
+            if last or _ANUBIS_MARKER not in html:
+                return html, target
+            logger.debug(f"Waiting for {page.url} to pass its Anubis proof-of-work check.")
+            with suppress(PlaywrightError):
+                await page.wait_for_function(
+                    f"() => !document.getElementById({_ANUBIS_MARKER!r})",
+                    timeout=ANUBIS_WAIT * 1000)
+            await self._await_new_document(page)
+        return None, target  # Not reached
+
+    async def _await_new_document(self, page: Page) -> None:
+        """Lets the document a page navigated to load and build itself."""
+        with suppress(PlaywrightError):
+            await page.wait_for_load_state("domcontentloaded", timeout=30_000)
+        with suppress(PlaywrightError):
+            await self._settle_after_goto(page)
 
     def _cleanup_resources(self):
         """Close the shared UC browser. Caller must hold `_lock` if racing with `_ensure_browser`.
@@ -1202,12 +1247,44 @@ _DOM_STATE_JS = ("() => [document.documentElement ? document.documentElement.out
                  " document.readyState]")
 
 
-async def _is_thin(page: Page) -> bool:
+async def _is_thin(target: Page | Frame, min_text: int) -> bool:
     try:
-        return await page.evaluate(
-            "() => (document.body ? document.body.innerText.length : 0)") < DOM_THIN_TEXT
+        return await target.evaluate(
+            "() => (document.body ? document.body.innerText.length : 0)") < min_text
     except PlaywrightError:
         return True  # Mid-navigation: the next document is still to come
+
+
+async def settle_dom(target: Page | Frame, min_text: int = 0) -> None:
+    """Waits until a page or frame stops building itself (see DOM_SETTLE_*). With
+    `min_text`, a document with less text than that counts as a shell still waiting for
+    its content and gets up to DOM_THIN_TIMEOUT.
+
+    Measured by time, not by a number of samples: while calls were slow (under load),
+    three samples spanned seconds; once they got fast, they spanned half a second, and
+    pages were taken in a pause of their build-up -- Animal Político's article before its
+    text arrived, EFE Verifica's before its last blocks."""
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    anchor, since = None, start  # The size the DOM holds still at, and since when
+    while (now := loop.time()) < start + (DOM_THIN_TIMEOUT if min_text else DOM_SETTLE_TIMEOUT):
+        try:
+            size, state = await target.evaluate(_DOM_STATE_JS)
+        except PlaywrightError:
+            size, state = None, None  # Mid-navigation: whatever comes next is a new page
+        settled = False
+        if size and anchor and abs(size - anchor) <= anchor * DOM_SETTLE_TOLERANCE:
+            loaded = state == "complete" or now - start >= DOM_LOAD_WAIT
+            settled = loaded and now - since >= DOM_STABLE_WINDOW
+        else:
+            anchor, since = size, now
+        if settled or now - start >= DOM_SETTLE_TIMEOUT:
+            # Only now, as it costs a layout: a shell (Animal Político's article sat at
+            # 600 characters for 6 s before its text arrived) is worth waiting for
+            if not min_text or not await _is_thin(target, min_text):
+                return
+            since = now  # Look again after another stable window
+        await asyncio.sleep(DOM_SETTLE_INTERVAL)
 
 
 class Browser(HeadedBrowser):
@@ -1217,34 +1294,11 @@ class Browser(HeadedBrowser):
     not `get()`."""
     name = "Browser"
     domains = []
+    fails_on_not_found = True
 
     async def _settle_after_goto(self, page: Page) -> None:
         """Waits until the page stops building itself. At `domcontentloaded` the markup is
         parsed, but scripts may still be adding the content: Kyiv Independent's page grew
         by another sixth over the next 1.5 s, and UNDP's was sometimes taken at less than
         half its size, with most of the text missing."""
-        # Measured by time, not by a number of samples: while calls were slow (under load),
-        # three samples spanned seconds; once they got fast, they spanned half a second,
-        # and pages were taken in a pause of their build-up -- Animal Político's article
-        # before its text arrived, EFE Verifica's before its last blocks.
-        loop = asyncio.get_running_loop()
-        start = loop.time()
-        anchor, since = None, start  # The size the DOM holds still at, and since when
-        while (now := loop.time()) < start + DOM_THIN_TIMEOUT:
-            try:
-                size, state = await page.evaluate(_DOM_STATE_JS)
-            except PlaywrightError:
-                size, state = None, None  # Mid-navigation: whatever comes next is a new page
-            settled = False
-            if size and anchor and abs(size - anchor) <= anchor * DOM_SETTLE_TOLERANCE:
-                loaded = state == "complete" or now - start >= DOM_LOAD_WAIT
-                settled = loaded and now - since >= DOM_STABLE_WINDOW
-            else:
-                anchor, since = size, now
-            if settled or now - start >= DOM_SETTLE_TIMEOUT:
-                # Only now, as it costs a layout: a shell (Animal Político's article sat
-                # at 600 characters for 6 s before its text arrived) is worth waiting for
-                if not await _is_thin(page):
-                    return
-                since = now  # Look again after another stable window
-            await asyncio.sleep(DOM_SETTLE_INTERVAL)
+        await settle_dom(page, min_text=DOM_THIN_TEXT)

@@ -31,6 +31,10 @@ CHALLENGE_PHRASES: tuple[Signature, ...] = (
                            "unusual traffic from your computer network")),
     # JS cookie check that re-serves the page once a cookie is set (e.g. NCBI/PMC)
     ("Cookie check", ("cookies must be enabled",)),
+    # Anubis' proof-of-work check (newsmobile.in): a browser passes it by itself in a
+    # second or two, while scraping services return the interstitial as the page
+    ("Anubis bot check", ("anubis_challenge", "/.within.website/x/cmd/anubis",
+                          "checking your browser before redirecting")),
 )
 
 # CAPTCHA widgets. They also appear on regular pages (e.g. in contact forms), hence

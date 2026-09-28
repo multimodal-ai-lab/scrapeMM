@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import suppress
 import logging
 import time
 from typing import Optional
@@ -6,7 +7,7 @@ from typing import Optional
 from playwright.async_api import TimeoutError, Page, Frame
 
 from scrapemm.server.download.browser import MAX_IMAGE_BYTES, MAX_VIDEO_BYTES, BLOB_ATTR, install_stash
-from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget
+from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget, settle_dom
 
 logger = logging.getLogger("scrapeMM")
 
@@ -15,6 +16,22 @@ logger = logging.getLogger("scrapeMM")
 STASH_CONCURRENCY = 6
 # Large WARCs (e.g. 80MB+ Telegram videos) need a long wait for the innermost iframe.
 INNERMOST_FRAME_TIMEOUT_MS = 120_000
+# How long Perma.cc's page gets to show its archive iframe, a reload included (see
+# `_archive_iframe()`). 20 s without a reload was not enough with dozens of other pages
+# loading at once: the whole retrieval then failed.
+ARCHIVE_IFRAME_TIMEOUT_MS = 60_000
+# How long the replay app gets to show its frame. It first installs its service worker
+# and loads the WARC; under load (and on a cold start) that took more than the 15 s this
+# used to be, and the empty app shell was taken instead -- no media at all.
+REPLAY_IFRAME_TIMEOUT_MS = 60_000
+# How long a replayed player gets to create its <video>, when the page's markup already
+# names the video file (see `_settle_media_frame()`)
+VIDEO_ELEMENT_TIMEOUT_MS = 15_000
+
+# Whether the frame names an MP4 in its markup but shows no <video> (yet): a player
+# such as Facebook's builds its element by script, only after the replay delivered it
+_VIDEO_PENDING_JS = r"""() => !document.querySelector('video')
+    && /https:(?:\\?\/){2}video[^"'\s<>]+?\.mp4/i.test(document.documentElement.outerHTML)"""
 
 
 class PermaCC(HeadedBrowser):
@@ -48,11 +65,7 @@ class PermaCC(HeadedBrowser):
                 logger.warning("\rCloudflare challenge did not resolve in time.")
 
         # Prefer the content of the Perma.cc archive iframe specifically
-        try:
-            outer_iframe_el = await page.wait_for_selector("iframe.archive-iframe", timeout=20000)
-        except TimeoutError:
-            outer_iframe_el = None
-
+        outer_iframe_el = await self._archive_iframe(page)
         if not outer_iframe_el:
             return None
 
@@ -69,7 +82,7 @@ class PermaCC(HeadedBrowser):
         # custom element <replay-web-page> which hosts the inner iframe.
         try:
             middle_iframe_el = await outer_frame.wait_for_selector(
-                "replay-web-page iframe", timeout=15000
+                "replay-web-page iframe", timeout=REPLAY_IFRAME_TIMEOUT_MS
             )
         except TimeoutError:
             middle_iframe_el = None
@@ -102,6 +115,25 @@ class PermaCC(HeadedBrowser):
         target = await self._pick_best_media_frame(inner_frame)
         await _stash_media_in_frame(target)
         return target
+
+    @staticmethod
+    async def _archive_iframe(page: Page):
+        """The record page's archive iframe, which the page adds by script. In busy
+        batches, it sometimes had not appeared after a minute, although the record page
+        itself was complete -- six Perma.cc URLs of one batch failed at once that way. A
+        reload then brings it: so after half the wait, the page is loaded once more."""
+        for attempt in range(2):
+            try:
+                return await page.wait_for_selector("iframe.archive-iframe",
+                                                    timeout=ARCHIVE_IFRAME_TIMEOUT_MS / 2)
+            except TimeoutError:
+                pass
+            if attempt == 0:
+                logger.info(f"Perma.cc's archive iframe is late at {page.url}; reloading.")
+                with suppress(Exception):
+                    await page.reload(wait_until="domcontentloaded", timeout=60_000)
+        logger.info(f"Perma.cc showed no archive iframe at {page.url}.")
+        return None
 
     async def _wait_for_innermost_frame(
             self, middle_frame: Frame, timeout_ms: int = INNERMOST_FRAME_TIMEOUT_MS
@@ -213,6 +245,23 @@ class PermaCC(HeadedBrowser):
             return 0
 
 
+async def _settle_media_frame(frame: Frame) -> None:
+    """Lets the replayed page finish building itself before its media are collected.
+    The innermost frame counts as ready as soon as it has some content, which under load
+    came well before the replayed player had created its <video>: the video was then
+    missing from the result (perma.cc/K5L8-V3LZ, a Facebook post, in a busy batch).
+    Also runs for the Internet Archive, which collects its media the same way."""
+    await settle_dom(frame)
+    try:
+        if await frame.evaluate(_VIDEO_PENDING_JS):
+            await frame.wait_for_selector("video", state="attached",
+                                          timeout=VIDEO_ELEMENT_TIMEOUT_MS)
+    except TimeoutError:
+        logger.debug(f"The replayed page at {frame.url[:120]} names a video but shows none.")
+    except Exception:
+        pass  # E.g. mid-navigation; the media are collected as they are
+
+
 async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video_limit: int = MAX_VIDEO_BYTES,
                                 concurrency: int = STASH_CONCURRENCY) -> None:
     """Fetches the frame's media inside the frame, where the replay's session and service
@@ -224,9 +273,12 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
     browser's own copy (see `BrowserMedia`). This used to inline everything as data URIs
     instead, which blew a single video's frame HTML up to 20 MB.
     """
+    # First, as the page may still be building itself: collected too early, a video its
+    # player had not yet created was missing (see `_settle_media_frame()`)
+    await _settle_media_frame(frame)
     try:
         await install_stash(frame)
-        await frame.evaluate(
+        result = await frame.evaluate(
             """
             async (opts) => {
               const maxImageBytes = opts.maxImageBytes ?? 15728640;
@@ -568,6 +620,7 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
                 "blobAttr": BLOB_ATTR,
             },
         )
+        logger.debug(f"Fetched in {frame.url[:120]}: {result}")
     except Exception:
         # Best-effort; if anything fails, just proceed without inlining
         logger.debug("Fetching the frame's media in the frame failed; resolve_media() "

@@ -512,7 +512,9 @@ async def _retrieve_single(
         winner = (BROWSER, content)
 
     # Last resort for the open web: the page as a plain request gets it
-    if winner is None and auto and domain not in DOMAIN_TO_INTEGRATION and not unreachable:
+    # (Not for a page a method found missing: a plain request would find it missing too)
+    if (winner is None and auto and domain not in DOMAIN_TO_INTEGRATION and not unreachable
+            and not any(isinstance(e, TargetUnavailableError) for e in errors.values())):
         status, result = await evaluate(PLAIN_HTTP)
         if status == "success":
             winner = (PLAIN_HTTP, result)
@@ -843,6 +845,9 @@ async def _plain_http(url: str, session: aiohttp.ClientSession, output_format: O
     does not count as content."""
     async with session.get(url, headers=HEADERS, allow_redirects=True,
                            timeout=aiohttp.ClientTimeout(total=30)) as response:
+        if response.status in (404, 410):
+            raise TargetUnavailableError(f"{url} does not exist on the live site "
+                                         f"(HTTP {response.status}).")
         if response.status != 200:
             raise RetrievalFailed(f"A plain request got HTTP {response.status}.")
         content_type = response.headers.get("content-type", "text/html")
