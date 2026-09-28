@@ -21,6 +21,7 @@ import time
 import uuid
 from typing import Any, Optional
 
+from scrapemm.common.outcome import OK, UNAVAILABLE, ERROR, classify, decisive_error
 from scrapemm.common.paths import APP_NAME
 from scrapemm.common.wire import ResponsePayload
 from .paths import JOBS_DB_PATH
@@ -86,8 +87,31 @@ class JobStore:
                     WHERE success = 1;
                 """
             )
+            self._add_outcome_columns()
             self._connection.commit()
             self.version += 1
+
+    def _add_outcome_columns(self) -> None:
+        """The outcome class of each result (see `scrapemm.common.outcome`), stored so
+        it can be filtered and counted in SQL. Databases from before it existed get the
+        columns added, and their rows classified from the errors they stored."""
+        columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(results)")}
+        if "outcome" not in columns:
+            self._connection.execute("ALTER TABLE results ADD COLUMN outcome TEXT")
+        if "outcome_kind" not in columns:
+            self._connection.execute("ALTER TABLE results ADD COLUMN outcome_kind TEXT")
+        rows = self._connection.execute(
+            "SELECT rowid, success, errors FROM results WHERE outcome IS NULL").fetchall()
+        for row in rows:
+            outcome, kind = classify(bool(row["success"]),
+                                     json.loads(row["errors"]) if row["errors"] else {})
+            self._connection.execute(
+                "UPDATE results SET outcome = ?, outcome_kind = ? WHERE rowid = ?",
+                (outcome, kind, row["rowid"]))
+        if rows:
+            logger.info(f"Classified the outcome of {len(rows)} stored results.")
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS results_outcome_idx ON results(outcome, outcome_kind)")
 
     # --- Writing ------------------------------------------------------------------
 
@@ -110,14 +134,15 @@ class JobStore:
         content = None
         if payload.content is not None:
             content = json.dumps(_truncate(payload.content.to_dict()))
+        outcome, kind = classify(success, payload.errors)
         with self._lock:
             self._connection.execute(
                 "INSERT OR REPLACE INTO results (job_id, url, success, method, errors, "
-                "content, retrieval_time, from_cache, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "content, retrieval_time, from_cache, created_at, outcome, outcome_kind) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (job_id, payload.url, int(success), payload.method,
                  json.dumps(payload.errors), content, payload.retrieval_time,
-                 int(payload.from_cache), time.time()))
+                 int(payload.from_cache), time.time(), outcome, kind))
             self._connection.commit()
             self.version += 1
 
@@ -148,12 +173,13 @@ class JobStore:
     def _filters(self, url: Optional[str], status: Optional[str],
                  output_format: Optional[str], method: Optional[str],
                  success: Optional[bool], since: Optional[float],
-                 until: Optional[float]) -> tuple[str, list[Any]]:
+                 until: Optional[float], outcome: Optional[str] = None) -> tuple[str, list[Any]]:
         """Builds the WHERE clause the list and count queries share.
 
-        The per-URL criteria (url, method, success) match a job if *any* of its results
-        does, which is what somebody looking for "the job where example.com failed"
-        actually means.
+        The per-URL criteria (url, method, success, outcome) match a job if *any* of its
+        results does, which is what somebody looking for "the job where example.com
+        failed" actually means. `outcome` is a class (ok, unavailable, error) or a kind
+        of unavailability (missing, captcha, paywall, ...).
         """
         clauses: list[str] = []
         args: list[Any] = []
@@ -183,6 +209,12 @@ class JobStore:
         if success is not None:
             result_clauses.append("results.success = ?")
             args.append(int(success))
+        if outcome:
+            if outcome in (OK, UNAVAILABLE, ERROR):
+                result_clauses.append("results.outcome = ?")
+            else:
+                result_clauses.append("results.outcome_kind = ?")
+            args.append(outcome)
         if result_clauses:
             clauses.append(
                 "EXISTS (SELECT 1 FROM results WHERE results.job_id = jobs.id AND "
@@ -195,9 +227,10 @@ class JobStore:
                   status: Optional[str] = None, url: Optional[str] = None,
                   output_format: Optional[str] = None, method: Optional[str] = None,
                   success: Optional[bool] = None, since: Optional[float] = None,
-                  until: Optional[float] = None, sort: str = "newest") -> list[dict]:
+                  until: Optional[float] = None, sort: str = "newest",
+                  outcome: Optional[str] = None) -> list[dict]:
         where, args = self._filters(url, status, output_format, method, success,
-                                    since, until)
+                                    since, until, outcome)
         order = SORTS.get(sort, SORTS["newest"])
         query = f"SELECT * FROM jobs{where} ORDER BY {order}, created_at DESC LIMIT ? OFFSET ?"
         with self._lock:
@@ -211,7 +244,8 @@ class JobStore:
             if ids:
                 for row in self._connection.execute(
                         "SELECT job_id, url, success, method, retrieval_time, from_cache, "
-                        f"errors FROM results WHERE job_id IN ({','.join('?' * len(ids))}) "
+                        "errors, outcome, outcome_kind "
+                        f"FROM results WHERE job_id IN ({','.join('?' * len(ids))}) "
                         "ORDER BY created_at", ids):
                     by_job[row["job_id"]].append(row)
 
@@ -222,9 +256,9 @@ class JobStore:
     def count_jobs(self, status: Optional[str] = None, url: Optional[str] = None,
                    output_format: Optional[str] = None, method: Optional[str] = None,
                    success: Optional[bool] = None, since: Optional[float] = None,
-                   until: Optional[float] = None) -> int:
+                   until: Optional[float] = None, outcome: Optional[str] = None) -> int:
         where, args = self._filters(url, status, output_format, method, success,
-                                    since, until)
+                                    since, until, outcome)
         with self._lock:
             return self._connection.execute(
                 f"SELECT COUNT(*) FROM jobs{where}", args).fetchone()[0]
@@ -254,6 +288,7 @@ class JobStore:
         done = {r["url"] for r in job["results"]}
         job["succeeded"] = sum(1 for r in job["results"] if r["success"])
         job["failed"] = len(job["results"]) - job["succeeded"]
+        job["outcomes"] = _outcome_counts(r["outcome"] for r in job["results"])
         requested = list(dict.fromkeys(job["params"].get("urls") or [])) or list(done)
         job["pending"] = [url for url in requested if url not in done]
         return job
@@ -288,14 +323,20 @@ class JobStore:
         return removed
 
     def stats(self) -> dict:
+        """All-time figures. `succeeded` and `failed` are in scrapeMM's terms: a target
+        that was unavailable counts as succeeded (see `scrapemm.common.outcome`);
+        `outcomes` has the three classes apart."""
         with self._lock:
             jobs = self._connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-            # One pass over the results for all three figures
-            results, succeeded, cached = self._connection.execute(
-                "SELECT COUNT(*), COALESCE(SUM(success), 0), COALESCE(SUM(from_cache), 0) "
+            # One pass over the results for all figures
+            results, retrieved, unavailable, cached = self._connection.execute(
+                "SELECT COUNT(*), COALESCE(SUM(outcome = 'ok'), 0), "
+                "COALESCE(SUM(outcome = 'unavailable'), 0), COALESCE(SUM(from_cache), 0) "
                 "FROM results").fetchone()
-        return {"jobs": jobs, "urls": results, "succeeded": succeeded,
-                "failed": results - succeeded, "from_cache": cached,
+        failed = results - retrieved - unavailable
+        return {"jobs": jobs, "urls": results, "succeeded": retrieved + unavailable,
+                "failed": failed, "from_cache": cached,
+                "outcomes": {OK: retrieved, UNAVAILABLE: unavailable, ERROR: failed},
                 "cache_hit_rate": cached / results if results else None}
 
     def method_counts(self) -> dict[str, int]:
@@ -317,18 +358,23 @@ class JobStore:
         """
         with self._lock:
             rows = self._connection.execute(
-                "SELECT success FROM results ORDER BY created_at DESC LIMIT ?",
+                "SELECT outcome FROM results ORDER BY created_at DESC LIMIT ?",
                 (limit,)).fetchall()
         total = len(rows)
-        succeeded = sum(1 for row in rows if row["success"])
+        outcomes = _outcome_counts(row["outcome"] for row in rows)
+        # scrapeMM's success: it did its part, whether or not the target had the content
+        succeeded = outcomes[OK] + outcomes[UNAVAILABLE]
         return {
             "window": limit,
             "total": total,
             "succeeded": succeeded,
             "failed": total - succeeded,
+            "outcomes": outcomes,
             # None rather than 100% when nothing has run: a fresh server has no rate,
             # and showing a perfect one would be a lie of omission.
             "rate": (succeeded / total) if total else None,
+            # The share that actually yielded content
+            "retrieved_rate": (outcomes[OK] / total) if total else None,
         }
 
     def count_since(self, seconds: float) -> int:
@@ -369,13 +415,6 @@ SORTS = {
 # URLs listed per job in the overview; the detail view has them all
 URL_PREVIEW = 5
 
-# When a URL failed on several methods, the error that says most about why. A CAPTCHA or
-# a missing target explains the whole failure; "method X returned nothing" rarely does.
-ERROR_PRIORITY = ["DomainBlacklistedError", "CaptchaEncounteredError", "TargetUnavailableError",
-                  "AccessBlockedError", "RateLimitError", "QuotaExceededError",
-                  "UnsupportedDomainError", "TimeoutError", "RetrievalFailed"]
-
-
 def _summarize(job: dict, results: list[sqlite3.Row]) -> None:
     """Adds what the overview shows of a job: its first URLs in the order they were
     requested -- with the result of each that is done, so a running job lists the rest
@@ -390,6 +429,7 @@ def _summarize(job: dict, results: list[sqlite3.Row]) -> None:
             job["urls"].append({"url": url, "state": "pending"})
             continue
         entry = {"url": url, "state": "ok" if row["success"] else "failed",
+                 "outcome": row["outcome"], "outcome_kind": row["outcome_kind"],
                  "method": row["method"], "retrieval_time": row["retrieval_time"],
                  "from_cache": bool(row["from_cache"])}
         if not row["success"]:
@@ -400,6 +440,7 @@ def _summarize(job: dict, results: list[sqlite3.Row]) -> None:
     job["done"] = len(done)
     job["succeeded"] = sum(1 for row in results if row["success"])
     job["failed"] = len(done) - job["succeeded"]
+    job["outcomes"] = _outcome_counts(row["outcome"] for row in results)
     job["duration"] = _duration(job)
     job["methods"] = sorted({row["method"] for row in results if row["method"]})
     # The full list can be long and is on the detail page; only its size matters here
@@ -413,13 +454,22 @@ def _duration(job: dict) -> float:
 
 
 def _main_error(errors: dict) -> Optional[dict]:
-    """The most telling of a URL's errors, as {type, message}."""
-    if not errors:
+    """The error that decided a failed URL's outcome (see `decisive_error`), as
+    {type, message, method}."""
+    decisive = decisive_error(errors)
+    if decisive is None:
         return None
-    ranked = sorted(errors.values(), key=lambda e: ERROR_PRIORITY.index(e.get("type"))
-                    if e.get("type") in ERROR_PRIORITY else len(ERROR_PRIORITY))
-    error = ranked[0]
-    return {"type": error.get("type"), "message": (error.get("message") or "")[:300]}
+    method, error = decisive
+    return {"type": error.get("type"), "message": (error.get("message") or "")[:300],
+            "method": method}
+
+
+def _outcome_counts(outcomes) -> dict[str, int]:
+    """How many of the given outcomes fall into each class (unknown ones are errors)."""
+    counts = {OK: 0, UNAVAILABLE: 0, ERROR: 0}
+    for outcome in outcomes:
+        counts[outcome if outcome in counts else ERROR] += 1
+    return counts
 
 
 def _job_row(row: sqlite3.Row) -> dict:

@@ -6,7 +6,9 @@ import os
 import socket
 import sys
 import urllib.request
-from contextlib import suppress
+import uuid
+from contextlib import suppress, contextmanager
+from contextvars import ContextVar
 
 import aiohttp
 from pathlib import Path
@@ -65,7 +67,21 @@ def _browser_args() -> list[str]:
         "--disable-infobars",
         "--no-first-run",
         "--no-default-browser-check",
+        *_fill_screen_args(),
     ]
+
+
+def _fill_screen_args() -> list[str]:
+    """Makes the window fill the container's virtual screen. Xvfb runs without a window
+    manager, so --start-maximized does nothing there, and the window kept SeleniumBase's
+    default of 1280x840 at (20, 54): the CAPTCHA panel showed it small, in a black
+    frame. Later flags win, so these override SeleniumBase's own."""
+    size = os.environ.get("SCRAPEMM_SCREEN_SIZE", "")  # E.g. "1440x900x24"
+    try:
+        width, height = (int(n) for n in size.split("x")[:2])
+    except ValueError:
+        return []
+    return ["--window-position=0,0", f"--window-size={width},{height}"]
 
 
 async def _close_browser_gracefully(browser: Browser, settle: float = 2.0) -> bool:
@@ -321,6 +337,104 @@ async def _own(page: Page) -> None:
     except Exception as e:
         # Harmless now (the sweep asks a tab before closing it), but worth seeing
         logger.info(f"Could not register a browser tab: {type(e).__name__}: {e}")
+
+
+# --- The human's tab ------------------------------------------------------------------
+# While somebody solves a CAPTCHA through the web UI's panel, the tab they see has to stay
+# in front. Retrievals keep opening tabs meanwhile, and a tab opened the usual way
+# (`context.new_page()`) becomes the window's foreground tab: it hid the CAPTCHA, even in
+# the middle of a drag. So while a human tab is up, retrieval tabs open in the background
+# (CDP `Target.createTarget` with `background`), and whatever else comes to the front, a
+# popup say, is put behind it again. Background tabs render and run at full speed: the
+# browser is started with SeleniumBase's --disable-background-timer-throttling,
+# --disable-renderer-backgrounding and --disable-backgrounding-occluded-windows.
+_opening_human_tab: ContextVar[bool] = ContextVar("scrapemm_opening_human_tab", default=False)
+_human_page: Optional[Page] = None
+_BACKGROUND_TAB_PREFIX = "about:blank#scrapemm-background-"
+# Tasks started without anyone awaiting them, referenced so they are not collected
+_background_tasks: set[asyncio.Task] = set()
+
+
+@contextmanager
+def human_tab():
+    """Makes the tab that `HeadedBrowser._new_page()` opens within this block the one a
+    human is looking at, and keeps it in front of all others until the block ends."""
+    global _human_page
+    token = _opening_human_tab.set(True)
+    try:
+        yield
+    finally:
+        _opening_human_tab.reset(token)
+        _human_page = None
+
+
+def _shown_human_tab() -> Optional[Page]:
+    page = _human_page
+    return page if page is not None and not page.is_closed() else None
+
+
+def _run_soon(coroutine) -> None:
+    task = asyncio.ensure_future(coroutine)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+def _become_human_tab(page: Page) -> None:
+    global _human_page
+    _human_page = page
+    context = page.context
+    if not getattr(context, "_scrapemm_keeps_human_tab", False):
+        context._scrapemm_keeps_human_tab = True
+        context.on("page", _on_new_tab)
+    _run_soon(_bring_to_front(page))
+
+
+def _on_new_tab(page: Page) -> None:
+    human = _shown_human_tab()
+    if human is None or page is human or page.url.startswith(_BACKGROUND_TAB_PREFIX):
+        return
+    _run_soon(_bring_to_front(human))
+
+
+async def _bring_to_front(page: Page) -> None:
+    with suppress(Exception):
+        await asyncio.wait_for(page.bring_to_front(), timeout=10)
+
+
+async def _open_background_tab(context: BrowserContext, timeout: float = 25) -> Page:
+    """Opens a tab behind the one in front. Playwright cannot do that itself, so the tab
+    is created over CDP, with a unique blank URL to recognise its page by."""
+    marker = _BACKGROUND_TAB_PREFIX + uuid.uuid4().hex
+    opened = asyncio.get_running_loop().create_future()
+
+    def on_page(page: Page) -> None:
+        if page.url == marker and not opened.done():
+            opened.set_result(page)
+
+    context.on("page", on_page)
+    target_id = None
+    try:
+        session = await context.browser.new_browser_cdp_session()
+        try:
+            target_id = (await session.send("Target.createTarget",
+                                            {"url": marker, "background": True}))["targetId"]
+        finally:
+            with suppress(Exception):
+                await session.detach()
+        for page in context.pages:  # In case the event came before the answer
+            on_page(page)
+        return await asyncio.wait_for(opened, timeout)
+    except BaseException:
+        if target_id is not None and not opened.done():
+            _run_soon(_close_target(target_id))
+        raise
+    finally:
+        context.remove_listener("page", on_page)
+
+
+def release_page_soon(page: Page) -> None:
+    """`release_page()` without waiting for it."""
+    _run_soon(release_page(page))
 
 
 async def release_page(page: Page) -> None:
@@ -914,7 +1028,11 @@ class HeadedBrowser(RetrievalIntegration):
                 await self._prepare_context(context)
                 # Shielded: a tab whose opening is cancelled half-way still opens, and
                 # would then stay open for good. So it is closed once it is there.
-                creating = asyncio.ensure_future(context.new_page())
+                # Behind the tab a human is solving a CAPTCHA in, if there is one
+                human = _opening_human_tab.get()
+                creating = asyncio.ensure_future(
+                    _open_background_tab(context) if not human and _shown_human_tab()
+                    else context.new_page())
                 try:
                     page = await asyncio.wait_for(asyncio.shield(creating), timeout=30)
                 except BaseException:
@@ -926,6 +1044,8 @@ class HeadedBrowser(RetrievalIntegration):
                 except BaseException:
                     await release_page(page)
                     raise
+                if human:
+                    _become_human_tab(page)
                 return page, generation
 
             except (PlaywrightError, asyncio.TimeoutError) as e:
@@ -1109,7 +1229,17 @@ class HeadedBrowser(RetrievalIntegration):
                         # Trigger (or await an already in-flight) single-flight recovery before retrying.
                         await self._ensure_browser(generation)
                     continue
-                raise
+                if attempt == 0 and page_open and "detached" in str(e).lower():
+                    # A frame the retrieval was working in went away: the page replaced
+                    # it (e.g. a replay reloading itself). A fresh page usually settles.
+                    logger.info(f"A frame of {url} was detached mid-retrieval; retrying on "
+                                f"a new page.")
+                    continue
+                if isinstance(e, PlaywrightTimeoutError):
+                    raise  # The engine reports timeouts as such
+                # Not a crash: as a failure of this method, not as a raw Playwright error
+                raise RetrievalFailed(f"{self.name} failed in the browser at {url}: "
+                                      f"{str(e).splitlines()[0][:300]}") from e
             finally:
                 await close_page()
 

@@ -233,32 +233,33 @@ def discard(domain: str) -> int:
     return len(challenge.pending)
 
 
-async def solve(domain: str, timeout: float,
-                no_captcha: Optional[asyncio.Event] = None) -> tuple[bool, int, int, bool]:
-    """Opens the challenge page for the human and, once it is passed, retrieves the
-    queue. Returns (passed, retrieved, still waiting, whether the "no CAPTCHA" report
-    was applied -- it is not if it arrives after the check already passed).
+async def await_solution(domain: str, timeout: float,
+                         no_captcha: Optional[asyncio.Event] = None) -> tuple[bool, bool]:
+    """Opens the challenge page for the human and waits until the check is passed. Only
+    the human's part: retrieving the queue afterwards is `drain()`, which the caller
+    runs in the background so the panel can close at once. Returns (passed, whether
+    the "no CAPTCHA" report was applied).
 
     Setting `no_captcha` says the human sees no check at all, only the normal page: the
-    detection was presumably wrong. The case is recorded for debugging, and the queue is
-    retrieved without asking the detection again, which would only repeat the mistake."""
+    detection was presumably wrong. The case is recorded for debugging, and the queue
+    should then be drained with `trust_content`, since asking the detection again would
+    only repeat the mistake."""
+    from .integrations.headed_browser import human_tab
     if domain == ARCHIVE_TODAY:
         from .integrations import NAME_TO_INTEGRATION
-        from .integrations.archive_today import get_archive_today_buffer
-        before = len(get_archive_today_buffer())
-        passed = await NAME_TO_INTEGRATION["archive.today"].capture_session(timeout=timeout)
-        after = len(get_archive_today_buffer())
-        return passed, before - after, after, False
+        from .integrations.archive_today import CANONICAL_DOMAIN, VERIFICATION_SNAPSHOT
+        with human_tab():
+            passed = await NAME_TO_INTEGRATION["archive.today"]._solve_in_browser(
+                f"https://{CANONICAL_DOMAIN}/{VERIFICATION_SNAPSHOT}", timeout)
+        return passed, False
 
     challenge = store.get(domain)
     if challenge is None:
         raise KeyError(f"There is no open CAPTCHA challenge for {domain}.")
     no_captcha = no_captcha or asyncio.Event()
-    if not await _await_human(challenge, timeout, no_captcha):
-        return False, 0, len(challenge.pending), False
-    reported = no_captcha.is_set()  # A report arriving from here on comes too late
-    retrieved, remaining = await drain(domain, trust_content=reported)
-    return True, retrieved, remaining, reported
+    with human_tab():
+        passed = await _await_human(challenge, timeout, no_captcha)
+    return passed, passed and no_captcha.is_set()
 
 
 async def confirm_no_captcha(domain: str) -> tuple[int, int]:
@@ -345,43 +346,41 @@ def _browser_for(domain: str):
 async def _await_human(challenge: Challenge, timeout: float,
                        no_captcha: asyncio.Event) -> bool:
     """Shows the challenge page in the server's browser and waits until it is passed,
-    or until the human reports that there is no check to pass."""
-    from playwright.async_api import async_playwright
-    from .integrations.headed_browser import release_page
+    or until the human reports that there is no check to pass. Call it within
+    `human_tab()`, which keeps the page in front of the tabs retrievals open meanwhile."""
+    from .integrations.headed_browser import release_page_soon
     from scrapemm.common import ScrapedContent
     from .captcha_detect import detect_captcha
 
     url = challenge.solve_url
     browser = _browser_for("")  # The generic one; the page is all that matters here
     deadline = time.time() + timeout
-    async with async_playwright() as p:
-        page, _ = await browser._new_page(p)
-        try:
-            await page.goto(url, timeout=60_000, wait_until="domcontentloaded")
-            while True:
-                # Other retrievals open tabs of their own in the same browser; keep this
-                # one in front, or the human would be looking at the wrong page
-                await page.bring_to_front()
-                try:
-                    html = await page.content()
-                except Exception:
-                    html = ""  # Mid-navigation, which passing a check often causes
-                if no_captcha.is_set():
-                    _report_false_positive(challenge, page.url, html)
-                    return True
-                if html and not detect_captcha(ScrapedContent(html=html)):
-                    logger.info(f"The CAPTCHA at {url} was passed.")
-                    return True
-                if time.time() >= deadline:
-                    # Evidence, should the human report afterwards that there was no check
-                    if html:
-                        _last_flagged[challenge.domain] = (page.url, html)
-                    return False
-                # Woken right away by the "no CAPTCHA" report
-                with suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(no_captcha.wait(), timeout=2)
-        finally:
-            await release_page(page)
+    page, _ = await browser._new_page()
+    try:
+        await page.goto(url, timeout=60_000, wait_until="domcontentloaded")
+        while True:
+            try:
+                html = await page.content()
+            except Exception:
+                html = ""  # Mid-navigation, which passing a check often causes
+            if no_captcha.is_set():
+                _report_false_positive(challenge, page.url, html)
+                return True
+            if html and not detect_captcha(ScrapedContent(html=html)):
+                logger.info(f"The CAPTCHA at {url} was passed.")
+                return True
+            if time.time() >= deadline:
+                # Evidence, should the human report afterwards that there was no check
+                if html:
+                    _last_flagged[challenge.domain] = (page.url, html)
+                return False
+            # Woken right away by the "no CAPTCHA" report
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(no_captcha.wait(), timeout=1)
+    finally:
+        # Closed in the background: under load, closing a tab can take seconds, and
+        # the panel should not stay open for that
+        release_page_soon(page)
 
 
 def _report_false_positive(challenge: Challenge, page_url: str, html: str) -> None:

@@ -293,6 +293,12 @@ async def list_jobs(
             default=None,
             description="True keeps jobs with at least one success, False with at "
                         "least one failure"),
+        outcome: Optional[str] = Query(
+            default=None,
+            description="Keeps jobs with at least one result of this outcome: ok, "
+                        "unavailable or error, or a kind of unavailability (missing, "
+                        "paywall, captcha, blocked, rate_limit, unsupported). See "
+                        "scrapemm.common.outcome."),
         since: Optional[float] = Query(default=None,
                                        description="UNIX timestamp, inclusive"),
         until: Optional[float] = Query(default=None,
@@ -314,7 +320,8 @@ async def list_jobs(
         raise HTTPException(status_code=400, detail=f"Unknown sort '{sort}'. Allowed: "
                                                     f"{', '.join(SORTS)}.")
     criteria = dict(status=job_status, url=url, output_format=output_format,
-                    method=method, success=success, since=since, until=until)
+                    method=method, success=success, since=since, until=until,
+                    outcome=outcome)
     return {
         "version": jobs.version,
         "jobs": jobs.list_jobs(limit=limit, offset=offset, sort=sort, **criteria),

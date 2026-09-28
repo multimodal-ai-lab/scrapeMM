@@ -12,6 +12,8 @@ DISPLAY="${DISPLAY:-:99}"
 export DISPLAY
 
 SCREEN_SIZE="${SCRAPEMM_SCREEN_SIZE:-1440x900x24}"
+# The browser sizes its window to it (see `_fill_screen_args()` in headed_browser.py)
+export SCRAPEMM_SCREEN_SIZE="$SCREEN_SIZE"
 VNC_PORT="${SCRAPEMM_VNC_PORT:-5900}"
 PORT="${SCRAPEMM_PORT:-8080}"
 
@@ -60,7 +62,10 @@ if [[ "$DISPLAY_READY" == true ]]; then
     # -shared: several viewers may watch at once
     # -nopw with -localhost: the socket is reachable only from inside the container; the
     #   web UI's own API key is what actually guards it
+    # -cursor none -nocursorshape: the viewer shows its own native pointer, so the
+    #   server's cursor is neither sent as a bitmap nor painted into the picture
     x11vnc -display "$DISPLAY" -rfbport "$VNC_PORT" -localhost -forever -shared \
+           -cursor none -nocursorshape \
            -nopw -quiet -bg -o /tmp/x11vnc.log >/dev/null \
         || echo "WARNING: x11vnc failed to start (see /tmp/x11vnc.log); the CAPTCHA panel is unavailable." >&2
 else

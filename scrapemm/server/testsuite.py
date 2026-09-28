@@ -5,11 +5,16 @@ each with the images and videos it must at least yield. Users add their own on t
 
 A run retrieves the whole suite as one job -- it shows up under Jobs like any other --
 with the cache bypassed, since a cached answer measures the cache, not the scraping.
-Each URL is scored against its expectation:
+Each URL is scored against its expectation. Most entries expect content:
 
 * passed  -- retrieved, with at least the expected media
 * partial -- retrieved, but media is missing
 * failed  -- not retrieved at all
+
+An entry may instead expect the target to be unavailable (`"expect": "unavailable"`): a
+private post, a removed page. It passes when scrapeMM classifies the result as
+unavailable (see `scrapemm.common.outcome`) and fails otherwise -- when content came back
+(the detection broke) or when the retrieval ran into an error of scrapeMM's own.
 
 Only one run at a time: a second one would compete with the first for the same
 concurrency slots and measure nothing but that.
@@ -28,6 +33,7 @@ from typing import Optional
 import aiohttp
 
 from scrapemm.common import ScrapingResponse
+from scrapemm.common.outcome import UNAVAILABLE, classify
 from scrapemm.common.paths import APP_NAME
 from scrapemm.common.wire import errors_to_wire
 from .paths import CONFIG_DIR
@@ -40,6 +46,9 @@ RUNS_PATH = CONFIG_DIR / "test_runs.json"
 MAX_RUNS_KEPT = 20
 
 OUTPUT_FORMAT = "multimodal"  # What the retrieval tests check
+
+# What an entry may expect besides content (the default, when "expect" is absent)
+EXPECTATIONS = (UNAVAILABLE,)
 
 
 # --- The suite ------------------------------------------------------------------------
@@ -78,19 +87,30 @@ def suite() -> list[dict]:
     return entries
 
 
-def add(url: str, category: str = "Added", expected: Optional[dict] = None) -> dict:
+def add(url: str, category: str = "Added", expected: Optional[dict] = None,
+        expect: Optional[str] = None) -> dict:
+    """Adds a URL, expecting at least `expected` media ({"image": n, "video": n}), or,
+    with `expect="unavailable"`, expecting the target to be unavailable."""
     url = url.strip()
     if not url.startswith(("http://", "https://")):
         raise ValueError("A URL must start with http:// or https://.")
+    if expect is not None and expect not in EXPECTATIONS:
+        raise ValueError(f"An entry can expect content (the default) or one of: "
+                         f"{', '.join(EXPECTATIONS)}; not '{expect}'.")
     expected = {k: int(v) for k, v in (expected or {}).items() if k in ("image", "video") and v}
+    if expect and expected:
+        raise ValueError("An entry that expects the target to be unavailable cannot "
+                         "expect media as well.")
+    entry = {"url": url, "expected": expected, "category": category.strip() or "Added"}
+    if expect:
+        entry["expect"] = expect
     with _suite_lock:
         changes = _read_json(SUITE_PATH, {"added": [], "removed": []})
         changes["removed"] = [u for u in changes.get("removed", []) if u != url]
         changes["added"] = [e for e in changes.get("added", []) if e["url"] != url]
-        changes["added"].append({"url": url, "expected": expected,
-                                 "category": category.strip() or "Added"})
+        changes["added"].append(entry)
         _write_json(SUITE_PATH, changes)
-    return {"url": url, "expected": expected, "category": category}
+    return entry
 
 
 def remove(url: str) -> bool:
@@ -124,9 +144,15 @@ def _score(entry: dict, response) -> dict:
     sequence = response.content.multimodal if response.content else None
     found = {"image": len(sequence.images), "video": len(sequence.videos)} if sequence else {}
     expected = entry.get("expected") or {}
+    expect = entry.get("expect")
     missing = {kind: count for kind, count in expected.items()
                if found.get(kind, 0) < count}
-    if not response.success:
+    result_class, result_kind = classify(response.success, response.errors)
+    if expect:
+        # The target must turn out unavailable: content, or an error of scrapeMM's own,
+        # means the detection broke
+        outcome = "passed" if result_class == expect else "failed"
+    elif not response.success:
         outcome = "failed"
     elif missing:
         outcome = "partial"
@@ -138,7 +164,8 @@ def _score(entry: dict, response) -> dict:
         "url": entry["url"], "category": entry.get("category", "Other"),
         "outcome": outcome, "method": response.method,
         "retrieval_time": response.retrieval_time,
-        "expected": expected, "found": found, "missing": missing,
+        "expected": expected, "expect": expect, "found": found, "missing": missing,
+        "result_class": result_class, "result_kind": result_kind,
         "error": _main_error(errors),
     }
 
@@ -180,6 +207,7 @@ def summarize(results: list[dict], total: int, started: float,
     for r in results:
         if r["outcome"] != "failed" and r["method"]:
             methods[r["method"]] = methods.get(r["method"], 0) + 1
+        # An expected unavailability that was met is no error worth listing
         if r["outcome"] == "failed":
             kind = (r["error"] or {}).get("type") or "Unknown"
             errors[kind] = errors.get(kind, 0) + 1

@@ -4,10 +4,12 @@ import logging
 import time
 from typing import Optional
 
-from playwright.async_api import TimeoutError, Page, Frame
+from playwright.async_api import TimeoutError, Page, Frame, Error as PlaywrightError
 
 from scrapemm.server.download.browser import MAX_IMAGE_BYTES, MAX_VIDEO_BYTES, BLOB_ATTR, install_stash
 from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget, settle_dom
+from scrapemm.common import RetrievalFailed
+from scrapemm.common.scraping_response import ScrapedContent
 
 logger = logging.getLogger("scrapeMM")
 
@@ -34,6 +36,16 @@ _VIDEO_PENDING_JS = r"""() => !document.querySelector('video')
     && /https:(?:\\?\/){2}video[^"'\s<>]+?\.mp4/i.test(document.documentElement.outerHTML)"""
 
 
+# Whether a frame shows anything: text, or a medium
+_SHOWS_CONTENT_JS = f"""() => !!(
+    (document.body && document.body.innerText.trim())
+    || document.querySelector('img, video, [{BLOB_ATTR}]'))"""
+
+# A retrieval is not tried again after this many seconds, so that the attempts (see
+# `PermaCC._extract_content()`) stay well within the browser's 10-minute limit
+RETRY_BUDGET = 240
+
+
 class PermaCC(HeadedBrowser):
     name = "Perma.cc"
     domains = ["perma.cc"]
@@ -41,6 +53,47 @@ class PermaCC(HeadedBrowser):
     # TODO: Implement PDF support, e.g., https://perma.cc/83VA-LTH9
 
     async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
+        """The frame that shows the record's capture. Under load, the replay sometimes
+        came up empty (only the app's shell) or replaced one of its frames while it was
+        being read ("Frame was detached"). Either way, the record is loaded once more;
+        if the replay still shows nothing, the capture's screenshot is taken instead, which
+        Perma.cc keeps for most records (as `?type=image`)."""
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        for attempt in range(2):
+            try:
+                target = await self._extract_capture(page)
+            except PlaywrightError as e:
+                if "detached" not in str(e).lower():
+                    raise
+                logger.info(f"The replay at {page.url} replaced a frame while it was being "
+                            f"read; loading the record again.")
+                target = None
+            if target is not None and await _shows_content(target):
+                return target
+            if attempt == 0 and loop.time() - start < RETRY_BUDGET:
+                if target is not None:
+                    logger.info(f"The replay at {page.url} came up empty; loading the "
+                                f"record again.")
+                with suppress(PlaywrightError):
+                    await page.reload(wait_until="domcontentloaded", timeout=60_000)
+                continue
+            break
+
+        shot = _screenshot_url(page.url)
+        if shot is None or loop.time() - start >= RETRY_BUDGET:
+            return None
+        logger.info(f"The replay at {page.url} shows nothing; taking the capture's "
+                    f"screenshot ({shot}).")
+        try:
+            await page.goto(shot, wait_until="domcontentloaded", timeout=60_000)
+            target = await self._extract_capture(page)
+        except PlaywrightError:
+            logger.debug(f"The screenshot at {shot} could not be read.", exc_info=True)
+            return None
+        return target if target is not None and await _shows_content(target) else None
+
+    async def _extract_capture(self, page: Page) -> Optional[ContentTarget]:
         # Check for Cloudflare challenge (passive check)
         body_text = await page.content()
         if "Just a moment" in body_text or "Performing security verification" in body_text:
@@ -243,6 +296,24 @@ class PermaCC(HeadedBrowser):
             )
         except Exception:
             return 0
+
+
+async def _shows_content(frame: Frame) -> bool:
+    try:
+        return bool(await frame.evaluate(_SHOWS_CONTENT_JS))
+    except PlaywrightError:
+        return False
+
+
+def _screenshot_url(url: str) -> Optional[str]:
+    """The record's screenshot view (https://perma.cc/XXXX-XXXX?type=image), unless `url`
+    is that already or is no record."""
+    from urllib.parse import urlsplit
+    parts = urlsplit(url)
+    if parts.netloc.removeprefix("www.") != "perma.cc" or "type=image" in parts.query:
+        return None
+    guid = parts.path.strip("/").split("/")[0]
+    return f"https://perma.cc/{guid}?type=image" if guid else None
 
 
 async def _settle_media_frame(frame: Frame) -> None:
@@ -625,3 +696,127 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
         # Best-effort; if anything fails, just proceed without inlining
         logger.debug("Fetching the frame's media in the frame failed; resolve_media() "
                      "fetches them instead.", exc_info=True)
+
+
+# --- Finding Perma.cc archives of arbitrary URLs --------------------------------------
+#
+# Perma.cc answers Memento TimeMap requests without an account:
+#   GET https://perma.cc/timemap/json/<url>  ->  200 JSON {"mementos": {"list": [...]}}
+#                                                or 404 (plain text) if none exists
+# Matching follows the usual archive canonicalisation: scheme, "www." and a trailing
+# slash do not matter, the query string does (exactly). The site sits behind Cloudflare,
+# which answers plain HTTP clients with a JavaScript challenge, so the lookup goes
+# through curl_cffi's browser TLS impersonation, which it lets through. (The REST API at
+# api.perma.cc lists only an account's own archives, and rate-limits hard: HTTP 429.)
+
+PERMA_TIMEMAP = "https://perma.cc/timemap/json/"
+# How long a lookup's outcome is reused. Misses shorter: somebody may archive it meanwhile.
+LOOKUP_HIT_TTL = 3600
+LOOKUP_MISS_TTL = 600
+# Perma.cc is one small service; lookups queue rather than burst
+LOOKUP_CONCURRENCY = 2
+# After HTTP 429, Perma.cc is not asked again for this long
+LOOKUP_RATE_LIMIT_PAUSE = 300
+
+_lookups: dict[str, tuple[Optional[str], float]] = {}  # URL -> (Perma link or None, expiry)
+_lookup_gate: Optional[asyncio.Semaphore] = None
+_rate_limited_until = 0.0
+
+
+def _lookup_candidates(url: str) -> list[str]:
+    """The spellings of `url` worth looking up, in order: as given, then without its
+    query and fragment (tracking parameters rarely match the archived link), and for X
+    the other of its two domains."""
+    from urllib.parse import urlsplit, urlunsplit
+    candidates = [url]
+    parts = urlsplit(url)
+    if parts.query or parts.fragment:
+        candidates.append(urlunsplit(parts._replace(query="", fragment="")))
+    host = parts.netloc.lower().removeprefix("www.")
+    swap = {"x.com": "twitter.com", "twitter.com": "x.com"}.get(host)
+    if swap:
+        candidates.append(urlunsplit(parts._replace(netloc=swap, query="", fragment="")))
+    return list(dict.fromkeys(candidates))
+
+
+async def _timemap_newest(url: str) -> Optional[str]:
+    """The newest Perma.cc link in the TimeMap of exactly `url`, or None if there is none.
+    Raises RateLimitError when Perma.cc throttles, RetrievalFailed when it cannot be
+    asked (unreachable, or an answer that is not a TimeMap)."""
+    global _rate_limited_until
+    import json
+    from scrapemm.common.exceptions import RateLimitError
+    from scrapemm.server.download.requests import _request_via_curl_cffi
+
+    result = await _request_via_curl_cffi(PERMA_TIMEMAP + url, {"Accept": "application/json"})
+    if result is None:
+        raise RetrievalFailed("Perma.cc could not be asked for archives (no answer).")
+    status, headers, body = result
+    if status == 404:
+        return None
+    if status == 429:
+        _rate_limited_until = time.time() + LOOKUP_RATE_LIMIT_PAUSE
+        raise RateLimitError("Perma.cc is rate-limiting archive lookups; paused for "
+                             f"{LOOKUP_RATE_LIMIT_PAUSE // 60} min.")
+    if status != 200:
+        raise RetrievalFailed(f"Perma.cc answered the archive lookup with HTTP {status}.")
+    try:
+        mementos = json.loads(body)["mementos"]["list"]
+    except (ValueError, KeyError, TypeError):
+        raise RetrievalFailed("Perma.cc's archive lookup answered with something other "
+                              "than a TimeMap (a Cloudflare challenge?).")
+    dated = [m for m in mementos if m.get("uri") and m.get("datetime")]
+    return max(dated, key=lambda m: m["datetime"])["uri"] if dated else None
+
+
+async def find_perma_archive(url: str, session=None) -> Optional[str]:
+    """Returns the newest Perma.cc link (https://perma.cc/XXXX-XXXX) archiving `url`, or
+    None if Perma.cc has none. Needs no account. Outcomes are cached (hits for an hour,
+    misses for ten minutes), and at most LOOKUP_CONCURRENCY lookups run at once.
+
+    Raises RateLimitError while Perma.cc throttles, RetrievalFailed if it cannot be asked.
+    `session` is accepted for symmetry with other lookups and not used: Perma.cc has to be
+    asked with a browser's TLS fingerprint (see above)."""
+    global _lookup_gate
+    from scrapemm.common.exceptions import RateLimitError
+
+    now = time.time()
+    if (cached := _lookups.get(url)) and cached[1] > now:
+        return cached[0]
+    if _rate_limited_until > now:
+        raise RateLimitError("Perma.cc is rate-limiting archive lookups; try again later.")
+    if _lookup_gate is None:
+        _lookup_gate = asyncio.Semaphore(LOOKUP_CONCURRENCY)
+
+    async with _lookup_gate:
+        link = None
+        for candidate in _lookup_candidates(url):
+            if link := await _timemap_newest(candidate):
+                break
+    _lookups[url] = (link, time.time() + (LOOKUP_HIT_TTL if link else LOOKUP_MISS_TTL))
+    if len(_lookups) > 10_000:  # Keep it bounded: drop the expired ones
+        for key in [k for k, (_, expiry) in _lookups.items() if expiry <= time.time()]:
+            del _lookups[key]
+    logger.debug(f"Perma.cc archive of {url}: {link or 'none'}")
+    return link
+
+
+_perma: Optional[PermaCC] = None
+
+
+async def retrieve_archived_copy(url: str, session=None, **kwargs) -> ScrapedContent:
+    """Retrieves the newest Perma.cc archive of `url` (any URL), through the Perma.cc
+    integration. `kwargs` are the integration's (e.g. output_format, max_video_size).
+
+    Raises TargetUnavailableError if Perma.cc has no archive of the URL, RateLimitError
+    while Perma.cc throttles lookups, and whatever the integration raises otherwise."""
+    global _perma
+    from scrapemm.common.exceptions import TargetUnavailableError
+
+    link = await find_perma_archive(url, session)
+    if link is None:
+        raise TargetUnavailableError(f"Perma.cc has no archive of {url}.")
+    logger.info(f"Retrieving {url} from its Perma.cc archive {link}.")
+    if _perma is None:
+        _perma = PermaCC()
+    return await _perma.get(link, **kwargs)

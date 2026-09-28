@@ -4,7 +4,7 @@ The working rhythm this supports is the one Archive.today was built around, now 
 every site. A gated URL does not block its batch; it is queued with a challenge for its
 domain. When somebody has a minute, they open the CAPTCHA page and, per challenge,
 either solve the check in the server's browser -- after which the queue is retrieved and
-cached -- or discard it.
+cached in the background -- or discard it.
 """
 
 import os
@@ -52,7 +52,7 @@ async def report_no_captcha() -> dict:
     """The page in the panel shows no check, only the normal content: logs the case as
     a possible false detection and retrieves the queue."""
     try:
-        return session.report_no_captcha()
+        return await session.report_no_captcha()
     except RuntimeError as e:
         raise HTTPException(status_code=409, detail=str(e))
 
@@ -60,6 +60,9 @@ async def report_no_captcha() -> dict:
 @router.post("/{domain}/solve")
 async def solve(domain: str, body: SolveRequest) -> dict:
     _require(domain)
+    if session.retrieving(domain):
+        raise HTTPException(status_code=409,
+                            detail=f"The {domain} queue is still being retrieved.")
     return await session.start(domain, timeout=body.timeout)
 
 
@@ -70,6 +73,9 @@ async def retry(domain: str) -> dict:
     _require(domain)
     if session.running:
         raise HTTPException(status_code=409, detail="A CAPTCHA session is under way.")
+    if session.retrieving(domain):
+        raise HTTPException(status_code=409,
+                            detail=f"The {domain} queue is already being retrieved.")
     retrieved, remaining = await challenges.drain(domain)
     return {"retrieved": retrieved, "remaining": remaining}
 
@@ -79,6 +85,7 @@ async def discard(domain: str) -> dict:
     _require(domain)
     if session.running and session.domain == domain:
         await session.cancel()
+    await session.stop_retrieving(domain)
     return {"dropped": challenges.discard(domain)}
 
 
