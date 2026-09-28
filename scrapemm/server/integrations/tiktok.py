@@ -10,6 +10,7 @@ from ezmm.common.items import Video, Image
 from tiktok_research_api import (TikTokResearchAPI, QueryUserInfoRequest, Criteria, Query,
                                  APIErrorResponse)
 
+from scrapemm.server.workers import run_light
 from scrapemm.common.exceptions import (AccessBlockedError, RateLimitError, RetrievalFailed,
                                         TargetUnavailableError)
 from scrapemm.server.download import download_image
@@ -242,7 +243,7 @@ class TikTok(RetrievalIntegration):
         from scrapemm.server.captcha_detect import detect_captcha
         try:
             content = await decodo.scrape(url, session, output_format="html")
-            html = self._prepare_photo_html(content.html)
+            html = await run_light(self._prepare_photo_html, content.html)
             scraped = await to_scraped_content(html, session=session,
                                                output_format=output_format, url=url)
             if "<img" in html and not detect_captcha(scraped):

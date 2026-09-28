@@ -49,6 +49,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeoutError
 
+from scrapemm.server.workers import run_light
 from scrapemm.common import CaptchaEncounteredError
 from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError
 from scrapemm.server.config import get_config_var, update_config
@@ -155,31 +156,32 @@ async def _get_via_curl_cffi(url: str, cookies: Optional[dict], user_agent: Opti
     that Archive.today serves to non-browser clients like aiohttp on some IPs. A short
     timeout matters: Archive.today tarpits some requests (accepts the connection, sends
     nothing), and a browser fallback handles those, so waiting long only delays it."""
-    try:
-        from curl_cffi.requests import AsyncSession
-    except ImportError:
+    from scrapemm.server.download.requests import CurlSession, curl_get
+    if CurlSession is None:
         return None, ""
     # No User-Agent override keeps curl_cffi's impersonation UA (a real browser build);
     # the gated page overrides it with the UA its session was pinned to.
     headers = {**ACCEPT_LANGUAGE, **({"User-Agent": user_agent} if user_agent else {})}
     try:
-        async with AsyncSession() as session:
-            response = await session.get(url, impersonate=impersonate, headers=headers,
-                                         cookies=cookies, allow_redirects=True,
-                                         verify=False, timeout=timeout)
-            return response.status_code, response.text
+        # Not curl_cffi's AsyncSession, which breaks the event loop's sockets
+        response = await curl_get(url, impersonate=impersonate, headers=headers,
+                                  cookies=cookies, allow_redirects=True, verify=False,
+                                  timeout=timeout)
+        return response.status_code, response.text
     except Exception as e:
         logger.debug(f"curl_cffi ({impersonate}) GET failed for {url}: {type(e).__name__}.")
         return None, ""
 
 
-async def _get_via_aiohttp(url: str, cookies: Optional[dict],
-                           user_agent: Optional[str]) -> tuple[Optional[int], str]:
+async def _get_via_aiohttp(url: str, cookies: Optional[dict], user_agent: Optional[str],
+                           timeout: float = 15) -> tuple[Optional[int], str]:
     """Plain-HTTP GET. Archive.today decoys this on some IPs but, oddly, serves it the
-    capture listing that it 429s for curl_cffi -- hence both clients are tried."""
+    capture listing that it 429s for curl_cffi -- hence both clients are tried. Bounded
+    like the curl_cffi GET: without a timeout of its own, a tarpitted request waited out
+    aiohttp's default of five minutes."""
     headers = {"User-Agent": user_agent or DEFAULT_USER_AGENT, **ACCEPT_LANGUAGE}
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
             async with session.get(url, headers=headers, cookies=cookies,
                                    allow_redirects=True, ssl=False) as response:
                 return response.status, await response.text()
@@ -205,7 +207,7 @@ async def _http_get(url: str, cookies: Optional[dict] = None, user_agent: Option
         if status == 200 and not _is_decoy(body):
             return status, body
         attempts.append((status, body))
-    status, body = await _get_via_aiohttp(url, cookies, user_agent)
+    status, body = await _get_via_aiohttp(url, cookies, user_agent, timeout)
     if status == 200 and not _is_decoy(body):
         return status, body
     attempts.append((status, body))
@@ -319,9 +321,12 @@ def _screenshot_fallback_enabled() -> bool:
 
 
 def canonicalize_url(url: str) -> str:
-    """Rewrites any Archive.today mirror URL to its https equivalent on CANONICAL_DOMAIN."""
+    """Rewrites any Archive.today mirror URL to its https equivalent on CANONICAL_DOMAIN.
+    A capture's "work in progress" address (/wip/<id>) becomes the capture's own
+    (/<id>), where Archive.today redirects it anyway once the capture is done."""
     parsed = urlparse(url)
-    return urlunparse(parsed._replace(scheme="https", netloc=CANONICAL_DOMAIN))
+    path = re.sub(r"^/wip/(?=[A-Za-z0-9]+/?$)", "/", parsed.path)
+    return urlunparse(parsed._replace(scheme="https", netloc=CANONICAL_DOMAIN, path=path))
 
 
 @dataclass
@@ -653,6 +658,10 @@ class ArchiveToday(HeadedBrowser):
     # Queues its gated requests itself (see `_RequestBuffer`), with a session that can be
     # reused over plain HTTP; the generic challenge machinery leaves it to that
     handles_captchas = True
+    # A replay page answers in a second or two, or, when Archive.today stalls this
+    # server, not at all: one short attempt, not two of a minute each
+    navigation_timeout = 30
+    retry_on_timeout = False
     # Every mirror is accepted as input, but all of them are served via CANONICAL_DOMAIN
     domains = [
         "archive.today",
@@ -841,6 +850,13 @@ class ArchiveToday(HeadedBrowser):
         re-serving would re-resolve media over HTTP, so each URL is fetched afresh here."""
         try:
             return await super()._get(url, **kwargs)
+        except PlaywrightTimeoutError as e:
+            # The page did not even start to load: Archive.today does not answer this
+            # server right now (it stalls some requests for minutes), which is no fault
+            # of scrapeMM's
+            raise TargetUnavailableError(
+                f"Archive.today did not answer for {url}: the browser got no page within "
+                f"{self.navigation_timeout:.0f} s.") from e
         except CaptchaEncounteredError:
             if _interactive_solve_enabled():
                 async with self._solve_lock:
@@ -993,7 +1009,8 @@ class ArchiveToday(HeadedBrowser):
         block or DNS junk), which must not be mistaken for a missing capture.
         """
         status, body = await self._fetch_page(session, url)
-        if content := _extract_content_html(body):
+        # Parsing a snapshot page is CPU-bound; in a thread, the event loop keeps going
+        if content := await run_light(_extract_content_html, body):
             return content, CONTENT
         if "not found (yet?)" in body.lower():
             return None, NOT_FOUND

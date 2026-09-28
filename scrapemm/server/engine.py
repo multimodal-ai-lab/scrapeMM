@@ -37,6 +37,7 @@ from scrapemm.server.integrations import (retrieve_via_integration, fire, decodo
                                           DOMAIN_TO_INTEGRATION)
 from scrapemm.server.integrations.firecrawl.firecrawl import configured_firecrawl_urls
 from scrapemm.server.toggles import is_enabled
+from scrapemm.server.workers import run_light
 from scrapemm.server.util import (run_with_semaphore, get_domain, normalize_video, preprocess_url,
                                   to_scraped_content)
 
@@ -457,7 +458,10 @@ async def _retrieve_single(
 
         if isinstance(content, Exception):
             return "error", content
-        return _classify(url, method_name, content, output_format)
+        # In a thread: the checks parse the whole page (BeautifulSoup for the paywall
+        # check), which for a large page held the event loop -- every request -- for
+        # seconds. In a thread, the loop keeps getting its turns.
+        return await run_light(_classify, url, method_name, content, output_format)
 
     # The live stage, hedged if so configured
     if not methods:
@@ -532,6 +536,13 @@ def _classify(url: str, method_name: str, content: Optional[ScrapedContent],
         return "error", RetrievalFailed(f"Method {method_name} returned an empty page "
                                         f"without any text or media.")
 
+    # ...nor an archive's own "no such capture" page (Perma.cc's and the Wayback
+    # Machine's replayers answer a miss with a page of their own, which scraped fine)
+    if marker := _replay_miss(content):
+        logger.info(f"Method {method_name} got the archive's \"not archived\" page for {url}.")
+        return "error", TargetUnavailableError(
+            f"The archive has no capture of this page: its replay says \"{marker}\".")
+
     if content.get(output_format) is not None:
         return "success", content
 
@@ -539,6 +550,29 @@ def _classify(url: str, method_name: str, content: Optional[ScrapedContent],
     # has no HTML page to offer). Keep it, but continue with the remaining methods.
     logger.info(f"Method {method_name} could not provide the content of {url} as {output_format}.")
     return "partial", content
+
+
+# What the replayers show for a capture they do not have: pywb (Perma.cc, and archives
+# built on it) and the Wayback Machine
+REPLAY_MISS_MARKERS = (
+    "sorry, this page was not found in this archive",
+    "archived page not found",
+    "the wayback machine has not archived that url",
+    "hrm. the wayback machine",
+)
+
+
+def _replay_miss(content: ScrapedContent) -> Optional[str]:
+    """The marker of an archive's "no such capture" page, if the content is one: a short
+    page without media that says so. Real pages quoting the phrase are long, or have
+    media, and are left alone."""
+    if content.multimodal is not None and (content.multimodal.images or content.multimodal.videos):
+        return None
+    text = (content.markdown or (str(content.multimodal) if content.multimodal else "")
+            or _TAGS.sub(" ", content.html or "")).lower()
+    if len(text) > 2000:
+        return None
+    return next((m for m in REPLAY_MISS_MARKERS if m in text), None)
 
 
 def _derive_markdown(content: ScrapedContent) -> None:
@@ -718,7 +752,7 @@ async def _wayback(url: str, session: aiohttp.ClientSession, errors: dict,
     except Exception as e:
         errors[name] = e
         return None
-    status, result = _classify(snapshot, name, content, output_format)
+    status, result = await run_light(_classify, snapshot, name, content, output_format)
     if status == "success":
         return result
     errors[name] = result if status == "error" else RetrievalFailed(
@@ -744,7 +778,7 @@ async def _perma_cc(url: str, session: aiohttp.ClientSession, errors: dict,
     except Exception as e:
         errors[name] = e
         return None
-    status, result = _classify(url, name, content, output_format)
+    status, result = await run_light(_classify, url, name, content, output_format)
     if status == "success":
         return result
     errors[name] = result if status == "error" else RetrievalFailed(
@@ -1031,7 +1065,7 @@ async def _cloudflare_fallback(url: str, domain: str, session: aiohttp.ClientSes
     except Exception as e:
         errors[BROWSER] = e
         return None
-    if captcha := detect_captcha(content):
+    if captcha := await run_light(detect_captcha, content):
         errors[BROWSER] = CaptchaEncounteredError(
             f"Method {BROWSER} encountered a {captcha}.")
         return None
@@ -1185,7 +1219,13 @@ async def _execute(
             return e
 
     except Exception as e:
-        logger.warning(f"Error while retrieving with method {method_name}.", exc_info=True)
+        from scrapemm.common.outcome import UNAVAILABLE_KINDS, _error_type
+        if _error_type(e) in UNAVAILABLE_KINDS:
+            # A known verdict about the target (e.g. Decodo refusing a domain as
+            # unsupported): one line says it all, a traceback would be noise
+            logger.info(f"Method {method_name} for {url}: {type(e).__name__}: {e}")
+        else:
+            logger.warning(f"Error while retrieving with method {method_name}.", exc_info=True)
         return e
 
 

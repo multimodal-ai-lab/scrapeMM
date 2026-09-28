@@ -194,7 +194,8 @@ class Instagram(RetrievalIntegration):
             cookies = parse_netscape_cookies(self.cookie_file)
             headers["Cookie"] = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
         # Instagram refuses aiohttp's TLS fingerprint outright
-        result = await _request_via_curl_cffi(PROFILE_API_URL.format(username=username), headers)
+        result = await _request_via_curl_cffi(PROFILE_API_URL.format(username=username), headers,
+                                              lookup=True)
         if result is None:
             return None
         status, _, body = result

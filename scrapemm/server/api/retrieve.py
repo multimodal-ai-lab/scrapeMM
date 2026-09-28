@@ -8,8 +8,17 @@ path would be entitled to consider dead.
 Line kinds:
     {"type": "header",  ...}  once, first: protocol version and the media registry
     {"type": "result",  ...}  once per URL, in completion order
+    {"type": "heartbeat", ...} every HEARTBEAT_INTERVAL seconds without a result: progress
+                               counts. Clients ignore it; it exists so that the
+                               connection never goes silent
     {"type": "summary", ...}  once, last: counts and duration
     {"type": "error",   ...}  instead of the summary, if the whole batch fell over
+
+A single URL can take minutes (a heavy archive replay, a queue behind the concurrency
+limit), and clients -- and proxies in between -- give up on a socket that delivers no
+bytes for a while ("Timeout on reading data from socket"). The heartbeat keeps bytes
+flowing however long a result takes. Clients that do not know it skip it: every client
+dispatches on "type" and ignores what it does not know.
 """
 
 import asyncio
@@ -32,8 +41,13 @@ from ..auth import require_api_key
 from ..engine import retrieve_one
 from ..jobs import jobs
 from ..version import __version__
+from ..workers import run_light
 
 logger = logging.getLogger(APP_NAME)
+
+# Seconds without a result after which a heartbeat line is sent. Well below any sensible
+# client read timeout (the scrapeMM client's default is minutes, others use 30-60 s).
+HEARTBEAT_INTERVAL = 10.0
 
 router = APIRouter(prefix="/v1", tags=["retrieval"], dependencies=[Depends(require_api_key)])
 
@@ -62,7 +76,7 @@ async def _stream(request: RetrieveRequest) -> AsyncIterator[bytes]:
     urls = list(dict.fromkeys(request.urls))
     methods = _per_url_methods(urls, request.methods)
 
-    job_id = jobs.start(request.model_dump(), len(urls))
+    job_id = await jobs.astart(request.model_dump(), len(urls))
     yield _line({
         "type": "header",
         "protocol": PROTOCOL_VERSION,
@@ -70,6 +84,7 @@ async def _stream(request: RetrieveRequest) -> AsyncIterator[bytes]:
         "job_id": job_id,
         "total": len(urls),
         "registry": registry.info().to_dict(),
+        "heartbeat": HEARTBEAT_INTERVAL,
     })
 
     succeeded = failed = 0
@@ -89,20 +104,29 @@ async def _stream(request: RetrieveRequest) -> AsyncIterator[bytes]:
                     hedging_delay=request.hedging_delay,
                 )): url for url in urls
             }
-            for completed in asyncio.as_completed(tasks):
-                response = await completed
-                payload = _to_payload(response)
-                jobs.record(job_id, payload, response.success)
-                if response.success:
-                    succeeded += 1
-                else:
-                    failed += 1
-                yield _line({"type": "result", "payload": payload.to_dict()})
-        jobs.finish(job_id, succeeded, failed)
+            pending = set(tasks)
+            while pending:
+                done, pending = await asyncio.wait(pending, timeout=HEARTBEAT_INTERVAL,
+                                                   return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    yield _line({"type": "heartbeat", "done": succeeded + failed,
+                                 "total": len(urls), "elapsed": round(time.time() - started, 1)})
+                    continue
+                for completed in done:
+                    response = completed.result()
+                    payload = _to_payload(response)
+                    await jobs.arecord(job_id, payload, response.success)
+                    if response.success:
+                        succeeded += 1
+                    else:
+                        failed += 1
+                    # Serialised in a thread: a result carries a whole page, megabytes
+                    yield await run_light(_line, {"type": "result", "payload": payload.to_dict()})
+        await jobs.afinish(job_id, succeeded, failed)
         finished = True
     except Exception as e:
         logger.error("Retrieval batch failed.", exc_info=True)
-        jobs.finish(job_id, succeeded, failed, status="failed")
+        await jobs.afinish(job_id, succeeded, failed, status="failed")
         finished = True
         yield _line({"type": "error", "message": f"{type(e).__name__}: {e}"})
         return

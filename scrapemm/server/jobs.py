@@ -13,6 +13,7 @@ ran in `link` mode holds references straight into the registry, and deleting tho
 files would break sequences that were handed out long ago.
 """
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -33,23 +34,73 @@ logger = logging.getLogger(APP_NAME)
 # usefulness, so each field is capped and the UI says when it truncated something.
 MAX_STORED_CONTENT = 256 * 1024
 
+RESULTS_COLUMNS = """
+    job_id         TEXT NOT NULL,
+    url            TEXT NOT NULL,
+    success        INTEGER NOT NULL,
+    method         TEXT,
+    errors         TEXT,
+    retrieval_time REAL,
+    from_cache     INTEGER NOT NULL DEFAULT 0,
+    created_at     REAL NOT NULL,
+    outcome        TEXT,
+    outcome_kind   TEXT,
+    PRIMARY KEY (job_id, url)
+"""
+
+RESULTS_INDEXES = """
+    CREATE INDEX IF NOT EXISTS results_url_idx ON results(url);
+    -- The dashboard asks for the most recent N results and for a count since a
+    -- timestamp on every load; without this both degrade into a full scan of a table
+    -- that only ever grows.
+    CREATE INDEX IF NOT EXISTS results_created_idx ON results(created_at DESC);
+    CREATE INDEX IF NOT EXISTS results_method_idx ON results(method) WHERE success = 1;
+    CREATE INDEX IF NOT EXISTS results_outcome_idx ON results(outcome, outcome_kind);
+    -- Covers every per-URL job filter (see `_filters`), so they never read the rows
+    CREATE INDEX IF NOT EXISTS results_filter_idx
+        ON results(job_id, url, success, method, outcome, outcome_kind);
+"""
+
+WAL_SIZE_LIMIT = 64 * 1024 * 1024  # Bytes the write-ahead log is cut back to
+
 DEFAULT_RETENTION_DAYS = 90
 DEFAULT_MAX_JOBS = 10_000
 
 
 class JobStore:
-    """The job history. Thread-safe: the retrieval routines write from the event loop
-    while the UI reads from request handlers."""
+    """The job history. Thread-safe, and meant to be called from worker threads
+    (`asyncio.to_thread`) rather than on the event loop: a query on the loop stalls
+    every request the server has in flight.
+
+    Two connections, each behind its own lock: one writes, one reads. In WAL mode SQLite
+    lets a reader and a writer work at once, so a long query of the UI never holds up
+    the recording of results, nor the other way round.
+
+    Page content lives in a table of its own (`result_content`). In the results rows, it
+    made every row that was read -- to count outcomes, say -- walk the content's
+    overflow pages: on a 4 GB history, the dashboard's all-time figures took a second
+    per poll, and a filtered job count 80 s."""
 
     def __init__(self, path=JOBS_DB_PATH):
         self.path = path
-        self._lock = threading.RLock()
+        self._lock = threading.RLock()  # The write connection's
+        self._read_lock = threading.RLock()
         # Bumped on every write, so the live dashboard re-queries only after a change
         self.version = 0
         self._connection = sqlite3.connect(str(path), check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA journal_mode=WAL;")
+        # The write-ahead log otherwise keeps the size of the largest transaction ever
+        # written, for good: 2 GB on production, after the outcome columns were filled in
+        self._connection.execute(f"PRAGMA journal_size_limit={WAL_SIZE_LIMIT};")
         self._init_db()
+        self._reader = sqlite3.connect(str(path), check_same_thread=False)
+        self._reader.row_factory = sqlite3.Row
+
+    def query(self, sql: str, args: tuple | list = ()) -> list[sqlite3.Row]:
+        """Runs a read-only query on the read connection."""
+        with self._read_lock:
+            return self._reader.execute(sql, args).fetchall()
 
     def _init_db(self) -> None:
         with self._lock:
@@ -65,31 +116,49 @@ class JobStore:
                     succeeded    INTEGER NOT NULL DEFAULT 0,
                     failed       INTEGER NOT NULL DEFAULT 0
                 );
-                CREATE TABLE IF NOT EXISTS results (
+                CREATE TABLE IF NOT EXISTS results (""" + RESULTS_COLUMNS + """);
+                CREATE TABLE IF NOT EXISTS result_content (
                     job_id       TEXT NOT NULL,
                     url          TEXT NOT NULL,
-                    success      INTEGER NOT NULL,
-                    method       TEXT,
-                    errors       TEXT,
                     content      TEXT,
-                    retrieval_time REAL,
-                    from_cache   INTEGER NOT NULL DEFAULT 0,
-                    created_at   REAL NOT NULL,
                     PRIMARY KEY (job_id, url)
                 );
                 CREATE INDEX IF NOT EXISTS jobs_created_idx ON jobs(created_at DESC);
-                CREATE INDEX IF NOT EXISTS results_url_idx ON results(url);
-                -- The dashboard asks for the most recent N results and for a count
-                -- since a timestamp on every load; without this both degrade into a
-                -- full scan of a table that only ever grows.
-                CREATE INDEX IF NOT EXISTS results_created_idx ON results(created_at DESC);
-                CREATE INDEX IF NOT EXISTS results_method_idx ON results(method)
-                    WHERE success = 1;
                 """
             )
             self._add_outcome_columns()
+            self._split_off_content()
+            self._connection.executescript(RESULTS_INDEXES)
             self._connection.commit()
             self.version += 1
+
+    def _split_off_content(self) -> None:
+        """Moves the page content of a history from before `result_content` existed out
+        of the results table: one-time, and on a history of gigabytes a matter of a
+        minute or two. The results table is rebuilt without the column, and the file
+        compacted, which needs as much free disk space as the file takes."""
+        columns = [row["name"] for row in self._connection.execute("PRAGMA table_info(results)")]
+        if "content" not in columns:
+            return
+        started = time.time()
+        logger.warning("Moving stored page content out of the job history's results table. "
+                       "One-time, and it may take a few minutes on a large history.")
+        kept = ", ".join(c for c in columns if c != "content")
+        self._connection.executescript(f"""
+            BEGIN;
+            INSERT OR REPLACE INTO result_content (job_id, url, content)
+                SELECT job_id, url, content FROM results WHERE content IS NOT NULL;
+            CREATE TABLE results_split ({RESULTS_COLUMNS});
+            INSERT INTO results_split ({kept}) SELECT {kept} FROM results;
+            DROP TABLE results;
+            ALTER TABLE results_split RENAME TO results;
+            COMMIT;
+        """)
+        moved = time.time() - started
+        self._connection.execute("VACUUM")  # Gives the freed gigabytes back
+        self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        logger.warning(f"Moved the page content in {moved:.0f} s, compacted the database "
+                       f"in {time.time() - started - moved:.0f} s.")
 
     def _add_outcome_columns(self) -> None:
         """The outcome class of each result (see `scrapemm.common.outcome`), stored so
@@ -110,16 +179,22 @@ class JobStore:
                 (outcome, kind, row["rowid"]))
         if rows:
             logger.info(f"Classified the outcome of {len(rows)} stored results.")
-        self._connection.execute(
-            "CREATE INDEX IF NOT EXISTS results_outcome_idx ON results(outcome, outcome_kind)")
-        # Covers every per-URL job filter (see `_filters`), so they never read the rows
-        # themselves: the outcome columns sit behind the large `content` column, and
-        # reading them walked its overflow pages across the whole table.
-        self._connection.execute(
-            "CREATE INDEX IF NOT EXISTS results_filter_idx "
-            "ON results(job_id, url, success, method, outcome, outcome_kind)")
 
     # --- Writing ------------------------------------------------------------------
+
+    # For callers on the event loop: the same, in a worker thread
+    async def astart(self, params: dict, url_count: int) -> str:
+        from .workers import run_light
+        return await run_light(self.start, params, url_count)
+
+    async def arecord(self, job_id: str, payload: ResponsePayload, success: bool) -> None:
+        from .workers import run_light
+        await run_light(self.record, job_id, payload, success)
+
+    async def afinish(self, job_id: str, succeeded: int, failed: int,
+                      status: str = "completed") -> None:
+        from .workers import run_light
+        await run_light(self.finish, job_id, succeeded, failed, status)
 
     def start(self, params: dict, url_count: int) -> str:
         # Ten hex characters: short enough to read and quote in full, and still 40 bits
@@ -144,11 +219,14 @@ class JobStore:
         with self._lock:
             self._connection.execute(
                 "INSERT OR REPLACE INTO results (job_id, url, success, method, errors, "
-                "content, retrieval_time, from_cache, created_at, outcome, outcome_kind) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "retrieval_time, from_cache, created_at, outcome, outcome_kind) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (job_id, payload.url, int(success), payload.method,
-                 json.dumps(payload.errors), content, payload.retrieval_time,
+                 json.dumps(payload.errors), payload.retrieval_time,
                  int(payload.from_cache), time.time(), outcome, kind))
+            self._connection.execute(
+                "INSERT OR REPLACE INTO result_content (job_id, url, content) VALUES (?, ?, ?)",
+                (job_id, payload.url, content))
             self._connection.commit()
             self.version += 1
 
@@ -239,16 +317,16 @@ class JobStore:
                                     since, until, outcome)
         order = SORTS.get(sort, SORTS["newest"])
         query = f"SELECT * FROM jobs{where} ORDER BY {order}, created_at DESC LIMIT ? OFFSET ?"
-        with self._lock:
+        with self._read_lock:
             # `now` stands in for the end of jobs still running, when sorting by duration
-            rows = self._connection.execute(
+            rows = self._reader.execute(
                 query.replace(":now", str(time.time())), [*args, limit, offset]).fetchall()
             jobs = [_job_row(row) for row in rows]
             # Every listed job's URLs in one query, rather than one query per job
             ids = [job["id"] for job in jobs]
             by_job: dict[str, list[sqlite3.Row]] = {job_id: [] for job_id in ids}
             if ids:
-                for row in self._connection.execute(
+                for row in self._reader.execute(
                         "SELECT job_id, url, success, method, retrieval_time, from_cache, "
                         "errors, outcome, outcome_kind "
                         f"FROM results WHERE job_id IN ({','.join('?' * len(ids))}) "
@@ -265,27 +343,24 @@ class JobStore:
                    until: Optional[float] = None, outcome: Optional[str] = None) -> int:
         where, args = self._filters(url, status, output_format, method, success,
                                     since, until, outcome)
-        with self._lock:
-            return self._connection.execute(
-                f"SELECT COUNT(*) FROM jobs{where}", args).fetchone()[0]
+        return self.query(f"SELECT COUNT(*) FROM jobs{where}", args)[0][0]
 
     def known_methods(self) -> list[str]:
         """Every method that has ever produced a result here, for the filter dropdown."""
-        with self._lock:
-            rows = self._connection.execute(
-                "SELECT DISTINCT method FROM results WHERE method IS NOT NULL "
-                "ORDER BY method").fetchall()
+        rows = self.query("SELECT DISTINCT method FROM results WHERE method IS NOT NULL "
+                          "ORDER BY method")
         return [row["method"] for row in rows]
 
     def get_job(self, job_id: str) -> Optional[dict]:
-        with self._lock:
-            row = self._connection.execute(
+        with self._read_lock:
+            row = self._reader.execute(
                 "SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if row is None:
                 return None
-            results = self._connection.execute(
-                "SELECT * FROM results WHERE job_id = ? ORDER BY created_at",
-                (job_id,)).fetchall()
+            results = self._reader.execute(
+                "SELECT results.*, result_content.content FROM results "
+                "LEFT JOIN result_content USING (job_id, url) "
+                "WHERE results.job_id = ? ORDER BY results.created_at", (job_id,)).fetchall()
         job = _job_row(row)
         job["results"] = [_result_row(r) for r in results]
         job["duration"] = _duration(job)
@@ -303,6 +378,7 @@ class JobStore:
         with self._lock:
             cursor = self._connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
             self._connection.execute("DELETE FROM results WHERE job_id = ?", (job_id,))
+            self._connection.execute("DELETE FROM result_content WHERE job_id = ?", (job_id,))
             self._connection.commit()
             self.version += 1
         return cursor.rowcount > 0
@@ -322,6 +398,8 @@ class JobStore:
                 (max_jobs,)).rowcount
             self._connection.execute(
                 "DELETE FROM results WHERE job_id NOT IN (SELECT id FROM jobs)")
+            self._connection.execute(
+                "DELETE FROM result_content WHERE job_id NOT IN (SELECT id FROM jobs)")
             self._connection.commit()
             self.version += 1
         if removed:
@@ -332,13 +410,12 @@ class JobStore:
         """All-time figures. `succeeded` and `failed` are in scrapeMM's terms: a target
         that was unavailable counts as succeeded (see `scrapemm.common.outcome`);
         `outcomes` has the three classes apart."""
-        with self._lock:
-            jobs = self._connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-            # One pass over the results for all figures
-            results, retrieved, unavailable, cached = self._connection.execute(
-                "SELECT COUNT(*), COALESCE(SUM(outcome = 'ok'), 0), "
-                "COALESCE(SUM(outcome = 'unavailable'), 0), COALESCE(SUM(from_cache), 0) "
-                "FROM results").fetchone()
+        jobs = self.query("SELECT COUNT(*) FROM jobs")[0][0]
+        # One pass over the results for all figures
+        results, retrieved, unavailable, cached = self.query(
+            "SELECT COUNT(*), COALESCE(SUM(outcome = 'ok'), 0), "
+            "COALESCE(SUM(outcome = 'unavailable'), 0), COALESCE(SUM(from_cache), 0) "
+            "FROM results")[0]
         failed = results - retrieved - unavailable
         return {"jobs": jobs, "urls": results, "succeeded": retrieved + unavailable,
                 "failed": failed, "from_cache": cached,
@@ -349,10 +426,8 @@ class JobStore:
         """How many URLs each method has successfully retrieved. Only successes count:
         a method that was tried and failed did not retrieve anything, and the number is
         meant to show what a method is actually carrying."""
-        with self._lock:
-            rows = self._connection.execute(
-                "SELECT method, COUNT(*) AS n FROM results "
-                "WHERE success = 1 AND method IS NOT NULL GROUP BY method").fetchall()
+        rows = self.query("SELECT method, COUNT(*) AS n FROM results "
+                          "WHERE success = 1 AND method IS NOT NULL GROUP BY method")
         return {row["method"]: row["n"] for row in rows}
 
     def recent_success_rate(self, limit: int = 1000) -> dict:
@@ -362,10 +437,8 @@ class JobStore:
         months would otherwise average away exactly the degradation this number exists
         to surface.
         """
-        with self._lock:
-            rows = self._connection.execute(
-                "SELECT outcome FROM results ORDER BY created_at DESC LIMIT ?",
-                (limit,)).fetchall()
+        rows = self.query("SELECT outcome FROM results ORDER BY created_at DESC LIMIT ?",
+                          (limit,))
         total = len(rows)
         outcomes = _outcome_counts(row["outcome"] for row in rows)
         # scrapeMM's success: it did its part, whether or not the target had the content
@@ -385,12 +458,12 @@ class JobStore:
 
     def count_since(self, seconds: float) -> int:
         """How many URLs were retrieved in the last `seconds`."""
-        with self._lock:
-            return self._connection.execute(
-                "SELECT COUNT(*) FROM results WHERE created_at >= ?",
-                (time.time() - seconds,)).fetchone()[0]
+        return self.query("SELECT COUNT(*) FROM results WHERE created_at >= ?",
+                          (time.time() - seconds,))[0][0]
 
     def close(self) -> None:
+        with self._read_lock:
+            self._reader.close()
         with self._lock:
             self._connection.close()
 

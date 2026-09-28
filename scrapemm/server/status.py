@@ -31,6 +31,7 @@ from .environment import ffmpeg_available, ffprobe_available
 from .jobs import jobs
 from .secrets import is_set
 from .toggles import is_enabled, resolve_alias
+from .workers import run_light
 
 logger = logging.getLogger(APP_NAME)
 
@@ -397,7 +398,8 @@ async def environment() -> dict:
         "queue": _queue(),
         "media": _media_usage(),
         "address": _address(),
-        **_job_figures(),
+        # In a thread: they are queries of the job history
+        **(await run_light(_job_figures)),
         "blacklist": {
             "domains": len(blacklist),
             "ttl": blacklist.ttl,

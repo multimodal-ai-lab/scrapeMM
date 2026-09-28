@@ -444,6 +444,11 @@ async def _open_background_tab(context: BrowserContext, timeout: float = 25) -> 
         context.remove_listener("page", on_page)
 
 
+def renderer_crashed(page: Page) -> bool:
+    """Whether the tab's renderer died (see `HeadedBrowser._browse()`)."""
+    return getattr(page, "_scrapemm_crashed", False)
+
+
 def release_page_soon(page: Page) -> None:
     """`release_page()` without waiting for it."""
     _run_soon(release_page(page))
@@ -838,6 +843,10 @@ class HeadedBrowser(RetrievalIntegration):
     # Whether a page answering 404/410 counts as missing rather than as content. Off for
     # the archive integrations: a replay may pass on the archived page's own status.
     fails_on_not_found = False
+    # Seconds a page gets to load its document, and whether a page that missed that is
+    # tried once more on a new tab (under load, a page that is quick alone can miss it)
+    navigation_timeout: ClassVar[float] = 60
+    retry_on_timeout: ClassVar[bool] = True
 
     # Shared UC browser for all HeadedBrowser integrations (Perma.cc, Archive.org, …).
     _browser: ClassVar[Optional[Browser]] = None
@@ -1139,6 +1148,7 @@ class HeadedBrowser(RetrievalIntegration):
         """Opens `url` in a tab of its own and extracts it. The tab is closed, and `slot`
         released, as soon as the page is no longer needed -- before media downloads that
         do not need it (see `resolve_media()`)."""
+        target_url = url  # What is loaded; after a renderer crash, maybe a lighter page
         for attempt in range(2):  # one try + one crash-triggered retry
             page, generation = await self._new_page(None)
             media: Optional[BrowserMedia] = None
@@ -1157,6 +1167,10 @@ class HeadedBrowser(RetrievalIntegration):
                 if slot is not None:
                     slot.release()
 
+            # A crashed renderer does not fail every call at once (a reload on it waits
+            # out its timeout), so extraction steps can ask `renderer_crashed()`
+            with suppress(AttributeError):  # Test doubles may lack events
+                page.on("crash", lambda p: setattr(p, "_scrapemm_crashed", True))
             try:
                 # Before navigating, so it sees every medium the page loads
                 media = BrowserMedia(page)
@@ -1166,7 +1180,9 @@ class HeadedBrowser(RetrievalIntegration):
                 # domcontentloaded: return as soon as the DOM is parseable. Waiting for "load"
                 # often burns many seconds on archive/analytics assets after content is ready.
                 try:
-                    response = await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+                    response = await page.goto(target_url,
+                                               timeout=self.navigation_timeout * 1000,
+                                               wait_until="domcontentloaded")
                     # The final document's status: goto follows redirects (www -> bare)
                     if (self.fails_on_not_found and response is not None
                             and response.status in (404, 410)):
@@ -1186,7 +1202,8 @@ class HeadedBrowser(RetrievalIntegration):
                         # change that, but other methods (remote services) still may
                         raise RetrievalFailed(f"{self.name} could not reach {url}: "
                                               f"{str(e).splitlines()[0]}") from e
-                    if attempt == 0 and isinstance(e, PlaywrightTimeoutError):
+                    if (attempt == 0 and self.retry_on_timeout
+                            and isinstance(e, PlaywrightTimeoutError)):
                         # With dozens of heavy pages loading at once, a page that
                         # takes seconds on its own can miss the deadline; it is a
                         # matter of load, and worth another try on a fresh page
@@ -1225,6 +1242,14 @@ class HeadedBrowser(RetrievalIntegration):
                 break  # No content found — not a crash, don't retry.
 
             except PlaywrightError as e:
+                if attempt == 0 and page_open and "target crashed" in str(e).lower():
+                    # The tab's renderer died; the browser is fine (it would say
+                    # "closed"/"disconnected"). Some pages crash it every time, so the
+                    # retry may load a lighter page instead (see `_after_renderer_crash()`)
+                    target_url = self._after_renderer_crash(url)
+                    logger.info(f"The page for {url} crashed its renderer; retrying on a new "
+                                f"page{f' with {target_url}' if target_url != url else ''}.")
+                    continue
                 # Not once the page is closed: the slot is gone, and the error is not the page's
                 if attempt == 0 and page_open and self._is_browser_crash(e):
                     if await _browser_alive(HeadedBrowser._browser):
@@ -1256,6 +1281,11 @@ class HeadedBrowser(RetrievalIntegration):
                 await close_page()
 
         raise RetrievalFailed(f"{self.name} integration was unable to extract content from {url}.")
+
+    def _after_renderer_crash(self, url: str) -> str:
+        """What to load on the new page after `url` crashed its tab's renderer. The same
+        URL by default: a renderer may die of the load of dozens of heavy pages at once."""
+        return url
 
     async def _pass_cloudflare(self, page: Page) -> None:
         """Gets the page past a Cloudflare challenge ("Just a moment..."), if it shows one.

@@ -1,6 +1,7 @@
 import html as html_lib
 import json
 import logging
+import asyncio
 import re
 from datetime import datetime, timezone
 from urllib.parse import parse_qs, unquote, urlparse
@@ -13,6 +14,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 from yt_dlp.networking.impersonate import ImpersonateTarget
 
+from scrapemm.server.workers import run_light
 from scrapemm.common import RateLimitError, RetrievalFailed
 from scrapemm.server.paths import CONFIG_DIR
 from scrapemm.common.exceptions import AccessBlockedError, TargetUnavailableError
@@ -334,15 +336,14 @@ class Facebook(RetrievalIntegration):
     async def _fetch_page(self, url: str) -> str | None:
         """Downloads the post's HTML with the stored session cookies, impersonating a
         real browser. Facebook serves aiohttp's TLS fingerprint a login wall."""
-        from curl_cffi.requests import AsyncSession
+        from scrapemm.server.download.requests import curl_get
 
         cookies = {c["name"]: c["value"]
                    for c in parse_netscape_cookies(self.cookie_file)}
         try:
-            async with AsyncSession() as session:
-                response = await session.get(url, cookies=cookies,
-                                             impersonate="chrome124", timeout=30)
-                return response.text if response.status_code == 200 else None
+            # Not curl_cffi's AsyncSession, which breaks the event loop's sockets
+            response = await curl_get(url, cookies=cookies, impersonate="chrome124", timeout=30)
+            return response.text if response.status_code == 200 else None
         except Exception:
             logger.debug(f"Could not fetch the Facebook page {url}.", exc_info=True)
             return None
@@ -402,13 +403,13 @@ class Facebook(RetrievalIntegration):
         if not image:
             raise RetrievalFailed("Could not download image from Facebook photo.")
 
-        # Retrieve text only
-        text = md(html, heading_style="ATX")
-        postprocessed_text = postprocess_markdown(text)
-        # Remove SVG icons for like/comment/share
-        postprocessed_text = re.sub(
-            LIKE_COMMENT_SHARE_SVG_REGEX, "", str(postprocessed_text)
-        )
+        # Retrieve text only. In a thread: converting Facebook's megabytes of markup held
+        # the event loop -- every other request -- for seconds.
+        def page_text() -> str:
+            text = postprocess_markdown(md(html, heading_style="ATX"))
+            # Remove SVG icons for like/comment/share
+            return re.sub(LIKE_COMMENT_SHARE_SVG_REGEX, "", str(text))
+        postprocessed_text = await run_light(page_text)
 
         return MultimodalSequence([image, postprocessed_text])
 

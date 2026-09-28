@@ -7,8 +7,10 @@ from typing import Optional
 from playwright.async_api import TimeoutError, Page, Frame, Error as PlaywrightError
 
 from scrapemm.server.download.browser import MAX_IMAGE_BYTES, MAX_VIDEO_BYTES, BLOB_ATTR, install_stash
-from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget, settle_dom
+from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget, settle_dom, \
+    renderer_crashed
 from scrapemm.common import RetrievalFailed
+from scrapemm.common.exceptions import TargetUnavailableError
 from scrapemm.common.scraping_response import ScrapedContent
 
 logger = logging.getLogger("scrapeMM")
@@ -63,6 +65,13 @@ class PermaCC(HeadedBrowser):
 
     # TODO: Implement PDF support, e.g., https://perma.cc/83VA-LTH9
 
+    def _after_renderer_crash(self, url: str) -> str:
+        """Replays of YouTube watch pages crash the tab's renderer within seconds on the
+        production host, every time (SIGTRAP at ~800 MB, even alone in a fresh browser)
+        -- loading them again would only crash again. The capture's screenshot is a
+        light page."""
+        return _screenshot_url(url) or url
+
     async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
         """The frame that shows the record's capture. Under load, the replay sometimes
         came up empty (only the app's shell) or replaced one of its frames while it was
@@ -80,6 +89,9 @@ class PermaCC(HeadedBrowser):
                 logger.info(f"The replay at {page.url} replaced a frame while it was being "
                             f"read; loading the record again.")
                 target = None
+            if renderer_crashed(page):
+                # Nothing on this page answers any more; `_browse()` retries on a new one
+                raise PlaywrightError("Target crashed")
             if target is not None and await _shows_content(target):
                 return target
             if attempt == 0 and loop.time() - start < RETRY_BUDGET:
@@ -91,6 +103,8 @@ class PermaCC(HeadedBrowser):
                 continue
             break
 
+        # The replay rendered the capture, twice, and it holds nothing to show
+        replayed_empty = target is not None
         shot = _screenshot_url(page.url)
         if shot is None or loop.time() - start >= RETRY_BUDGET:
             return None
@@ -98,6 +112,11 @@ class PermaCC(HeadedBrowser):
                     f"screenshot ({shot}).")
         try:
             await page.goto(shot, wait_until="domcontentloaded", timeout=60_000)
+            if replayed_empty and "type=image" not in page.url:
+                # Perma.cc sends a record without a screenshot back to the replay
+                raise TargetUnavailableError(
+                    f"The Perma.cc capture at {shot.split('?')[0]} is empty (the replay "
+                    f"shows nothing, and there is no screenshot).")
             target = await self._extract_capture(page)
         except PlaywrightError:
             logger.debug(f"The screenshot at {shot} could not be read.", exc_info=True)
@@ -762,7 +781,8 @@ async def _timemap_newest(url: str) -> Optional[str]:
     from scrapemm.common.exceptions import RateLimitError
     from scrapemm.server.download.requests import _request_via_curl_cffi
 
-    result = await _request_via_curl_cffi(PERMA_TIMEMAP + url, {"Accept": "application/json"})
+    result = await _request_via_curl_cffi(PERMA_TIMEMAP + url, {"Accept": "application/json"},
+                                          lookup=True)
     if result is None:
         raise RetrievalFailed("Perma.cc could not be asked for archives (no answer).")
     status, headers, body = result

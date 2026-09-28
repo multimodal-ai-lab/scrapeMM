@@ -744,5 +744,25 @@
   "expected": {},
   "category": "Facebook",
   "expect": "unavailable"
+ },
+ {
+  "url": "https://perma.cc/FD9Q-4S9Y",
+  "expected": {
+   "image": 1
+  },
+  "category": "Perma.cc"
+ },
+ {
+  "url": "https://perma.cc/XF4V-9D2S",
+  "expected": {
+   "image": 1
+  },
+  "category": "Perma.cc"
+ },
+ {
+  "url": "https://perma.cc/55YA-N88K",
+  "expected": {},
+  "category": "Perma.cc",
+  "expect": "unavailable"
  }
 ]

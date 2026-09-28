@@ -281,7 +281,7 @@ class TestRun:
         from .jobs import jobs
 
         urls = [e["url"] for e in self.entries]
-        self.job_id = jobs.start({"urls": urls, "output_format": OUTPUT_FORMAT,
+        self.job_id = await jobs.astart({"urls": urls, "output_format": OUTPUT_FORMAT,
                                   "use_cache": False, "test_run": self.id}, len(urls))
         passed = failed = 0
         tasks: list[asyncio.Task] = []
@@ -302,12 +302,12 @@ class TestRun:
                 tasks = [asyncio.create_task(one(e)) for e in self.entries]
                 for completed in asyncio.as_completed(tasks):
                     entry, response = await completed
-                    jobs.record(self.job_id, _to_payload(response), response.success)
+                    await jobs.arecord(self.job_id, _to_payload(response), response.success)
                     self.results.append(_score(entry, response))
                     passed += response.success
                     failed += not response.success
             self.state = "completed"
-            jobs.finish(self.job_id, passed, failed)
+            await jobs.afinish(self.job_id, passed, failed)
         except asyncio.CancelledError:
             for task in tasks:
                 task.cancel()
@@ -353,7 +353,7 @@ class TestRun:
         from .jobs import jobs
 
         urls = [r["url"] for r in gated]
-        job_id = jobs.start({"urls": urls, "output_format": OUTPUT_FORMAT, "use_cache": True,
+        job_id = await jobs.astart({"urls": urls, "output_format": OUTPUT_FORMAT, "use_cache": True,
                              "test_run": self.id, "rerun": "captcha"}, len(urls))
         passed = failed = 0
         try:
@@ -371,12 +371,12 @@ class TestRun:
 
                 for completed in asyncio.as_completed([one(r) for r in gated]):
                     entry, response = await completed
-                    jobs.record(job_id, _to_payload(response), response.success)
+                    await jobs.arecord(job_id, _to_payload(response), response.success)
                     # Its result lives in the rerun's job, not the run's
                     self.results.append(_score(entry, response) | {"job_id": job_id})
                     passed += response.success
                     failed += not response.success
-            jobs.finish(job_id, passed, failed)
+            await jobs.afinish(job_id, passed, failed)
         except asyncio.CancelledError:
             # The URLs not rerun keep their earlier CAPTCHA result
             done = {r["url"] for r in self.results}
