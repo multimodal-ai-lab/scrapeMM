@@ -44,6 +44,7 @@ async function save() {
       blacklist_ttl: numberOrNull(config.value.blacklist_ttl),
       max_concurrency: numberOrNull(config.value.max_concurrency),
       max_browser_pages: numberOrNull(config.value.max_browser_pages),
+      max_search_concurrency: numberOrNull(config.value.max_search_concurrency),
       youtube_min_interval: numberOrNull(config.value.youtube_min_interval),
       youtube_cooldown: numberOrNull(config.value.youtube_cooldown),
       archive_today_interactive_solve: !!config.value.archive_today_interactive_solve,
@@ -166,6 +167,12 @@ onMounted(() => {
             description="Retrievals in the server's browser (the Browser method, the archives) at once; more wait. Lower it if the server runs short of memory."
           >
             <UInput v-model="config.max_browser_pages" type="number" min="1" placeholder="32 (default)" />
+          </UFormField>
+          <UFormField
+            label="Max concurrent searches"
+            description="Searches with a search provider at once, across all clients; more wait. Keeps bursts within the provider's rate limit."
+          >
+            <UInput v-model="config.max_search_concurrency" type="number" min="1" placeholder="10 (default)" />
           </UFormField>
           <UFormField label="Cache lifetime (s)" description="0 disables the cache.">
             <UInput v-model="config.cache_ttl" type="number" min="0" />

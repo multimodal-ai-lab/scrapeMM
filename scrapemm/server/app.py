@@ -26,6 +26,7 @@ from . import logbuffer, registry
 from .api import ROUTERS
 from .auth import log_api_key
 from .jobs import jobs
+from .search import close_sessions as close_search_sessions
 from .secrets import log_summary
 from .version import __version__
 
@@ -58,6 +59,7 @@ async def lifespan(app: FastAPI):
     warmup = asyncio.create_task(_warm_caches())
     yield
     warmup.cancel()
+    await close_search_sessions()
     jobs.close()
     logger.info("scrapeMM server stopped.")
 

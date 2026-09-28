@@ -17,9 +17,24 @@ watch(collapsed, (value) => {
   } catch { /* nothing worth failing over */ }
 })
 
-const links = [
+interface NavLink {
+  label: string
+  icon: string
+  to: string
+  children?: NavLink[]
+}
+
+const links: NavLink[] = [
   { label: 'Dashboard', icon: 'i-fa7-solid-gauge-high', to: '/' },
-  { label: 'Playground', icon: 'i-fa7-solid-play', to: '/playground' },
+  {
+    label: 'Playground',
+    icon: 'i-fa7-solid-play',
+    to: '/playground',
+    children: [
+      { label: 'Retrieval', icon: 'i-fa7-solid-download', to: '/playground/retrieval' },
+      { label: 'Search', icon: 'i-fa7-solid-magnifying-glass', to: '/playground/search' },
+    ],
+  },
   { label: 'Jobs', icon: 'i-fa7-solid-clock-rotate-left', to: '/jobs' },
   { label: 'Test', icon: 'i-fa7-solid-flask', to: '/test' },
   { label: 'CAPTCHA', icon: 'i-fa7-solid-shield-halved', to: '/captcha' },
@@ -30,6 +45,12 @@ const links = [
 ]
 
 const route = useRoute()
+
+/** A group is current while one of its pages is; it is set apart from the page itself,
+ *  which alone gets the highlighted row. */
+function inGroup(link: NavLink) {
+  return route.path === link.to || route.path.startsWith(`${link.to}/`)
+}
 
 async function signIn() {
   error.value = ''
@@ -114,25 +135,53 @@ async function signIn() {
         </div>
 
         <nav class="flex flex-col gap-1">
-          <UTooltip
-            v-for="link in links" :key="link.to"
-            :text="link.label" :disabled="!collapsed" :content="{ side: 'right' }"
-          >
-            <NuxtLink
-              :to="link.to"
-              class="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm
-                     hover-row"
-              :class="route.path === link.to
-                ? 'bg-elevated text-highlighted font-medium'
-                : 'text-muted hover:text-default'"
+          <template v-for="link in links" :key="link.to">
+            <UTooltip :text="link.label" :disabled="!collapsed" :content="{ side: 'right' }">
+              <NuxtLink
+                :to="link.children ? link.children[0]!.to : link.to"
+                class="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm
+                       hover-row"
+                :class="route.path === link.to
+                  ? 'bg-elevated text-highlighted font-medium'
+                  : link.children && inGroup(link)
+                    ? 'text-highlighted font-medium'
+                    : 'text-muted hover:text-default'"
+              >
+                <UIcon :name="link.icon" class="size-4 shrink-0" />
+                <span
+                  class="truncate transition-opacity duration-200"
+                  :class="collapsed ? 'opacity-0 w-0' : 'opacity-100'"
+                >{{ link.label }}</span>
+              </NuxtLink>
+            </UTooltip>
+
+            <!-- A group's pages, always shown: two entries do not need a toggle. Indented
+                 along a guide line when expanded; collapsed, only their icons remain. -->
+            <div
+              v-if="link.children" class="flex flex-col gap-1"
+              :class="collapsed ? '' : 'ml-[1.2rem] pl-2 border-l border-default'"
             >
-              <UIcon :name="link.icon" class="size-4 shrink-0" />
-              <span
-                class="truncate transition-opacity duration-200"
-                :class="collapsed ? 'opacity-0 w-0' : 'opacity-100'"
-              >{{ link.label }}</span>
-            </NuxtLink>
-          </UTooltip>
+              <UTooltip
+                v-for="child in link.children" :key="child.to"
+                :text="`${link.label}: ${child.label}`" :disabled="!collapsed"
+                :content="{ side: 'right' }"
+              >
+                <NuxtLink
+                  :to="child.to"
+                  class="flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm hover-row"
+                  :class="route.path === child.to
+                    ? 'bg-elevated text-highlighted font-medium'
+                    : 'text-muted hover:text-default'"
+                >
+                  <UIcon :name="child.icon" class="shrink-0" :class="collapsed ? 'size-4' : 'size-3.5'" />
+                  <span
+                    class="truncate transition-opacity duration-200"
+                    :class="collapsed ? 'opacity-0 w-0' : 'opacity-100'"
+                  >{{ child.label }}</span>
+                </NuxtLink>
+              </UTooltip>
+            </div>
+          </template>
         </nav>
 
         <div class="mt-auto">

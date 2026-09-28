@@ -10,6 +10,7 @@ build/
 .claude/
 dev/
 venv/
+.venv*/
 .vscode/
 # Deployment state and local configuration
 /.env
