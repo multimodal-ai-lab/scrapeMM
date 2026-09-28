@@ -713,5 +713,36 @@
    "image": 1
   },
   "category": "Perma.cc"
+ },
+ {
+  "url": "https://www.instagram.com/p/DcnqvWeMy3D/",
+  "expected": {},
+  "category": "Instagram",
+  "expect": "unavailable"
+ },
+ {
+  "url": "https://www.instagram.com/reel/Dbd9JsJM-hU/",
+  "expected": {},
+  "category": "Instagram",
+  "expect": "unavailable"
+ },
+ {
+  "url": "https://www.instagram.com/reels/DDxA-RkMJmP/",
+  "expected": {},
+  "category": "Instagram",
+  "expect": "unavailable"
+ },
+ {
+  "url": "https://www.facebook.com/profile.php?id=61562975451292",
+  "expected": {
+   "image": 1
+  },
+  "category": "Facebook"
+ },
+ {
+  "url": "https://www.facebook.com/ghytimes/videos/1807162647396372/",
+  "expected": {},
+  "category": "Facebook",
+  "expect": "unavailable"
  }
 ]

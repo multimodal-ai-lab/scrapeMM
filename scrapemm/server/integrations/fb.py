@@ -53,7 +53,12 @@ FB_OG_DESCRIPTION_REGEX = re.compile(
 FB_OG_TITLE_REGEX = re.compile(r'<meta\s+property="og:title"\s+content="(.*?)"', re.DOTALL)
 FB_MESSAGE_TEXT_REGEX = re.compile(r'"message":\{"text":"((?:[^"\\]|\\.)*)"')
 FB_CREATION_TIME_REGEX = re.compile(r'"creation_time":(\d+)')
-FB_UNAVAILABLE_MARKERS = ('"tracePolicy":"comet.error"', '"currMedia":null')
+FB_UNAVAILABLE_MARKERS = (
+    '"tracePolicy":"comet.error"',  # "This content isn't available right now"
+    '"tracePolicy":"comet.watch.video.not.found"',  # "This video is no longer available"
+    '"currMedia":null',  # A photo page without its photo
+)
+FB_OG_IMAGE_REGEX = re.compile(r'<meta\s+property="og:image"\s+content="(.*?)"', re.DOTALL)
 UNAVAILABLE_MESSAGE = ("The Facebook content is not available: it was removed, its "
                        "visibility was restricted, or it never existed.")
 
@@ -256,10 +261,11 @@ class Facebook(RetrievalIntegration):
         if content:
             return ScrapedContent(multimodal=MultimodalSequence(content))
 
-        try:
-            return await self._get_user_profile(url, **kwargs)
-        except Exception:
-            pass
+        if len(urlparse(url).path.strip("/").split("/")) == 1:  # facebook.com/<vanity>
+            try:
+                return await self._get_user_profile(url, **kwargs)
+            except Exception:
+                pass
 
         raise RetrievalFailed("Unable to retrieve content from Facebook URL.")
 
@@ -462,8 +468,29 @@ class Facebook(RetrievalIntegration):
         return list(dict.fromkeys(hrefs))
 
     async def _get_user_profile(self, url: str, **kwargs) -> ScrapedContent:
-        """Retrieves content from a Facebook user profile URL."""
-        raise NotImplementedError("No method available to retrieve Facebook profiles.")
+        """Retrieves a Facebook profile or page as a logged-out visitor sees it: name,
+        the summary Facebook gives (followers, bio) and the profile picture, all read
+        off the page's metadata."""
+        html = await self._fetch_page(url)
+        if not html:
+            raise RetrievalFailed(f"Could not load the Facebook page for {url}.")
+        if _shows_error_page(html):
+            raise TargetUnavailableError(UNAVAILABLE_MESSAGE)
+        name = FB_OG_TITLE_REGEX.search(html)
+        if not name:
+            raise AccessBlockedError("Facebook shows this profile only to logged-in users.")
+
+        header = f"**Facebook Profile**\n{html_lib.unescape(name.group(1))}"
+        if description := FB_OG_DESCRIPTION_REGEX.search(html):
+            header += f"\n\n{postprocess_markdown(html_lib.unescape(description.group(1)))}"
+        items: list = [header]
+        if picture_url := FB_OG_IMAGE_REGEX.search(html):
+            # Profile pictures are small; keep them anyway, they identify the account
+            picture = await download_image(html_lib.unescape(picture_url.group(1)),
+                                           kwargs.get("session"), ignore_small_images=False)
+            if picture:
+                items.append(picture)
+        return ScrapedContent(multimodal=MultimodalSequence(items))
 
     def _normalize_url(self, url: str) -> str:
         """Turns the URL into the canonical www.facebook.com URL of the target: undoes
@@ -471,6 +498,10 @@ class Facebook(RetrievalIntegration):
         and unwraps login redirects (login/?next=...) and embed plugins (plugins/post.php
         or plugins/video.php?href=...)."""
         url = html_lib.unescape(url.strip())
+        # A URL pasted twice in a row ("https://…/reel/1https://…/reel/1"): keep the
+        # first. Only in the path, since query strings may carry URLs legitimately.
+        if doubled := re.match(r"(https?://[^?#]+?)https?://", url, flags=re.IGNORECASE):
+            url = doubled.group(1)
         url = re.sub(r"^(?:https?://)?(?:(?:www|web|m|mbasic|touch)\.)?facebook\.com(?=[/?#]|$)",
                      "https://www.facebook.com", url, flags=re.IGNORECASE)
         parsed = urlparse(url)
@@ -530,7 +561,7 @@ class Facebook(RetrievalIntegration):
         """Checks if the URL is a Facebook profile URL."""
         parsed = urlparse(url)
         path_parts = parsed.path.strip("/").split("/")
-        return len(path_parts) > 0 and path_parts[0] == "profile.php"
+        return path_parts[0] in ("profile.php", "people")
 
     def _extract_username(self, url: str) -> str:
         """Extracts the username from a Facebook profile URL."""

@@ -76,10 +76,13 @@ class Instagram(RetrievalIntegration):
         elif self._is_photo_url(url):
             # /p/ URLs can also be reels, so try both
             content = None
+            verdict = None  # yt-dlp's finding that the post is gone or restricted
             try:
                 content = await self._get_video(url, **kwargs)
-            except (TargetUnavailableError, RetrievalFailed, AccessBlockedError):
-                pass  # Uncritical errors that can be ignored
+            except (TargetUnavailableError, AccessBlockedError) as e:
+                verdict = e
+            except RetrievalFailed:
+                pass  # E.g. a photo post, which has no video
             except RateLimitError:
                 raise
             except Exception:
@@ -88,8 +91,18 @@ class Instagram(RetrievalIntegration):
 
             if content and content.multimodal.has_videos():
                 return content
-            else:
-                return await self._get_photo(url, **kwargs)
+            if verdict:
+                # Public posts are on the embed page. If it lacks the post as well,
+                # yt-dlp was right; rendering the post page would take a minute and
+                # show the same.
+                if content := await self._get_photo_from_embed(url, **kwargs):
+                    return content
+                if isinstance(verdict, TargetUnavailableError):
+                    raise TargetUnavailableError(
+                        "The Instagram post is not available: the link may be broken, "
+                        "or the post was removed or is private.") from verdict
+                raise verdict
+            return await self._get_photo(url, **kwargs)
         else:
             return await self._get_user_profile(url, **kwargs)
 

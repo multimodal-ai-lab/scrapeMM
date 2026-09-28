@@ -208,7 +208,11 @@ _ERROR_PATTERNS: list[tuple[tuple[str, ...], type[Exception], str]] = [
     (("not available in your country", "geo restrict", "geo-restrict",
       "not available from your location", "blocked it in your country"),
      AccessBlockedError, "Not available in the server's region"),
-    (("copyright", "not available to everyone", "http error 403", "forbidden"),
+    # Instagram: "This content isn't available to everyone: It can't be seen by certain
+    # audiences." (age- or region-restricted, shown to logged-in, eligible users only)
+    (("isn't available to everyone", "certain audiences"),
+     AccessBlockedError, "Restricted to certain audiences (age or region)"),
+    (("copyright","not available to everyone", "http error 403", "forbidden"),
      AccessBlockedError, "Access forbidden"),
     # Before the generic "is not available" below, which would swallow these
     (("no video formats", "there is no video", "requested format is not available",
