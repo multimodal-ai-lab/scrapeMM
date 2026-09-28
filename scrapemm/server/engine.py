@@ -671,29 +671,95 @@ async def _latest_wayback_snapshot(url: str, session: aiohttp.ClientSession) -> 
 
     Asks both of the Wayback Machine's indexes at once, as each misses what the other
     finds: the availability API had no capture of a thip.media page that CDX listed,
-    and CDX regularly takes longer than half a minute to answer at all."""
-    # Without the scheme: with it, the availability API often reports no snapshots
-    query = re.sub(r"^https?://", "", url)
-    found = [s for s in await asyncio.gather(_wayback_available(query, session),
-                                             _wayback_cdx(query, session)) if s]
-    if not found:
-        return None
-    timestamp, original = max(found)  # The newer one
-    return f"https://web.archive.org/web/{timestamp}/{original}"
+    and CDX regularly takes longer than half a minute to answer, or answers with its
+    "Temporarily Offline" page. CDX matches the URL regardless of scheme, `www.` and a
+    trailing slash; the availability API does not, so it is asked for the other `www.`
+    form too if nothing turned up. Answers are cached for a while, and only a couple of
+    lookups run at once, so a batch of failing URLs does not flood archive.org (which
+    rate-limits with HTTP 429) or crowd out the Internet Archive integration."""
+    query = re.sub(r"^https?://", "", url)  # With the scheme, the API often finds nothing
+    key = _wayback_key(query)
+    if (cached := _wayback_cache.get(key)) and cached[0] > time.monotonic():
+        return cached[1]
+    if time.monotonic() < _wayback_backoff[0]:
+        return None  # Rate-limited a moment ago: give archive.org a rest
+
+    async with _wayback_gate:
+        found, answered = [], True
+        for result in await asyncio.gather(_wayback_available(query, session),
+                                           _wayback_cdx(query, session)):
+            answered &= result is not _FAILED
+            if result and result is not _FAILED:
+                found.append(result)
+        if not found:
+            other = query[4:] if query.startswith("www.") else f"www.{query}"
+            result = await _wayback_available(other, session)
+            answered &= result is not _FAILED
+            if result and result is not _FAILED:
+                found.append(result)
+
+    snapshot = None
+    if found:
+        timestamp, original = max(found)  # The newest
+        snapshot = f"https://web.archive.org/web/{timestamp}/{original}"
+    if snapshot or answered:  # Not a lookup that failed: that one is worth repeating
+        ttl = WAYBACK_HIT_TTL if snapshot else WAYBACK_MISS_TTL
+        _wayback_cache[key] = (time.monotonic() + ttl, snapshot)
+    return snapshot
 
 
 WAYBACK_TIMEOUT = aiohttp.ClientTimeout(total=20)
+WAYBACK_HIT_TTL = 60 * 60
+WAYBACK_MISS_TTL = 10 * 60
+WAYBACK_BACKOFF = 60  # Seconds without lookups after archive.org answered HTTP 429
+_wayback_gate = asyncio.Semaphore(2)
+_wayback_cache: dict[str, tuple[float, Optional[str]]] = {}
+_wayback_backoff = [0.0]
+_FAILED = object()  # A lookup that got no valid answer, as opposed to "no capture"
 
 
-async def _wayback_available(query: str, session: aiohttp.ClientSession) -> Optional[tuple[str, str]]:
-    """(timestamp, original URL) of the capture the availability API names, if any."""
-    try:
-        async with session.get("https://archive.org/wayback/available", params={"url": query},
-                               timeout=WAYBACK_TIMEOUT) as response:
-            data = await response.json(content_type=None)
-    except Exception as e:
-        logger.debug(f"Wayback availability API failed for {query}: {type(e).__name__}: {e}")
-        return None
+def _wayback_key(query: str) -> str:
+    """The form under which a URL's lookup is cached: variants CDX treats as one."""
+    query = query.lower()
+    return (query[4:] if query.startswith("www.") else query).rstrip("/")
+
+
+async def _wayback_json(endpoint: str, params: dict, session: aiohttp.ClientSession):
+    """GETs a JSON answer from archive.org, or `_FAILED`. A rate limit (429), a server
+    error or a non-JSON body (the "Temporarily Offline" page) is retried once, after a
+    short pause (a timeout is not); a second 429 suspends all lookups for WAYBACK_BACKOFF seconds."""
+    for attempt in range(2):
+        try:
+            async with session.get(endpoint, params=params, timeout=WAYBACK_TIMEOUT) as response:
+                if response.status == 200:
+                    try:
+                        return await response.json(content_type=None)
+                    except ValueError:
+                        problem = "a page that is not JSON (archive.org offline?)"
+                else:
+                    problem = f"HTTP {response.status}"
+                    if response.status == 429 and attempt:
+                        _wayback_backoff[0] = time.monotonic() + WAYBACK_BACKOFF
+                    elif 400 <= response.status < 500 and response.status != 429:
+                        break  # Asking again will not change that
+        except asyncio.TimeoutError:
+            # Already cost the full timeout: another go would only double that
+            logger.debug(f"Wayback lookup {endpoint} for {params.get('url')} timed out.")
+            break
+        except Exception as e:
+            problem = f"{type(e).__name__}: {e}"
+        logger.debug(f"Wayback lookup {endpoint} for {params.get('url')} got {problem}.")
+        if not attempt:
+            await asyncio.sleep(3)
+    return _FAILED
+
+
+async def _wayback_available(query: str, session: aiohttp.ClientSession):
+    """(timestamp, original URL) of the capture the availability API names, None if it
+    names none, or `_FAILED`."""
+    data = await _wayback_json("https://archive.org/wayback/available", {"url": query}, session)
+    if data is _FAILED or not isinstance(data, dict):
+        return _FAILED
     closest = (data.get("archived_snapshots") or {}).get("closest") or {}
     match = re.match(r"https?://web\.archive\.org/web/(\d+)/(.+)", closest.get("url") or "")
     if closest.get("available") and str(closest.get("status")) == "200" and match:
@@ -701,18 +767,15 @@ async def _wayback_available(query: str, session: aiohttp.ClientSession) -> Opti
     return None
 
 
-async def _wayback_cdx(query: str, session: aiohttp.ClientSession) -> Optional[tuple[str, str]]:
-    """(timestamp, original URL) of the newest HTTP 200 capture in the CDX index, if any.
-    Filtered here rather than by the server: its `filter` makes it scan far more slowly."""
+async def _wayback_cdx(query: str, session: aiohttp.ClientSession):
+    """(timestamp, original URL) of the newest HTTP 200 capture in the CDX index, None if
+    there is none, or `_FAILED`. Filtered here rather than by the server: its `filter`
+    makes it scan far more slowly."""
     params = {"url": query, "limit": "-10", "output": "json", "fl": "timestamp,original,statuscode"}
-    try:
-        async with session.get("https://web.archive.org/cdx/search/cdx", params=params,
-                               timeout=WAYBACK_TIMEOUT) as response:
-            rows = await response.json(content_type=None)
-    except Exception as e:
-        logger.debug(f"Wayback CDX query failed for {query}: {type(e).__name__}: {e}")
-        return None
-    captures = [(row[0], row[1]) for row in (rows or [])[1:] if len(row) == 3 and row[2] == "200"]
+    rows = await _wayback_json("https://web.archive.org/cdx/search/cdx", params, session)
+    if rows is _FAILED or not isinstance(rows, list):
+        return _FAILED
+    captures = [(row[0], row[1]) for row in rows[1:] if len(row) == 3 and row[2] == "200"]
     return max(captures) if captures else None
 
 

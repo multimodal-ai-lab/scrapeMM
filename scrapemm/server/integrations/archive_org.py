@@ -7,7 +7,7 @@ from playwright.async_api import TimeoutError, Page, Frame, Error as PlaywrightE
 
 from scrapemm.common import RetrievalFailed
 from scrapemm.common.exceptions import TargetUnavailableError
-from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget
+from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget, settle_dom
 from scrapemm.server.download.browser import BLOB_ATTR, MAX_VIDEO_BYTES, install_stash
 from scrapemm.server.integrations.perma_cc import _stash_media_in_frame
 
@@ -17,6 +17,9 @@ _PLAYBACK_IFRAME = "#playback iframe, iframe#playback"
 
 # TikTok's login-page placeholder video, which must never count as the content
 _VIDEO_DECOYS = ("playback1.mp4", "ttwstatic.com", "webapp-desktop/playback")
+
+# Once the player fetched a video, how long its <video> element still gets to appear
+SERVED_VIDEO_GRACE = 5.0
 
 
 class ArchiveOrg(HeadedBrowser):
@@ -103,60 +106,14 @@ class ArchiveOrg(HeadedBrowser):
         except TimeoutError:
             pass
 
-    async def _wait_playback_frame_ready(self, frame: Frame, timeout_ms: int = 15000) -> None:
-        """Return as soon as the archived document has usable content and the DOM is stable.
-
-        Avoids long waits on load/networkidle (Wayback keeps analytics/beacon traffic alive)
-        while still not proceeding before the archived body is present.
-        """
-        deadline = time.monotonic() + timeout_ms / 1000
-        previous_size = -1
-        stable_checks = 0
-
-        while time.monotonic() < deadline:
-            try:
-                info = await frame.evaluate(
-                    """() => {
-                        if (!document.body || document.readyState === 'loading') {
-                            return { ready: false, size: 0 };
-                        }
-                        const size = document.documentElement
-                            ? document.documentElement.outerHTML.length
-                            : 0;
-                        // Wayback-rewritten assets/links, or any primary media/content root.
-                        const hasArchived = !!document.querySelector(
-                            'img[src*="/web/"], video[src*="/web/"], source[src*="/web/"], a[href*="/web/"]'
-                        );
-                        const hasMedia = !!document.querySelector(
-                            'img[src], video[src], video source[src], article, main, [role="main"]'
-                        );
-                        const textLen = (document.body.innerText || '').trim().length;
-                        const ready = hasArchived || hasMedia || textLen > 40
-                            || document.body.children.length > 3;
-                        return { ready, size };
-                    }"""
-                )
-            except Exception:
-                logger.debug("Error while checking Archive.org playback readiness", exc_info=True)
-                info = {"ready": False, "size": 0}
-
-            if info.get("ready"):
-                size = int(info.get("size") or 0)
-                # Two consecutive similar snapshots (~100ms apart) ⇒ content settled.
-                if previous_size >= 0 and abs(size - previous_size) <= max(256, previous_size // 100):
-                    stable_checks += 1
-                    if stable_checks >= 2:
-                        return
-                else:
-                    stable_checks = 0
-                previous_size = size
-            else:
-                previous_size = -1
-                stable_checks = 0
-
-            await asyncio.sleep(0.1)
-
-        logger.debug("Archive.org playback frame did not report ready before timeout; continuing.")
+    @staticmethod
+    async def _wait_playback_frame_ready(frame: Frame) -> None:
+        """Waits until the replayed page has finished building itself. It used to count
+        as ready after two equal size samples 100 ms apart, which under load came long
+        before the archived player had mounted: the Kwai video in the test suite was then
+        missing from the result (18 media collected instead of 68). The shared DOM settle
+        wants a full second of stillness (at most DOM_SETTLE_TIMEOUT)."""
+        await settle_dom(frame)
 
     @staticmethod
     def _url_suggests_primary_video(url: str) -> bool:
@@ -204,10 +161,8 @@ class ArchiveOrg(HeadedBrowser):
         deadline = time.monotonic() + timeout_ms / 1000
         fallback = preferred or page.main_frame
         served = getattr(page, "_scrapemm_videos", [])
+        served_since = None
         while time.monotonic() < deadline:
-            if served:
-                # The player already fetched the real video: nothing more to wait for
-                return fallback
             frames = []
             if preferred is not None:
                 frames.append(preferred)
@@ -217,6 +172,12 @@ class ArchiveOrg(HeadedBrowser):
             for frame in frames:
                 if await self._frame_has_primary_video(frame):
                     return frame
+            if served:
+                # The player fetched the real video. Its element usually follows at once;
+                # if it does not, `_inline_served_video()` fetches what was served.
+                served_since = served_since or time.monotonic()
+                if time.monotonic() - served_since >= SERVED_VIDEO_GRACE:
+                    return fallback
             await asyncio.sleep(0.25)
         logger.debug("Archive.org primary video did not appear before timeout; continuing.")
         return fallback
