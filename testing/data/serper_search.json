@@ -1,0 +1,95 @@
+{
+  "searchParameters": {
+    "q": "apple inc",
+    "gl": "us",
+    "hl": "en",
+    "type": "search",
+    "num": 10,
+    "engine": "google"
+  },
+  "knowledgeGraph": {
+    "title": "Apple",
+    "type": "Technology company",
+    "website": "https://www.apple.com/",
+    "imageUrl": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQwGQRv5TjjkycpctY66mOg_e2-npacrmjAb6_jAWhzlzkFE3OTjxyzbA&s=0",
+    "description": "Apple Inc. is an American multinational technology company headquartered in Cupertino, California.",
+    "descriptionSource": "Wikipedia",
+    "descriptionLink": "https://en.wikipedia.org/wiki/Apple_Inc.",
+    "attributes": {
+      "CEO": "Tim Cook (Aug 24, 2011–)",
+      "Founded": "April 1, 1976, Los Altos, CA",
+      "Headquarters": "Cupertino, CA"
+    }
+  },
+  "answerBox": {
+    "title": "Apple Inc. - Wikipedia",
+    "snippet": "Apple Inc. is an American multinational technology company headquartered in Cupertino, California, United States.",
+    "snippetHighlighted": [
+      "American multinational technology company"
+    ],
+    "link": "https://en.wikipedia.org/wiki/Apple_Inc."
+  },
+  "organic": [
+    {
+      "title": "Apple",
+      "link": "https://www.apple.com/",
+      "snippet": "Discover the innovative world of Apple and shop everything iPhone, iPad, Apple Watch, Mac, and Apple TV.",
+      "sitelinks": [
+        {
+          "title": "Support",
+          "link": "https://support.apple.com/"
+        },
+        {
+          "title": "iPhone",
+          "link": "https://www.apple.com/iphone/"
+        }
+      ],
+      "position": 1
+    },
+    {
+      "title": "Apple Inc. - Wikipedia",
+      "link": "https://en.wikipedia.org/wiki/Apple_Inc.",
+      "snippet": "Apple Inc. is an American multinational technology company headquartered in Cupertino, California.",
+      "attributes": {
+        "Founded": "April 1, 1976, Los Altos, California, U.S.",
+        "Products": "iPhone, iPad, Mac, Apple Watch"
+      },
+      "position": 2
+    },
+    {
+      "title": "Apple Inc. (AAPL) Stock Price, News, Quote & History",
+      "link": "https://finance.yahoo.com/quote/AAPL/",
+      "snippet": "Find the latest Apple Inc. (AAPL) stock quote, history, news and other vital information.",
+      "date": "2 days ago",
+      "rating": 4.5,
+      "ratingCount": 1203,
+      "position": 3
+    }
+  ],
+  "topStories": [
+    {
+      "title": "Apple announces new products at its fall event",
+      "link": "https://www.reuters.com/technology/apple-fall-event/",
+      "source": "Reuters",
+      "date": "3 hours ago",
+      "imageUrl": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcS-story"
+    }
+  ],
+  "peopleAlsoAsk": [
+    {
+      "question": "What does Apple Inc. do?",
+      "snippet": "Apple designs and sells consumer electronics, software and online services.",
+      "title": "Apple Inc. - Wikipedia",
+      "link": "https://en.wikipedia.org/wiki/Apple_Inc."
+    }
+  ],
+  "relatedSearches": [
+    {
+      "query": "apple inc stock"
+    },
+    {
+      "query": "apple inc headquarters"
+    }
+  ],
+  "credits": 1
+}

@@ -2,8 +2,10 @@
 /** Try a URL and watch the result arrive. Uses the very same streaming endpoint the
  *  Python client uses, so what you see here is what a script would get. */
 const api = useApi()
+const route = useRoute()
 
-const input = ref('')
+// Prefilled when arriving from elsewhere, e.g. a search result's "Retrieve"
+const input = ref((route.query.url as string) || '')
 const outputFormat = ref('multimodal')
 const useCache = ref(true)
 const prioritize = ref('completeness')
@@ -65,7 +67,7 @@ function succeeded(payload: any) {
 <template>
   <div class="space-y-6">
     <div>
-      <h1 class="text-2xl font-semibold">Playground</h1>
+      <h1 class="text-2xl font-semibold">Retrieval</h1>
       <p class="text-sm text-muted">One URL per line. Results stream in as they finish.</p>
     </div>
 

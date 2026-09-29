@@ -8,14 +8,22 @@
  * the section header can count them together as "warnings" instead of spelling out
  * every variety.
  */
-export const TONES: Record<string, {
+/** The badge colours of Nuxt UI */
+export type ToneColor = 'primary' | 'secondary' | 'success' | 'info' | 'warning' | 'error' | 'neutral'
+
+export interface Tone {
   icon: string
-  color: string
+  color: ToneColor
   label: string
   surface: string
   text: string
   warning?: boolean
-}> = {
+}
+
+export type ToneState = 'ready' | 'limited' | 'gated' | 'error' | 'unconfigured' | 'disabled'
+  | 'unavailable' | 'checking'
+
+export const TONES: Record<ToneState, Tone> = {
   ready: {
     icon: 'i-fa7-solid-circle-check',
     color: 'success',
@@ -61,6 +69,14 @@ export const TONES: Record<string, {
     surface: 'tone-muted',
     text: 'text-dimmed',
   },
+  // A retrieval-chain slot for a method that is not implemented yet
+  unavailable: {
+    icon: 'i-fa7-solid-hourglass-half',
+    color: 'neutral',
+    label: 'Coming soon',
+    surface: 'tone-muted',
+    text: 'text-dimmed',
+  },
   checking: {
     icon: 'i-fa7-solid-spinner',
     color: 'neutral',
@@ -72,8 +88,8 @@ export const TONES: Record<string, {
 
 /**
  * The icon for each method, by its lower-case key. Font Awesome carries brand marks for
- * the platforms, which read faster than any generic glyph; the archives and the general
- * scrapers fall back to solid icons that say what they do.
+ * the platforms, which read faster than any generic glyph; the archives, the general
+ * scrapers and the search providers fall back to solid icons that say what they do.
  */
 const ICONS: Record<string, string> = {
   'x (twitter)': 'i-fa7-brands-x-twitter',
@@ -94,17 +110,19 @@ const ICONS: Record<string, string> = {
   'browser': 'i-fa7-solid-window-maximize',
   'firecrawl': 'i-fa7-solid-fire',
   'decodo': 'i-fa7-solid-tower-broadcast',
+  'serper': 'i-fa7-solid-magnifying-glass',
 }
 
 export function integrationIcon(key: string): string {
   return ICONS[key?.toLowerCase()] || 'i-fa7-solid-globe'
 }
 
-export function toneFor(state: string) {
-  return TONES[state] || TONES.error
+/** The tone of a state; an unknown one looks like an error. */
+export function toneFor(state: string): Tone {
+  return (TONES as Record<string, Tone | undefined>)[state] ?? TONES.error
 }
 
 /** Whether a state counts towards the "warnings" tally in the section header. */
 export function isWarning(state: string): boolean {
-  return TONES[state]?.warning === true
+  return (TONES as Record<string, Tone | undefined>)[state]?.warning === true
 }

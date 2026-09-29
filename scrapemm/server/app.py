@@ -22,10 +22,11 @@ from fastapi.staticfiles import StaticFiles
 from starlette.routing import Match
 
 from scrapemm.common.paths import APP_NAME
-from . import logbuffer, registry
+from . import logbuffer, looplag, registry
 from .api import ROUTERS
 from .auth import log_api_key
 from .jobs import jobs
+from .search import close_sessions as close_search_sessions
 from .secrets import log_summary
 from .version import __version__
 
@@ -56,8 +57,11 @@ async def lifespan(app: FastAPI):
     # driver and walking the media tree cost a couple of seconds between them, and there
     # is no reason for the first person to open the dashboard to be the one who pays it.
     warmup = asyncio.create_task(_warm_caches())
+    lag_watch = asyncio.create_task(looplag.watch())
     yield
     warmup.cancel()
+    lag_watch.cancel()
+    await close_search_sessions()
     jobs.close()
     logger.info("scrapeMM server stopped.")
 
@@ -111,8 +115,10 @@ def create_app() -> FastAPI:
 
     @app.api_route("/healthz", methods=["GET", "HEAD"], include_in_schema=False)
     async def healthz() -> dict:
-        """Unauthenticated: it is what the container's health check calls."""
-        return {"status": "ok", "version": __version__}
+        """Unauthenticated: it is what the container's health check calls. Also says how
+        long the event loop stalled at worst in the last minute (see `looplag.py`)."""
+        return {"status": "ok", "version": __version__,
+                "loop_lag_max_60s": round(looplag.recent_max(), 3)}
 
     _mount_ui(app)
     return app

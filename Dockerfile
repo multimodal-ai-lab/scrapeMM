@@ -75,6 +75,26 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
 COPY --from=deno /deno /usr/local/bin/deno
 RUN deno --version
 
+# PO tokens for YouTube, minted locally by the bgutil provider's script, which yt-dlp's
+# plugin (bgutil-ytdlp-pot-provider in requirements-server.txt, same version) runs with
+# Deno. They unlock the mobile web client, the fallback when YouTube asks the default
+# clients to prove they are no bot. Only the runtime dependencies are kept: the linters,
+# TypeScript and SWC builds among the installed packages are dead weight (115 MB).
+# DENO_WEBGPU_BACKEND: without it, Deno's WebGPU setup panics on a machine without a GPU.
+ARG BGUTIL_VERSION=2.0.0
+ENV BGUTIL_SERVER_HOME=/opt/bgutil-ytdlp-pot-provider/server \
+    DENO_WEBGPU_BACKEND=vulkan
+RUN git clone --quiet --depth 1 --branch ${BGUTIL_VERSION} \
+        https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git /opt/bgutil-ytdlp-pot-provider \
+    && cd ${BGUTIL_SERVER_HOME} \
+    && deno install --frozen --entrypoint src/generate_once.ts --allow-scripts=npm:canvas@3.2.3 \
+    && cd node_modules/.deno \
+    && rm -rf @swc+* typescript@* prettier@* eslint@* eslint-* @eslint* @typescript-eslint* \
+              typescript-eslint* swc-node*
+# Deno's cache of the compiled script stays (in /root/.cache/deno): without it, the
+# first token of a fresh container took long enough that yt-dlp gave up on it and fell
+# back to a 360p format.
+
 WORKDIR /app
 
 COPY requirements-server.txt pyproject.toml README.md ./

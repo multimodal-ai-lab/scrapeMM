@@ -44,11 +44,12 @@ export default defineNuxtConfig({
 
   // `nuxt dev` serves the UI on 3000 and forwards the API to the Python server, so
   // the UI can be edited with hot reload against a real backend. `ws: true` is what
-  // lets the Archive.today CAPTCHA panel's VNC socket through.
+  // lets the Archive.today CAPTCHA panel's VNC socket through. The target repeats /v1
+  // because Nitro mounts the proxy at the route and strips it from the forwarded path.
   nitro: {
     devProxy: {
       '/v1': {
-        target: process.env.SCRAPEMM_DEV_API || 'http://localhost:8080',
+        target: `${(process.env.SCRAPEMM_DEV_API || 'http://localhost:8080').replace(/\/+$/, '')}/v1`,
         changeOrigin: true,
         ws: true,
       },

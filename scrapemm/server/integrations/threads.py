@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 from playwright.async_api import ElementHandle, Page, async_playwright
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from scrapemm.server.workers import run_light
 from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError
 from scrapemm.server.integrations.base import RetrievalIntegration
 from scrapemm.common.scraping_response import ScrapedContent
@@ -57,7 +58,7 @@ class Threads(RetrievalIntegration):
         # The media URLs are plain, signed CDN links, so they can be downloaded
         # directly (no need to keep the browser around).
         return await to_scraped_content(
-            self._remove_noise(html), session=kwargs["session"],
+            await run_light(self._remove_noise, html), session=kwargs["session"],
             output_format=kwargs.get("output_format", "multimodal"), url=embed_url
         )
 

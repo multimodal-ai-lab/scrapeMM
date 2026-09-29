@@ -39,6 +39,7 @@ SECRETS = {
     "reddit_client_id": "Reddit app client ID",
     "reddit_client_secret": "Reddit app client secret",
     "decodo_token": "Decodo Web Scraping API basic authentication token",
+    "serper_api_key": "Serper API key (Google web and image search, serper.dev)",
     "facebook_cookie": "Facebook cookie string",
     "instagram_cookie": "Instagram cookie string (needed for age-restricted content)",
     "archive_today_cookie": "Archive.today session cookies (established for you when you "

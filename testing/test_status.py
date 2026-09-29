@@ -15,7 +15,7 @@ def test_required_secrets_name_real_methods():
     configured this yet'."""
     from scrapemm.server.integrations import NAME_TO_INTEGRATION
 
-    known = set(NAME_TO_INTEGRATION) | set(status.METHOD_KEYS)
+    known = set(NAME_TO_INTEGRATION) | set(status.METHOD_KEYS) | set(status.SEARCH_KEYS)
     unknown = set(status.REQUIRED_SECRETS) - known
     assert not unknown, (
         f"REQUIRED_SECRETS keys that match no integration or method: {sorted(unknown)}. "
@@ -31,6 +31,7 @@ def test_every_method_gets_a_card():
     assert "firecrawl" in keys
     assert "decodo" in keys
     assert "archive.today" in keys
+    assert "serper" in keys
 
 
 def test_required_secrets_name_real_secrets():
@@ -114,6 +115,7 @@ async def test_headed_browser_probe_does_not_start_a_browser(monkeypatch):
 def test_secrets_map_back_to_methods():
     assert "instagram" in status.secrets_to_integrations("instagram_cookie")
     assert "decodo" in status.secrets_to_integrations("decodo_token")
+    assert status.secrets_to_integrations("serper_api_key") == ["serper"]
     assert status.secrets_to_integrations("not_a_secret") == []
 
 
@@ -188,3 +190,27 @@ async def test_a_captcha_gate_is_reported_as_gated_not_as_a_fault(monkeypatch):
     assert result.state == status.GATED
     assert result.gated is True
     assert "CAPTCHA" in result.detail
+
+
+@pytest.mark.parametrize("key_set, enabled, state", [
+    (False, True, "unconfigured"),
+    (True, True, "ready"),
+    (True, False, "disabled"),
+])
+async def test_a_search_provider_has_a_card_like_decodo(monkeypatch, key_set, enabled,
+                                                        state):
+    """Paid per request with nothing free to ping, so a configured key is all a probe
+    can go by -- and it must not spend a search to find out."""
+    monkeypatch.setattr("scrapemm.server.status.is_set", lambda name: key_set)
+    monkeypatch.setattr("scrapemm.server.status.is_enabled", lambda name: enabled)
+
+    result = await status.check("serper", force=True)
+    assert result.kind == "search"
+    assert result.name == "Serper"
+    assert result.state == state
+    assert result.required_secrets == ["serper_api_key"]
+    assert result.configurable is True
+    if state == "unconfigured":
+        assert result.missing_secrets == ["serper_api_key"]
+    if state == "ready":
+        assert result.detail == "API key configured."

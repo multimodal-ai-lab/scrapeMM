@@ -15,6 +15,9 @@ class SuiteEntry(BaseModel):
     url: str
     category: str = "Added"
     expected: dict[str, int] = {}
+    # None: expects content (with at least `expected` media). "unavailable": expects
+    # the target to be unavailable (see scrapemm.common.outcome)
+    expect: Optional[str] = None
 
 
 @router.get("")
@@ -63,7 +66,7 @@ async def past_run(run_id: str) -> dict:
 @router.post("/suite")
 async def add_url(entry: SuiteEntry) -> dict:
     try:
-        return testsuite.add(entry.url, entry.category, entry.expected)
+        return testsuite.add(entry.url, entry.category, entry.expected, entry.expect)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

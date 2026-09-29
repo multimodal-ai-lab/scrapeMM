@@ -223,10 +223,17 @@ const tiles = computed(() => {
     { label: 'Success rate', icon: 'i-fa7-solid-check',
       value: rate.value, tone: rate.tone,
       ring: env.throughput.success_rate.rate,
+      // scrapeMM's success: a target that was unavailable counts, since scrapeMM did its
+      // part (see useOutcome.ts); the breakdown says how many that were
       detail: env.throughput.success_rate.total
-        ? `of the last ${env.throughput.success_rate.total} retrievals`
+        ? (env.throughput.success_rate.outcomes
+          ? `${env.throughput.success_rate.outcomes.error} failed · `
+            + `${env.throughput.success_rate.outcomes.unavailable} unavailable · `
+            + `${env.throughput.success_rate.outcomes.ok} retrieved, `
+            + `of the last ${env.throughput.success_rate.total}`
+          : `of the last ${env.throughput.success_rate.total} retrievals`)
         : 'nothing retrieved yet',
-      to: '/jobs' },
+      to: env.throughput.success_rate.outcomes?.error ? '/jobs?outcome=error' : '/jobs' },
     { label: 'Retrieved today', icon: 'i-fa7-solid-gauge-high',
       value: `${env.throughput.last_24h}`, tone: 'neutral' as const,
       detail: 'URLs in the past 24 hours', to: '/jobs?since=24h' },
@@ -272,11 +279,14 @@ const tiles = computed(() => {
         ? `${env.jobs.from_cache} of ${env.jobs.urls} URLs · ${env.cache.entries} cached, ${duration(env.cache.ttl)}`
         : `${env.cache.entries} cached · ${duration(env.cache.ttl)}`,
       to: '/settings' },
-    { label: 'FFmpeg', icon: 'i-fa7-solid-film',
-      value: env.ffmpeg.available ? 'Ready' : 'Missing',
-      tone: env.ffmpeg.available ? 'neutral' as const : 'warning' as const,
-      detail: env.ffmpeg.available ? 'video merged and normalized'
-        : 'videos download without sound' },
+    // URLs accepted by a job but not started yet, because every slot is taken
+    { label: 'Waiting in line', icon: 'i-fa7-solid-hourglass-half',
+      value: `${env.queue.waiting}`, tone: 'neutral' as const,
+      detail: env.queue.waiting || env.queue.active || env.jobs.running
+        ? `URLs queued · ${env.queue.active}/${env.queue.limit} scraping · `
+          + `${env.jobs.running} job${env.jobs.running === 1 ? '' : 's'} running`
+        : 'no URLs queued',
+      to: '/jobs' },
   ]
 })
 

@@ -5,8 +5,11 @@
  * A gated URL never blocks its batch: it is queued with its site's challenge, and so is
  * every further URL of that site until somebody decides. Per challenge, that decision is
  * either to solve the check in the server's own browser -- after which the queue is
- * retrieved and cached, so asking again returns the content -- or to discard it, which
- * drops the queue and keeps the site blacklisted for a while.
+ * retrieved and cached in the background, so asking again returns the content -- or to
+ * discard it, which drops the queue and keeps the site blacklisted for a while.
+ *
+ * The panel with the server's browser closes the moment the check is passed or reported
+ * missing: the queue's retrieval does not need anybody watching.
  */
 const api = useApi()
 const route = useRoute()
@@ -19,16 +22,21 @@ const timeout = ref(300)
 const expanded = ref<Set<string>>(new Set())
 const panel = ref<HTMLElement | null>(null)
 
-let poller: ReturnType<typeof setInterval> | null = null
+let poller: ReturnType<typeof setTimeout> | null = null
+let unmounted = false
+// Set by "No CAPTCHA here": the panel closes at once, not when the server confirms
+const dismissed = ref(false)
 
 const session = computed(() => state.value?.session)
-const solving = computed(() => session.value?.running === true)
+const solving = computed(() => session.value?.running === true && !dismissed.value)
+const retrieving = computed<string[]>(() => session.value?.retrieving || [])
 const challenges = computed<any[]>(() => state.value?.challenges || [])
 const waiting = computed(() => challenges.value.reduce((n, c) => n + c.waiting, 0))
 
 async function load() {
   try {
     state.value = await api.get<any>('/v1/captcha')
+    if (!state.value?.session?.running) dismissed.value = false
   } catch (e: any) {
     error.value = e.message
   }
@@ -85,8 +93,14 @@ function cancel() {
 /** The panel shows the normal page, no check: logged as a false detection, then the
  *  queue is retrieved anyway. */
 function reportNoCaptcha() {
+  dismissed.value = true
   return act(session.value?.domain || '', async () => {
-    await api.post('/v1/captcha/session/no-captcha')
+    try {
+      await api.post('/v1/captcha/session/no-captcha')
+    } catch (e) {
+      dismissed.value = false  // Still running: the panel is needed after all
+      throw e
+    }
   })
 }
 
@@ -106,10 +120,18 @@ onMounted(async () => {
     const domain = (typeof wanted === 'string' && wanted) || challenges.value[0]?.domain
     if (domain) await solve(domain)
   }
-  // While a session runs, the countdown and the outcome only exist server-side
-  poller = setInterval(load, 3000)
+  // While a session runs, the countdown and the outcome only exist server-side. Polled
+  // faster then, so the panel closes right after the check is passed.
+  const tick = async () => {
+    await load()
+    if (!unmounted) poller = setTimeout(tick, solving.value ? 1000 : 3000)
+  }
+  poller = setTimeout(tick, 1000)
 })
-onBeforeUnmount(() => { if (poller) clearInterval(poller) })
+onBeforeUnmount(() => {
+  unmounted = true
+  if (poller) clearTimeout(poller)
+})
 </script>
 
 <template>
@@ -205,6 +227,12 @@ onBeforeUnmount(() => { if (poller) clearInterval(poller) })
               <span class="font-medium">{{ c.domain }}</span>
               <UBadge color="warning" variant="subtle" size="sm" :label="c.captcha" />
               <UBadge
+                v-if="retrieving.includes(c.domain)" color="info" variant="subtle" size="sm"
+                icon="i-fa7-solid-spinner" label="retrieving the queue"
+                :ui="{ leadingIcon: 'animate-spin' }"
+                title="The check was passed; the queued URLs are being retrieved in the background"
+              />
+              <UBadge
                 v-if="c.held" color="neutral" variant="outline" size="sm"
                 label="new URLs are queued"
                 title="Further URLs of this site wait here instead of being scraped into the same check"
@@ -228,12 +256,14 @@ onBeforeUnmount(() => { if (poller) clearInterval(poller) })
             <UButton
               icon="i-fa7-solid-shield-halved" label="Solve"
               :loading="busy === c.domain && !solving"
-              :disabled="solving || !state.solvable" @click="solve(c.domain)"
+              :disabled="solving || !state.solvable || retrieving.includes(c.domain)"
+              @click="solve(c.domain)"
             />
             <UButton
               color="neutral" variant="ghost" icon="i-fa7-solid-rotate" label="Retry"
               title="Retrieve the queue without solving: works while an earlier clearance is still valid"
-              :disabled="solving || busy !== null" @click="retry(c.domain)"
+              :disabled="solving || busy !== null || retrieving.includes(c.domain)"
+              @click="retry(c.domain)"
             />
             <UButton
               color="error" variant="ghost" icon="i-fa7-solid-trash" label="Discard"

@@ -19,7 +19,9 @@ const props = withDefaults(defineProps<{
   highlight?: number | null
   /** Which columns carry their value on top: the highlighted one, or all */
   labels?: 'highlight' | 'all'
-}>(), { height: 160, highlight: null, labels: 'highlight' })
+  /** Axis labels may run past their column (for sparse labels on many thin columns) */
+  wideLabels?: boolean
+}>(), { height: 160, highlight: null, labels: 'highlight', wideLabels: false })
 
 // Room above the tallest column for its label, so it never runs into what is above
 const LABEL_ROOM = 16
@@ -84,7 +86,8 @@ function write(value: number) {
     <div class="flex gap-1 mt-1.5" :class="labels === 'all' ? '' : 'pl-8'">
       <span
         v-for="(item, index) in items" :key="item.label + index"
-        class="flex-1 min-w-0 text-center text-[10px] text-dimmed truncate"
+        class="flex-1 min-w-0 text-[10px] text-dimmed"
+        :class="wideLabels ? 'whitespace-nowrap overflow-visible' : 'text-center truncate'"
       >{{ item.label }}</span>
     </div>
   </div>

@@ -1,0 +1,53 @@
+{
+  "searchParameters": {
+    "q": "eiffel tower",
+    "type": "images",
+    "engine": "google",
+    "num": 10
+  },
+  "images": [
+    {
+      "title": "Eiffel Tower - Wikipedia",
+      "imageUrl": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/85/Tour_Eiffel_Wikimedia_Commons_%28cropped%29.jpg/1200px-Tour_Eiffel_Wikimedia_Commons_%28cropped%29.jpg",
+      "imageWidth": 1200,
+      "imageHeight": 2400,
+      "thumbnailUrl": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcR-eiffel-1",
+      "thumbnailWidth": 131,
+      "thumbnailHeight": 262,
+      "source": "Wikipedia",
+      "domain": "en.wikipedia.org",
+      "link": "https://en.wikipedia.org/wiki/Eiffel_Tower",
+      "googleUrl": "https://www.google.com/imgres?imgurl=https%3A%2F%2Fupload.wikimedia.org%2Feiffel.jpg",
+      "position": 1
+    },
+    {
+      "title": "Eiffel Tower | History, Height, & Facts | Britannica",
+      "imageUrl": "https://cdn.britannica.com/54/75854-050-E27E66C0/Eiffel-Tower-Paris.jpg",
+      "imageWidth": 1600,
+      "imageHeight": 2133,
+      "thumbnailUrl": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcR-eiffel-2",
+      "thumbnailWidth": 194,
+      "thumbnailHeight": 259,
+      "source": "Britannica",
+      "domain": "www.britannica.com",
+      "link": "https://www.britannica.com/topic/Eiffel-Tower-Paris-France",
+      "googleUrl": "https://www.google.com/imgres?imgurl=https%3A%2F%2Fcdn.britannica.com%2Feiffel.jpg",
+      "position": 2
+    },
+    {
+      "title": "Visiting the Eiffel Tower",
+      "imageUrl": "https://www.toureiffel.paris/sites/default/files/tour-eiffel.jpg",
+      "imageWidth": 2000,
+      "imageHeight": 1333,
+      "thumbnailUrl": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcR-eiffel-3",
+      "thumbnailWidth": 275,
+      "thumbnailHeight": 183,
+      "source": "La tour Eiffel",
+      "domain": "www.toureiffel.paris",
+      "link": "https://www.toureiffel.paris/en",
+      "googleUrl": "https://www.google.com/imgres?imgurl=https%3A%2F%2Fwww.toureiffel.paris%2Feiffel.jpg",
+      "position": 3
+    }
+  ],
+  "credits": 1
+}

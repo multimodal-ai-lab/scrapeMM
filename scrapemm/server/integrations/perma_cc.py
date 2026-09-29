@@ -1,12 +1,18 @@
 import asyncio
+import re
+from contextlib import suppress
 import logging
 import time
 from typing import Optional
 
-from playwright.async_api import TimeoutError, Page, Frame
+from playwright.async_api import TimeoutError, Page, Frame, Error as PlaywrightError
 
 from scrapemm.server.download.browser import MAX_IMAGE_BYTES, MAX_VIDEO_BYTES, BLOB_ATTR, install_stash
-from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget
+from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget, settle_dom, \
+    renderer_crashed
+from scrapemm.common import RetrievalFailed
+from scrapemm.common.exceptions import TargetUnavailableError
+from scrapemm.common.scraping_response import ScrapedContent
 
 logger = logging.getLogger("scrapeMM")
 
@@ -15,6 +21,55 @@ logger = logging.getLogger("scrapeMM")
 STASH_CONCURRENCY = 6
 # Large WARCs (e.g. 80MB+ Telegram videos) need a long wait for the innermost iframe.
 INNERMOST_FRAME_TIMEOUT_MS = 120_000
+# How long Perma.cc's page gets to show its archive iframe, a reload included (see
+# `_archive_iframe()`). 20 s without a reload was not enough with dozens of other pages
+# loading at once: the whole retrieval then failed.
+ARCHIVE_IFRAME_TIMEOUT_MS = 60_000
+# How long the replay app gets to show its frame. It first installs its service worker
+# and loads the WARC; under load (and on a cold start) that took more than the 15 s this
+# used to be, and the empty app shell was taken instead -- no media at all.
+REPLAY_IFRAME_TIMEOUT_MS = 60_000
+# How long a replayed player gets to create its <video>, when the page's markup already
+# names the video file (see `_settle_media_frame()`)
+VIDEO_ELEMENT_TIMEOUT_MS = 15_000
+
+# Whether the frame names an MP4 in its markup but shows no <video> (yet): a player
+# such as Facebook's builds its element by script, only after the replay delivered it
+_VIDEO_PENDING_JS = r"""() => !document.querySelector('video')
+    && /https:(?:\\?\/){2}video[^"'\s<>]+?\.mp4/i.test(document.documentElement.outerHTML)"""
+
+
+# The media of a frame: <img> elements, how many have loaded, how many are large
+_MEDIA_STATE_JS = """() => {
+    const imgs = [...document.images];
+    return {imgs: imgs.length,
+            loaded: imgs.filter(i => i.complete && i.naturalWidth > 0).length,
+            large: imgs.filter(i => i.naturalWidth >= 256 && i.naturalHeight >= 256).length,
+            pending: imgs.filter(i => !i.complete).length,
+            videos: document.querySelectorAll('video').length,
+            text: document.body ? document.body.innerText.length : 0};
+}"""
+
+# Whether a frame shows anything: text, or a medium
+_SHOWS_CONTENT_JS = f"""() => !!(
+    (document.body && document.body.innerText.trim())
+    || document.querySelector('img, video, [{BLOB_ATTR}]'))"""
+
+# Whether a frame shows the replayer's "not in this archive" page (pywb's), rather than a
+# capture: that text, little else, and no media. Under load, the replay of a real capture
+# showed it for a while (its archive not yet indexed, or its app navigating), and that
+# page was taken for the result: "no capture", for records that have one.
+_REPLAY_MISS_JS = """() => {
+    const text = (document.body ? document.body.innerText : '').toLowerCase();
+    return text.length < 2000 && !document.querySelector('img, video')
+        && (text.includes('not found in this archive') || text.includes('archived page not found'));
+}"""
+# How long a frame showing that page gets to turn into the capture before a reload
+REPLAY_MISS_WAIT = 10
+
+# A retrieval is not tried again after this many seconds, so that the attempts (see
+# `PermaCC._extract_content()`) stay well within the browser's 10-minute limit
+RETRY_BUDGET = 240
 
 
 class PermaCC(HeadedBrowser):
@@ -23,7 +78,87 @@ class PermaCC(HeadedBrowser):
 
     # TODO: Implement PDF support, e.g., https://perma.cc/83VA-LTH9
 
+    def _after_renderer_crash(self, url: str) -> str:
+        """Replays of YouTube watch pages crash the tab's renderer within seconds on the
+        production host, every time (SIGTRAP at ~800 MB, even alone in a fresh browser)
+        -- loading them again would only crash again. The capture's screenshot is a
+        light page."""
+        return _screenshot_url(url) or url
+
     async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
+        """The frame that shows the record's capture. Under load, the replay sometimes
+        came up empty (only the app's shell) or replaced one of its frames while it was
+        being read ("Frame was detached"). Either way, the record is loaded once more;
+        if the replay still shows nothing, the capture's screenshot is taken instead, which
+        Perma.cc keeps for most records (as `?type=image`).
+
+        Captures of YouTube's player pages go to the screenshot straight away: their
+        replay yields YouTube's page shell without the video, or crashes its tab's
+        renderer (at ~800 MB, on the production host) -- which under load also cost the
+        videos of other archive replays running at the same time."""
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        shot = _screenshot_url(page.url)
+        if shot and _replays_poorly(await _captured_url(page)):
+            logger.info(f"{page.url} captures a YouTube player page; taking its screenshot "
+                        f"({shot}).")
+            with suppress(PlaywrightError):
+                await page.goto(shot, wait_until="domcontentloaded", timeout=60_000)
+        missing = False
+        for attempt in range(2):
+            try:
+                target = await self._extract_capture(page)
+            except PlaywrightError as e:
+                if "detached" not in str(e).lower():
+                    raise
+                logger.info(f"The replay at {page.url} replaced a frame while it was being "
+                            f"read; loading the record again.")
+                target = None
+            if renderer_crashed(page):
+                # Nothing on this page answers any more; `_browse()` retries on a new one
+                raise PlaywrightError("Target crashed")
+            missing = target is not None and await _shows_replay_miss(target)
+            if target is not None and not missing and await _shows_content(target):
+                return target
+            if attempt == 0 and loop.time() - start < RETRY_BUDGET:
+                if missing:
+                    logger.info(f"The replay at {page.url} says its page is not in the "
+                                f"archive; loading the record again.")
+                elif target is not None:
+                    logger.info(f"The replay at {page.url} came up empty; loading the "
+                                f"record again.")
+                with suppress(PlaywrightError):
+                    await page.reload(wait_until="domcontentloaded", timeout=60_000)
+                continue
+            break
+
+        # The replay rendered the capture, twice, and it holds nothing to show
+        replayed_empty = target is not None
+        shot = _screenshot_url(page.url)
+        if missing and shot is None:
+            raise TargetUnavailableError(
+                f"The replay of the Perma.cc record at {page.url} says the page is not in "
+                f"its archive, twice.")
+        if shot is None or loop.time() - start >= RETRY_BUDGET:
+            return None
+        logger.info(f"The replay at {page.url} "
+                    f"{'still says its page is not in the archive' if missing else 'shows nothing'}"
+                    f"; taking the capture's screenshot ({shot}).")
+        try:
+            await page.goto(shot, wait_until="domcontentloaded", timeout=60_000)
+            if replayed_empty and "type=image" not in page.url:
+                # Perma.cc sends a record without a screenshot back to the replay
+                raise TargetUnavailableError(
+                    f"The Perma.cc capture at {shot.split('?')[0]} is empty (the replay "
+                    f"{'says the page is not in its archive' if missing else 'shows nothing'}, "
+                    f"and there is no screenshot).")
+            target = await self._extract_capture(page)
+        except PlaywrightError:
+            logger.debug(f"The screenshot at {shot} could not be read.", exc_info=True)
+            return None
+        return target if target is not None and await _shows_content(target) else None
+
+    async def _extract_capture(self, page: Page) -> Optional[ContentTarget]:
         # Check for Cloudflare challenge (passive check)
         body_text = await page.content()
         if "Just a moment" in body_text or "Performing security verification" in body_text:
@@ -48,11 +183,7 @@ class PermaCC(HeadedBrowser):
                 logger.warning("\rCloudflare challenge did not resolve in time.")
 
         # Prefer the content of the Perma.cc archive iframe specifically
-        try:
-            outer_iframe_el = await page.wait_for_selector("iframe.archive-iframe", timeout=20000)
-        except TimeoutError:
-            outer_iframe_el = None
-
+        outer_iframe_el = await self._archive_iframe(page)
         if not outer_iframe_el:
             return None
 
@@ -69,7 +200,7 @@ class PermaCC(HeadedBrowser):
         # custom element <replay-web-page> which hosts the inner iframe.
         try:
             middle_iframe_el = await outer_frame.wait_for_selector(
-                "replay-web-page iframe", timeout=15000
+                "replay-web-page iframe", timeout=REPLAY_IFRAME_TIMEOUT_MS
             )
         except TimeoutError:
             middle_iframe_el = None
@@ -102,6 +233,25 @@ class PermaCC(HeadedBrowser):
         target = await self._pick_best_media_frame(inner_frame)
         await _stash_media_in_frame(target)
         return target
+
+    @staticmethod
+    async def _archive_iframe(page: Page):
+        """The record page's archive iframe, which the page adds by script. In busy
+        batches, it sometimes had not appeared after a minute, although the record page
+        itself was complete -- six Perma.cc URLs of one batch failed at once that way. A
+        reload then brings it: so after half the wait, the page is loaded once more."""
+        for attempt in range(2):
+            try:
+                return await page.wait_for_selector("iframe.archive-iframe",
+                                                    timeout=ARCHIVE_IFRAME_TIMEOUT_MS / 2)
+            except TimeoutError:
+                pass
+            if attempt == 0:
+                logger.info(f"Perma.cc's archive iframe is late at {page.url}; reloading.")
+                with suppress(Exception):
+                    await page.reload(wait_until="domcontentloaded", timeout=60_000)
+        logger.info(f"Perma.cc showed no archive iframe at {page.url}.")
+        return None
 
     async def _wait_for_innermost_frame(
             self, middle_frame: Frame, timeout_ms: int = INNERMOST_FRAME_TIMEOUT_MS
@@ -213,6 +363,82 @@ class PermaCC(HeadedBrowser):
             return 0
 
 
+async def _shows_replay_miss(frame: Frame) -> bool:
+    """Whether the frame shows pywb's "not in this archive" page, and keeps showing it
+    for REPLAY_MISS_WAIT seconds (see `_REPLAY_MISS_JS`)."""
+    deadline = asyncio.get_running_loop().time() + REPLAY_MISS_WAIT
+    while True:
+        try:
+            if not await frame.evaluate(_REPLAY_MISS_JS):
+                return False
+        except PlaywrightError:
+            return False
+        if asyncio.get_running_loop().time() >= deadline:
+            return True
+        await asyncio.sleep(1)
+
+
+async def _shows_content(frame: Frame) -> bool:
+    try:
+        return bool(await frame.evaluate(_SHOWS_CONTENT_JS))
+    except PlaywrightError:
+        return False
+
+
+# Captured pages whose replay never shows their content: YouTube's player pages
+_POOR_REPLAYS = re.compile(
+    r"^https?://(?:(?:www|m)\.)?(?:youtube\.com/(?:watch|shorts/|live/|embed/)|youtu\.be/)",
+    re.IGNORECASE)
+
+
+def _replays_poorly(url: Optional[str]) -> bool:
+    return bool(url and _POOR_REPLAYS.match(url))
+
+
+async def _captured_url(page: Page) -> Optional[str]:
+    """The URL a Perma.cc record captured, as its page's playback script names it."""
+    with suppress(Exception):
+        return await page.evaluate("""() => {
+            for (const s of document.querySelectorAll('script')) {
+                const m = /const url = "([^"]*)"/.exec(s.textContent);
+                if (m) return JSON.parse('"' + m[1] + '"');
+            }
+            return null;
+        }""")
+    return None
+
+
+def _screenshot_url(url: str) -> Optional[str]:
+    """The record's screenshot view (https://perma.cc/XXXX-XXXX?type=image), unless `url`
+    is that already or is no record."""
+    from urllib.parse import urlsplit
+    parts = urlsplit(url)
+    if parts.netloc.removeprefix("www.") != "perma.cc" or "type=image" in parts.query:
+        return None
+    guid = parts.path.strip("/").split("/")[0]
+    return f"https://perma.cc/{guid}?type=image" if guid else None
+
+
+async def _settle_media_frame(frame: Frame) -> None:
+    """Lets the replayed page finish building itself before its media are collected.
+    The innermost frame counts as ready as soon as it has some content, which under load
+    came well before the replayed player had created its <video>: the video was then
+    missing from the result (perma.cc/K5L8-V3LZ, a Facebook post, in a busy batch).
+    Also runs for the Internet Archive, which collects its media the same way."""
+    await settle_dom(frame)
+    try:
+        if await frame.evaluate(_VIDEO_PENDING_JS):
+            await frame.wait_for_selector("video", state="attached",
+                                          timeout=VIDEO_ELEMENT_TIMEOUT_MS)
+    except TimeoutError:
+        logger.debug(f"The replayed page at {frame.url[:120]} names a video but shows none.")
+    except Exception:
+        pass  # E.g. mid-navigation; the media are collected as they are
+    with suppress(Exception):
+        logger.debug(f"Replay frame {frame.url[:100]} before collecting: "
+                     f"{await frame.evaluate(_MEDIA_STATE_JS)}")
+
+
 async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video_limit: int = MAX_VIDEO_BYTES,
                                 concurrency: int = STASH_CONCURRENCY) -> None:
     """Fetches the frame's media inside the frame, where the replay's session and service
@@ -224,9 +450,12 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
     browser's own copy (see `BrowserMedia`). This used to inline everything as data URIs
     instead, which blew a single video's frame HTML up to 20 MB.
     """
+    # First, as the page may still be building itself: collected too early, a video its
+    # player had not yet created was missing (see `_settle_media_frame()`)
+    await _settle_media_frame(frame)
     try:
         await install_stash(frame)
-        await frame.evaluate(
+        result = await frame.evaluate(
             """
             async (opts) => {
               const maxImageBytes = opts.maxImageBytes ?? 15728640;
@@ -568,7 +797,147 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
                 "blobAttr": BLOB_ATTR,
             },
         )
+        logger.debug(f"Fetched in {frame.url[:120]}: {result}")
     except Exception:
         # Best-effort; if anything fails, just proceed without inlining
         logger.debug("Fetching the frame's media in the frame failed; resolve_media() "
                      "fetches them instead.", exc_info=True)
+
+
+# --- Finding Perma.cc archives of arbitrary URLs --------------------------------------
+#
+# Perma.cc answers Memento TimeMap requests without an account:
+#   GET https://perma.cc/timemap/json/<url>  ->  200 JSON {"mementos": {"list": [...]}}
+#                                                or 404 (plain text) if none exists
+# Matching follows the usual archive canonicalisation: scheme, "www." and a trailing
+# slash do not matter, the query string does (exactly). The site sits behind Cloudflare,
+# which answers plain HTTP clients with a JavaScript challenge, so the lookup goes
+# through curl_cffi's browser TLS impersonation, which it lets through. (The REST API at
+# api.perma.cc lists only an account's own archives, and rate-limits hard: HTTP 429.)
+
+PERMA_TIMEMAP = "https://perma.cc/timemap/json/"
+# How long a lookup's outcome is reused. Misses shorter: somebody may archive it meanwhile.
+LOOKUP_HIT_TTL = 3600
+LOOKUP_MISS_TTL = 600
+# Perma.cc is one small service; lookups queue rather than burst
+LOOKUP_CONCURRENCY = 2
+# After HTTP 429, Perma.cc is not asked again for this long
+LOOKUP_RATE_LIMIT_PAUSE = 300
+
+_lookups: dict[str, tuple[Optional[str], float]] = {}  # URL -> (Perma link or None, expiry)
+_lookup_gate: Optional[asyncio.Semaphore] = None
+_rate_limited_until = 0.0
+
+
+# Query parameters that only track how a link was shared, never which content it is
+_TRACKING_PARAMS = re.compile(
+    r"^(utm_.*|fbclid|gclid|dclid|msclkid|mc_cid|mc_eid|igsh|igshid|si|s|t|ref|ref_src|"
+    r"ref_url|feature|lang|is_from_webapp|is_copy_url|sender_device|share_.*|_rdc|_rdr|"
+    r"rdid|mibextid|xmt|__cft__.*|__tn__)$", re.IGNORECASE)
+
+
+def _lookup_candidates(url: str) -> list[str]:
+    """The spellings of `url` worth looking up, in order: as given; without the query
+    parameters that only track sharing (utm_*, fbclid, ?s=, ...) and the fragment; and
+    for X the other of its two domains.
+
+    Only tracking parameters go: the query often *is* the content -- a YouTube video
+    is `watch?v=...`. Dropping the whole query once matched three different videos to
+    the same Perma.cc capture of some other video.
+    """
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    candidates = [url]
+    parts = urlsplit(url)
+    kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+            if not _TRACKING_PARAMS.match(k)]
+    cleaned = parts._replace(query=urlencode(kept), fragment="")
+    candidates.append(urlunsplit(cleaned))
+    host = parts.netloc.lower().removeprefix("www.")
+    swap = {"x.com": "twitter.com", "twitter.com": "x.com"}.get(host)
+    if swap:
+        candidates.append(urlunsplit(cleaned._replace(netloc=swap)))
+    return list(dict.fromkeys(candidates))
+
+
+async def _timemap_newest(url: str) -> Optional[str]:
+    """The newest Perma.cc link in the TimeMap of exactly `url`, or None if there is none.
+    Raises RateLimitError when Perma.cc throttles, RetrievalFailed when it cannot be
+    asked (unreachable, or an answer that is not a TimeMap)."""
+    global _rate_limited_until
+    import json
+    from scrapemm.common.exceptions import RateLimitError
+    from scrapemm.server.download.requests import _request_via_curl_cffi
+
+    result = await _request_via_curl_cffi(PERMA_TIMEMAP + url, {"Accept": "application/json"},
+                                          lookup=True)
+    if result is None:
+        raise RetrievalFailed("Perma.cc could not be asked for archives (no answer).")
+    status, headers, body = result
+    if status == 404:
+        return None
+    if status == 429:
+        _rate_limited_until = time.time() + LOOKUP_RATE_LIMIT_PAUSE
+        raise RateLimitError("Perma.cc is rate-limiting archive lookups; paused for "
+                             f"{LOOKUP_RATE_LIMIT_PAUSE // 60} min.")
+    if status != 200:
+        raise RetrievalFailed(f"Perma.cc answered the archive lookup with HTTP {status}.")
+    try:
+        mementos = json.loads(body)["mementos"]["list"]
+    except (ValueError, KeyError, TypeError):
+        raise RetrievalFailed("Perma.cc's archive lookup answered with something other "
+                              "than a TimeMap (a Cloudflare challenge?).")
+    dated = [m for m in mementos if m.get("uri") and m.get("datetime")]
+    return max(dated, key=lambda m: m["datetime"])["uri"] if dated else None
+
+
+async def find_perma_archive(url: str, session=None) -> Optional[str]:
+    """Returns the newest Perma.cc link (https://perma.cc/XXXX-XXXX) archiving `url`, or
+    None if Perma.cc has none. Needs no account. Outcomes are cached (hits for an hour,
+    misses for ten minutes), and at most LOOKUP_CONCURRENCY lookups run at once.
+
+    Raises RateLimitError while Perma.cc throttles, RetrievalFailed if it cannot be asked.
+    `session` is accepted for symmetry with other lookups and not used: Perma.cc has to be
+    asked with a browser's TLS fingerprint (see above)."""
+    global _lookup_gate
+    from scrapemm.common.exceptions import RateLimitError
+
+    now = time.time()
+    if (cached := _lookups.get(url)) and cached[1] > now:
+        return cached[0]
+    if _rate_limited_until > now:
+        raise RateLimitError("Perma.cc is rate-limiting archive lookups; try again later.")
+    if _lookup_gate is None:
+        _lookup_gate = asyncio.Semaphore(LOOKUP_CONCURRENCY)
+
+    async with _lookup_gate:
+        link = None
+        for candidate in _lookup_candidates(url):
+            if link := await _timemap_newest(candidate):
+                break
+    _lookups[url] = (link, time.time() + (LOOKUP_HIT_TTL if link else LOOKUP_MISS_TTL))
+    if len(_lookups) > 10_000:  # Keep it bounded: drop the expired ones
+        for key in [k for k, (_, expiry) in _lookups.items() if expiry <= time.time()]:
+            del _lookups[key]
+    logger.debug(f"Perma.cc archive of {url}: {link or 'none'}")
+    return link
+
+
+_perma: Optional[PermaCC] = None
+
+
+async def retrieve_archived_copy(url: str, session=None, **kwargs) -> ScrapedContent:
+    """Retrieves the newest Perma.cc archive of `url` (any URL), through the Perma.cc
+    integration. `kwargs` are the integration's (e.g. output_format, max_video_size).
+
+    Raises TargetUnavailableError if Perma.cc has no archive of the URL, RateLimitError
+    while Perma.cc throttles lookups, and whatever the integration raises otherwise."""
+    global _perma
+    from scrapemm.common.exceptions import TargetUnavailableError
+
+    link = await find_perma_archive(url, session)
+    if link is None:
+        raise TargetUnavailableError(f"Perma.cc has no archive of {url}.")
+    logger.info(f"Retrieving {url} from its Perma.cc archive {link}.")
+    if _perma is None:
+        _perma = PermaCC()
+    return await _perma.get(link, **kwargs)
