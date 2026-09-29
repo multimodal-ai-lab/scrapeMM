@@ -341,8 +341,13 @@ async def download_video_with_ytdlp(
             video, metadata = await asyncio.to_thread(_run_ytdlp_sync, url, temp_path, ydl_opts)
 
         if video and metadata.get("acodec") in (None, "none"):
-            logger.info(f"⚠️ Downloaded {video.reference} without audio. Install FFmpeg to "
-                        f"enable merging the separate video and audio streams.")
+            if ffmpeg:
+                # FFmpeg was there to merge an audio stream: the source had none to offer
+                # (e.g. a silent clip)
+                logger.debug(f"Downloaded {video.reference}; its source has no audio stream.")
+            else:
+                logger.info(f"⚠️ Downloaded {video.reference} without audio. Install FFmpeg "
+                            f"to enable merging the separate video and audio streams.")
 
         if video and max_video_size and video.size > max_video_size:
             logger.info(f"Removing video {video.reference} because it exceeds the maximum size "

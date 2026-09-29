@@ -17,7 +17,9 @@ export interface SettingsSection {
 const KEY = Symbol('settings-sections')
 
 export function provideSettingsSections() {
-  const sections = reactive(new Map<string, SettingsSection>())
+  // Shallow: a deep `reactive()` unwraps each section's `dirty` ref, so the map would no
+  // longer hold what `SettingsSection` says. Adding and removing sections stays reactive.
+  const sections = shallowReactive(new Map<string, SettingsSection>())
   provide(KEY, sections)
   return sections
 }

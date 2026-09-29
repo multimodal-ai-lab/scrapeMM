@@ -31,7 +31,7 @@ async function load() {
     scroll()
     // The router scrolls a newly opened page to the top once it has finished; when the
     // job loads faster than that, it would undo this. So scroll again after it.
-    nuxtApp.hooks.hookOnce('page:finish', () => setTimeout(scroll, 0))
+    nuxtApp.hooks.hookOnce('page:finish', () => { setTimeout(scroll, 0) })
   }
 }
 

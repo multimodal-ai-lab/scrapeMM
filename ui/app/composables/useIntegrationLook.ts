@@ -8,14 +8,22 @@
  * the section header can count them together as "warnings" instead of spelling out
  * every variety.
  */
-export const TONES: Record<string, {
+/** The badge colours of Nuxt UI */
+export type ToneColor = 'primary' | 'secondary' | 'success' | 'info' | 'warning' | 'error' | 'neutral'
+
+export interface Tone {
   icon: string
-  color: string
+  color: ToneColor
   label: string
   surface: string
   text: string
   warning?: boolean
-}> = {
+}
+
+export type ToneState = 'ready' | 'limited' | 'gated' | 'error' | 'unconfigured' | 'disabled'
+  | 'unavailable' | 'checking'
+
+export const TONES: Record<ToneState, Tone> = {
   ready: {
     icon: 'i-fa7-solid-circle-check',
     color: 'success',
@@ -109,11 +117,12 @@ export function integrationIcon(key: string): string {
   return ICONS[key?.toLowerCase()] || 'i-fa7-solid-globe'
 }
 
-export function toneFor(state: string) {
-  return TONES[state] || TONES.error
+/** The tone of a state; an unknown one looks like an error. */
+export function toneFor(state: string): Tone {
+  return (TONES as Record<string, Tone | undefined>)[state] ?? TONES.error
 }
 
 /** Whether a state counts towards the "warnings" tally in the section header. */
 export function isWarning(state: string): boolean {
-  return TONES[state]?.warning === true
+  return (TONES as Record<string, Tone | undefined>)[state]?.warning === true
 }

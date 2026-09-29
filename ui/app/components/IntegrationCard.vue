@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { DropdownMenuItem } from '@nuxt/ui'
+
 /**
  * One retrieval method on the dashboard.
  *
@@ -33,7 +35,7 @@ const chips = computed(() => [
 ])
 
 const menuItems = computed(() => {
-  const actions = [
+  const actions: DropdownMenuItem[] = [
     {
       label: 'Re-check',
       icon: 'i-fa7-solid-rotate',

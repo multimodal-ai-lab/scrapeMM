@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import type RFB from '@novnc/novnc'
+import type { RFBDisconnectEvent } from '@novnc/novnc'
+
 /**
  * A live view of the server's browser, for solving the Archive.today access check.
  *
@@ -17,7 +20,7 @@ const state = ref<'idle' | 'connecting' | 'connected' | 'failed'>('idle')
 const detail = ref('')
 const token = useToken()
 
-let rfb: any = null
+let rfb: RFB | null = null
 
 function socketUrl() {
   const base = apiBase()
@@ -35,8 +38,9 @@ async function connect() {
   try {
     // Imported lazily: noVNC touches the DOM on import and is dead weight on every
     // other page. The package's single export is the RFB class itself.
-    const { default: RFB } = await import('@novnc/novnc')
-    rfb = new RFB(container.value, socketUrl(), {})
+    const { default: Client } = await import('@novnc/novnc')
+    if (!container.value) throw new Error('The view is not on the page yet.')
+    rfb = new Client(container.value, socketUrl(), {})
     rfb.scaleViewport = true
     rfb.clipViewport = true
     // A held button must reach the server's browser as a drag (slider CAPTCHAs), not
@@ -47,9 +51,10 @@ async function connect() {
     // and x11vnc's -cursor none in docker/entrypoint.sh), so nothing extra is drawn
     rfb.showDotCursor = false
     rfb.addEventListener('connect', () => { state.value = 'connected' })
-    rfb.addEventListener('disconnect', (event: any) => {
-      state.value = event?.detail?.clean ? 'idle' : 'failed'
-      if (!event?.detail?.clean) {
+    rfb.addEventListener('disconnect', (event: Event) => {
+      const clean = (event as RFBDisconnectEvent).detail?.clean
+      state.value = clean ? 'idle' : 'failed'
+      if (!clean) {
         detail.value = 'The connection to the server\'s screen dropped. '
           + 'Check that the container has a display and x11vnc running.'
       }

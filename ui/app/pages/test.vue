@@ -293,7 +293,8 @@ const rows = computed(() => {
     : results.filter((r) => r.outcome === outcomeFilter.value)
   // Worst first: what needs looking at leads
   const rank = { failed: 0, partial: 1, passed: 2 } as Record<string, number>
-  const sorted = [...filtered].sort((a, b) => rank[a.outcome] - rank[b.outcome]
+  const order = (r: any) => rank[r.outcome] ?? Object.keys(rank).length  // Unknown ones last
+  const sorted = [...filtered].sort((a, b) => order(a) - order(b)
     || a.category.localeCompare(b.category))
   // What is still changing comes first
   return outcomeFilter.value === 'all' ? [...inProgress.value, ...sorted] : sorted

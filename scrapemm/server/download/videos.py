@@ -128,6 +128,11 @@ def video_from_binary(binary_data: bytes, source_url: str) -> Video:
     return video
 
 
+def _is_hls_playlist(content: str) -> bool:
+    """Whether `content` is an HLS playlist: every one starts with #EXTM3U."""
+    return content.lstrip().lstrip(chr(0xFEFF)).startswith("#EXTM3U")  # A BOM may lead
+
+
 async def download_hls_video(
         playlist_url: str,
         session: Union[aiohttp.ClientSession, "APIRequestContext"],
@@ -143,6 +148,11 @@ async def download_hls_video(
 
         if not playlist_content:
             logger.warning(f"Failed to download the HLS playlist {playlist_url}.")
+            return None
+        if not _is_hls_playlist(playlist_content):
+            # E.g. an error message: its lines would be taken for segment URLs
+            logger.info(f"{playlist_url} did not answer with an HLS playlist: "
+                        f"{' '.join(playlist_content.split())[:120]!r}")
             return None
 
         playlist = m3u8.loads(playlist_content)
@@ -160,7 +170,7 @@ async def download_hls_video(
             # Download the variant playlist
             variant_content = await request_static(variant_url, session, get_text=True, **kwargs)
 
-            if not variant_content:
+            if not variant_content or not _is_hls_playlist(variant_content):
                 logger.error(f"Failed to download variant playlist: {variant_url}")
                 return None
 

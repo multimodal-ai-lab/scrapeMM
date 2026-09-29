@@ -27,6 +27,7 @@ from scrapemm.server.download.images import image_from_binary, image_size
 from scrapemm.server.download.util import (
     looks_like_image_file_url,
     looks_like_vector_file_url,
+    looks_like_video_file_url,
     looks_like_video_embed_url,
 )
 from scrapemm.server.download.browser import BrowserMedia, BLOB_ATTR, BLOB_SCHEME, CURRENT_ATTR
@@ -271,6 +272,8 @@ def _is_placeholder_src(src: str) -> bool:
     # Callers only prefer an alternative when one actually exists, so this is safe.
     if lowered.startswith("data:"):
         return True
+    if _media_reference(src) is None:
+        return True  # Text, not a URL: the next candidate may hold the real one
     return any(hint in lowered for hint in _PLACEHOLDER_HINTS)
 
 
@@ -305,14 +308,44 @@ def _best_image_src(element: Tag) -> Optional[str]:
     return src or None
 
 
-def _resolve_media_url(uri: str, page_url: Optional[str], domain_root: Optional[str]) -> str:
-    """Turns a media reference found in the page into an absolute URL.
+# Schemes a media reference may have; anything else with a scheme (javascript:, about:,
+# mailto:) is no medium
+_MEDIA_SCHEMES = ("http://", "https://", "//", "data:", BLOB_SCHEME)
+_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+# Never in a URL, not even an unencoded one that a browser would repair
+_UNSAFE_URL_CHARS = re.compile(r"[\x00-\x1f\x7f<>\"`{}\\^]")
+
+
+def _media_reference(uri: str) -> Optional[str]:
+    """`uri` if it is syntactically a URL or a relative path, else None. Attributes that
+    ought to hold a URL sometimes hold text -- an error message a lazy loader parked in
+    `data-original`, say -- which, resolved against the page, turned into requests like
+    "https://archive.ph/must be exactly one 'ct' and 'cv' parameter". Blanks inside a
+    path that names a media file are percent-encoded, as a browser does; blanks in
+    anything else mean it is text."""
+    uri = uri.strip()
+    if not uri or uri.startswith(("data:", BLOB_SCHEME)):
+        return uri or None
+    if uri.startswith("#") or (_SCHEME_RE.match(uri) and not uri.lower().startswith(_MEDIA_SCHEMES)):
+        return None
+    if _UNSAFE_URL_CHARS.search(uri):
+        return None
+    if re.search(r"\s", uri):
+        if not (looks_like_image_file_url(uri) or looks_like_video_file_url(uri)):
+            return None
+        uri = re.sub(r"\s", "%20", uri)
+    return uri
+
+
+def _resolve_media_url(uri: str, page_url: Optional[str], domain_root: Optional[str]) -> Optional[str]:
+    """Turns a media reference found in the page into an absolute URL, or None if it is
+    no URL at all (see `_media_reference()`).
 
     Handles protocol-relative (`//cdn/x.jpg`), root-relative (`/x.jpg`) and
     document-relative (`img/x.jpg`) references. Data URIs and already-absolute URLs
     are returned unchanged.
     """
-    uri = uri.strip()
+    uri = _media_reference(uri)
     if not uri or uri.startswith(("data:", BLOB_SCHEME)):
         return uri
     if uri.startswith("//"):
