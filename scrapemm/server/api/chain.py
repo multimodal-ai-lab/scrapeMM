@@ -35,6 +35,11 @@ class ChainUpdate(BaseModel):
 class PreviewRequest(BaseModel):
     url: str
     chain: Optional[list[dict[str, Any]]] = None  # Unsaved changes to preview
+    exceptions: Optional[list[dict[str, Any]]] = None  # Likewise
+
+
+class ExceptionsUpdate(BaseModel):
+    exceptions: list[dict[str, Any]]  # [{"pattern": "example.com", "methods": [...]}]
 
 
 @router.get("/chain")
@@ -73,9 +78,46 @@ async def preview(body: PreviewRequest) -> dict:
     if "://" not in url:
         url = "https://" + url
     try:
-        return chain.resolve(url, "auto", body.chain).to_dict() | {"url": url}
+        return chain.resolve(url, "auto", body.chain, body.exceptions).to_dict() | {"url": url}
     except (ValueError, KeyError) as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/chain/exceptions")
+async def read_exceptions() -> dict:
+    return _describe_exceptions()
+
+
+@router.put("/chain/exceptions")
+async def put_exceptions(body: ExceptionsUpdate) -> dict:
+    try:
+        chain.save_exceptions(body.exceptions)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _describe_exceptions()
+
+
+@router.post("/chain/exceptions/reset")
+async def reset_exceptions() -> dict:
+    chain.reset_exceptions()
+    return _describe_exceptions()
+
+
+def _describe_exceptions() -> dict:
+    """The exceptions, each flagged as a default, a changed default or the user's own;
+    plus the defaults, and the defaults the user removed."""
+    defaults = {e.pattern: e.methods for e in chain.default_exceptions()}
+    current = chain.configured_exceptions()
+    patterns = {e.pattern for e in current}
+    return {
+        "exceptions": [e.to_dict() | {
+            "origin": ("default" if defaults.get(e.pattern) == e.methods
+                       else "modified" if e.pattern in defaults else "custom")}
+            for e in current],
+        "defaults": [e.to_dict() for e in chain.default_exceptions()],
+        "removed_defaults": [p for p in defaults if p not in patterns],
+        "live_methods": chain.LIVE_KEYS,
+    }
 
 
 async def _describe() -> dict:

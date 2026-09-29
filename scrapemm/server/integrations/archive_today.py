@@ -190,6 +190,15 @@ async def _get_via_aiohttp(url: str, cookies: Optional[dict], user_agent: Option
         return None, ""
 
 
+def _log_fetch(url: str, transport: str, status: Optional[int], body: str,
+               started: float) -> None:
+    """One fetch of an Archive.today page or endpoint, timed. INFO when it was slow."""
+    took = time.monotonic() - started
+    level = logging.INFO if took >= 3 else logging.DEBUG
+    logger.log(level, f"⏱️ Archive.today fetch of {url[:100]} via {transport}: "
+                      f"{status or 'no answer'}, {len(body)} chars, {took:.1f} s.")
+
+
 async def _http_get(url: str, cookies: Optional[dict] = None, user_agent: Optional[str] = None,
                     impersonations: tuple[str, ...] = _IMPERSONATIONS,
                     timeout: float = 15) -> tuple[Optional[int], str]:
@@ -203,11 +212,15 @@ async def _http_get(url: str, cookies: Optional[dict] = None, user_agent: Option
     nothing got through."""
     attempts: list[tuple[Optional[int], str]] = []
     for impersonate in impersonations:
+        started = time.monotonic()
         status, body = await _get_via_curl_cffi(url, cookies, user_agent, impersonate, timeout)
+        _log_fetch(url, f"curl {impersonate}", status, body, started)
         if status == 200 and not _is_decoy(body):
             return status, body
         attempts.append((status, body))
+    started = time.monotonic()
     status, body = await _get_via_aiohttp(url, cookies, user_agent, timeout)
+    _log_fetch(url, "aiohttp", status, body, started)
     if status == 200 and not _is_decoy(body):
         return status, body
     attempts.append((status, body))
@@ -348,42 +361,37 @@ class Snapshot:
         return f"https://{CANONICAL_DOMAIN}/{self.id}/{self.hash}/scr.png"
 
 
+def _store(location: Optional[Path]):
+    """The scrapeMM cache's permanent tier, or an isolated one at `location` (tests)."""
+    from scrapemm.server.cache import immutable, ImmutableCache
+    return immutable if location is None else ImmutableCache(location)
+
+
 class _SnapshotCache:
-    """Permanent, file-backed map from snapshot URL path to the resolved Snapshot."""
+    """What cse.js said about a snapshot (see `Snapshot`), kept for good in the scrapeMM
+    cache's permanent tier: a capture's metadata never changes."""
 
-    def __init__(self, path: Path = SNAPSHOT_CACHE_PATH):
-        self.path = path
-        self._entries: Optional[dict[str, dict]] = None
-
-    def _load(self) -> dict[str, dict]:
-        if self._entries is None:
-            try:
-                self._entries = json.loads(self.path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                self._entries = {}
-        return self._entries
+    def __init__(self, location: Optional[Path] = None):
+        self.store = _store(location)
 
     def get(self, key: str) -> Optional[Snapshot]:
-        if entry := self._load().get(key):
-            return Snapshot(**entry)
-        return None
+        from scrapemm.server.cache import SNAPSHOT
+        data = self.store.get(SNAPSHOT, key)
+        if data is None:
+            return None
+        try:
+            return Snapshot(**json.loads(data))
+        except (ValueError, TypeError):
+            return None
 
     def put(self, key: str, snapshot: Snapshot) -> None:
-        entries = self._load()
-        entries[key] = asdict(snapshot)
-        try:
-            self.path.write_text(json.dumps(entries, indent=1), encoding="utf-8")
-        except OSError:
-            logger.debug(f"Could not persist the Archive.today snapshot cache at {self.path}.",
-                         exc_info=True)
-
-
-_snapshots = _SnapshotCache()
+        from scrapemm.server.cache import SNAPSHOT
+        self.store.put(SNAPSHOT, key, json.dumps(asdict(snapshot)).encode("utf-8"))
 
 
 def _page_cache_key(url: str) -> str:
-    """Deterministic, filesystem-safe name for a canonicalized snapshot URL. Short-id
-    URLs keep their id so that the store stays readable; long-form ones are hashed."""
+    """The key of a canonicalized snapshot URL's page. Short-id URLs are keyed by their
+    id; long-form ones by a hash of their path (as the former page cache named files)."""
     path = urlparse(url).path
     if match := SHORT_ID_REGEX.match(path):
         return match.group(1)
@@ -391,41 +399,68 @@ def _page_cache_key(url: str) -> str:
 
 
 class _PageCache:
-    """Permanently stored snapshot content, one file per snapshot.
+    """Snapshot content, kept for good in the scrapeMM cache's permanent tier.
 
     Only the replay page is behind the access check, and a capture never changes, so a
     page retrieved once never has to be retrieved again -- which is what lets a single
-    solved captcha keep paying off long after its session expired. One file per snapshot
-    keeps a new entry a single small write instead of a rewrite of the whole store.
+    solved captcha keep paying off long after its session expired.
     """
 
-    def __init__(self, directory: Path = PAGE_CACHE_DIR):
-        self.directory = directory
-
-    def _file(self, url: str) -> Path:
-        return self.directory / f"{_page_cache_key(url)}.html"
+    def __init__(self, location: Optional[Path] = None):
+        self.store = _store(location)
 
     def get(self, url: str) -> Optional[str]:
-        try:
-            return self._file(url).read_text(encoding="utf-8")
-        except OSError:
-            return None
+        from scrapemm.server.cache import PAGE
+        data = self.store.get(PAGE, _page_cache_key(url))
+        return None if data is None else data.decode("utf-8", errors="replace")
 
     def put(self, url: str, content_html: str) -> None:
-        try:
-            self.directory.mkdir(parents=True, exist_ok=True)
-            self._file(url).write_text(content_html, encoding="utf-8")
-        except OSError:
-            logger.debug(f"Could not cache the Archive.today page for {url}.", exc_info=True)
+        from scrapemm.server.cache import PAGE
+        self.store.put(PAGE, _page_cache_key(url), content_html.encode("utf-8"))
 
     def __contains__(self, url: str) -> bool:
-        return self._file(url).exists()
+        from scrapemm.server.cache import PAGE
+        return self.store.contains(PAGE, _page_cache_key(url))
 
     def __len__(self) -> int:
+        from scrapemm.server.cache import PAGE
+        return self.store.count(PAGE) or 0
+
+
+def _migrate_former_caches() -> None:
+    """Moves the pages and snapshots of Archive.today's former caches (PAGE_CACHE_DIR,
+    SNAPSHOT_CACHE_PATH) into the scrapeMM cache, once. The former directory is removed
+    only once every page in it moved; the snapshot file once all its entries did."""
+    from scrapemm.server.cache import immutable, PAGE, SNAPSHOT
+    if PAGE_CACHE_DIR.is_dir():
+        pages = list(PAGE_CACHE_DIR.glob("*.html"))
+        moved = 0
+        for file in pages:
+            try:
+                immutable.adopt(PAGE, file.stem, file)
+                moved += 1
+            except OSError:
+                logger.warning(f"Could not move the cached Archive.today page {file} into "
+                               f"the scrapeMM cache.", exc_info=True)
+        if moved == len(pages):
+            with suppress(OSError):
+                PAGE_CACHE_DIR.rmdir()  # Only if empty: nothing but the moved pages was there
+        logger.info(f"Moved {moved} cached Archive.today page(s) into the scrapeMM cache.")
+    if SNAPSHOT_CACHE_PATH.is_file():
         try:
-            return len(list(self.directory.glob("*.html")))
-        except OSError:
-            return 0
+            entries = json.loads(SNAPSHOT_CACHE_PATH.read_text(encoding="utf-8"))
+            for key, entry in entries.items():
+                immutable.put(SNAPSHOT, key, json.dumps(entry).encode("utf-8"))
+            SNAPSHOT_CACHE_PATH.unlink()
+            logger.info(f"Moved {len(entries)} Archive.today snapshot record(s) into the "
+                        f"scrapeMM cache.")
+        except (OSError, ValueError, AttributeError):
+            logger.warning(f"Could not move {SNAPSHOT_CACHE_PATH} into the scrapeMM cache.",
+                           exc_info=True)
+
+
+_migrate_former_caches()
+_snapshots = _SnapshotCache()
 
 
 class _RequestBuffer:
@@ -771,22 +806,30 @@ class ArchiveToday(HeadedBrowser):
 
         # A capture never changes and only its page is gated, so a page retrieved once
         # serves every later request -- no session needed.
+        started = time.monotonic()
         if cached := _pages.get(url):
-            logger.debug(f"Serving the cached Archive.today page for {url}.")
-            return await to_scraped_content(cached, session=session,
-                                            output_format=output_format, url=url)
+            content = await to_scraped_content(cached, session=session,
+                                               output_format=output_format, url=url)
+            logger.info(f"⏱️ Archive.today {url}: page cache hit; content with media in "
+                        f"{time.monotonic() - started:.1f} s.")
+            return content
 
         # Known to be gated: answer at once instead of fetching into the same gate.
         # (Attended mode asks a human at the gate, so it still goes and looks.)
         leading = False
         if not _interactive_solve_enabled():
             leading = await _await_verdict_or_lead()
+            if (waited := time.monotonic() - started) >= 1:
+                logger.info(f"⏱️ Archive.today {url}: waited {waited:.1f} s for another "
+                            f"request's verdict on the gate.")
             if _gate_known_up():
                 return await self._gated(url, session, output_format)
 
         try:
             return await self._fetch(url, **kwargs)
         finally:
+            logger.info(f"⏱️ Archive.today {url}: page cache miss; done in "
+                        f"{time.monotonic() - started:.1f} s.")
             # Whatever the outcome (a missing capture, an error), the request finding out
             # must never leave the others waiting for a verdict that will not come
             if leading:
@@ -1027,8 +1070,11 @@ class ArchiveToday(HeadedBrowser):
             snapshot.title = await _fetch_title(snapshot, session)
             if snapshot.title:
                 _snapshots.put(snapshot.id, snapshot)
-        return await to_scraped_content(_fallback_html(snapshot), session=session,
-                                        output_format=output_format, url=snapshot.canonical_url)
+        content = await to_scraped_content(_fallback_html(snapshot), session=session,
+                                           output_format=output_format,
+                                           url=snapshot.canonical_url)
+        content.stand_in = True  # The screenshot, not the page: never kept for good
+        return content
 
     async def _solve_in_browser(self, snapshot_url: str, timeout: float) -> bool:
         """Opens a snapshot in scrapeMM's browser so that a human can pass the access

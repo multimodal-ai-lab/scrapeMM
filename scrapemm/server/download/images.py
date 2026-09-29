@@ -42,15 +42,29 @@ async def download_image(
         max_size: tuple[int, int] = (2048, 2048),
         **kwargs
 ) -> Optional[Image]:
-    """Download an image from a URL and return it as an Image object."""
+    """Download an image from a URL and return it as an Image object. An archived image
+    comes from the scrapeMM cache, as the registry item it became before (see
+    `ImmutableCache.item()`)."""
+    from scrapemm.server.cache import immutable
+    variant = image_variant(max_size)
+    hit, image = await immutable.item(image_url, variant=variant, ignore_small=ignore_small_images)
+    if hit:
+        return image
     # TODO: Handle very large images like: https://eoimages.gsfc.nasa.gov/images/imagerecords/144000/144225/campfire_oli_2018312_lrg.jpg
     content = await request_static(image_url, session, get_text=False, **kwargs)
     if content:
         assert isinstance(content, bytes)
         # Decoding and rescaling are CPU-bound and would otherwise stall every other
         # retrieval running on this event loop.
-        return await decode_image(content, image_url,
-                                  ignore_small_images=ignore_small_images, max_size=max_size)
+        image = await decode_image(content, image_url,
+                                   ignore_small_images=ignore_small_images, max_size=max_size)
+        await immutable.keep_item(image_url, image, variant=variant)
+        return image
+
+
+def image_variant(max_size: Optional[tuple[int, int]]) -> str:
+    """How an image's item depends on its size limit, for the cache (see `download_image()`)."""
+    return "" if max_size in (None, (2048, 2048)) else f"#max={max_size[0]}x{max_size[1]}"
 
 
 def image_from_binary(

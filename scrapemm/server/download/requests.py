@@ -1,6 +1,7 @@
 import asyncio
 import logging
-from contextlib import suppress
+import time
+from contextlib import suppress, contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Union, TYPE_CHECKING
 
@@ -94,17 +95,42 @@ async def curl_get(url: str, **kwargs):
     from scrapemm.server.workers import run_in
 
     def curl_page_get():
-        with CurlSession() as session:
+        with _thread_session() as session:
             return session.get(url, **kwargs)
 
     # A page fetch, not a medium: its own pool (see `_curl_lookup_executor`)
     return await run_in(_curl_lookup_executor, "curl lookup", curl_page_get)
 
 
-def _request_via_curl_cffi_sync(url: str, headers: Optional[dict]) -> Optional[tuple[int, dict, bytes]]:
+@contextmanager
+def _thread_session():
+    """A curl session for one request, closed right after it.
+
+    NOT kept per worker thread, although that saved a TCP and TLS handshake per image:
+    curl sessions left open in the worker threads made every child process the server
+    started crash between fork and exec (SIGSEGV in libc, in the child still named
+    "uvicorn"). Playwright's Node driver then died at once ("Connection closed while
+    reading from the driver") and ffprobe/ffmpeg failed with -11 -- every browser
+    retrieval failed, and in production it stayed that way. Reproduced with the built-in
+    suite: 4 driver errors and 4 crashed ffprobe runs with sessions kept per thread,
+    none with a session per request. Archive.today's media are cached on disk instead
+    (`_ArchiveMediaCache`), which spares the repeated downloads altogether."""
     with CurlSession() as session:
-        for impersonate in _CURL_CFFI_IMPERSONATIONS:
-            try:
+        yield session
+
+
+def _log_curl(url: str, impersonate: str, outcome: str, started: float) -> None:
+    """One curl attempt, timed: at INFO when it was slow, so stalls show where they are."""
+    took = time.monotonic() - started
+    logger.log(logging.INFO if took >= 3 else logging.DEBUG,
+               f"⏱️ curl ({impersonate}) {url[:120]}: {outcome} in {took:.1f} s.")
+
+
+def _request_via_curl_cffi_sync(url: str, headers: Optional[dict]) -> Optional[tuple[int, dict, bytes]]:
+    for impersonate in _CURL_CFFI_IMPERSONATIONS:
+        started = time.monotonic()
+        try:
+            with _thread_session() as session:
                 response = session.get(
                     url,
                     impersonate=impersonate,
@@ -115,24 +141,23 @@ def _request_via_curl_cffi_sync(url: str, headers: Optional[dict]) -> Optional[t
                 status = response.status_code
                 hdrs = dict(response.headers)
                 body = response.content
-                if status == 200:
-                    logger.debug(
-                        "Retrieved %s via curl_cffi impersonate=%s (%s bytes)",
-                        url, impersonate, len(body),
-                    )
-                    return status, hdrs, body
-                if status != 403:
-                    # Real client/server error — further fingerprints won't help.
-                    return status, hdrs, body
-                logger.debug(
-                    "curl_cffi impersonate=%s still got 403 for %s; trying next profile",
-                    impersonate, url,
-                )
-            except Exception:
-                logger.debug(
-                    "curl_cffi impersonate=%s failed for %s",
-                    impersonate, url, exc_info=True,
-                )
+        except Exception as e:
+            _log_curl(url, impersonate, f"{type(e).__name__}", started)
+            logger.debug("curl_cffi impersonate=%s failed for %s", impersonate, url,
+                         exc_info=True)
+            if "timeout" in type(e).__name__.lower() or "timed out" in str(e).lower():
+                # The host is slow or delays this client, which another fingerprint
+                # would only queue into again
+                return None
+            continue
+        _log_curl(url, impersonate, f"HTTP {status}, {len(body)} bytes", started)
+        if status == 200:
+            return status, hdrs, body
+        if status != 403:
+            # Real client/server error — further fingerprints won't help.
+            return status, hdrs, body
+        logger.debug("curl_cffi impersonate=%s still got 403 for %s; trying next profile",
+                     impersonate, url)
     return None
 
 
@@ -213,6 +238,21 @@ async def request_static(url: str,
                          get_text: bool = True,
                          max_size: Optional[int] = None,
                          **kwargs) -> Optional[str | bytes]:
+    """Downloads the page or medium at `url` (see `_request_static()`). An archived
+    medium that could not be downloaded is noted: a capture's result that lacks it is
+    not kept for good (see `cache.complete_capture()`)."""
+    content = await _request_static(url, session, get_text=get_text, max_size=max_size, **kwargs)
+    if not get_text and url and not isinstance(content, bytes):
+        from scrapemm.server.cache import note_failed_medium
+        note_failed_medium(str(url))
+    return content
+
+
+async def _request_static(url: str,
+                          session: Union[aiohttp.ClientSession, "APIRequestContext"],
+                          get_text: bool = True,
+                          max_size: Optional[int] = None,
+                          **kwargs) -> Optional[str | bytes]:
     """Downloads the static page from the given URL using aiohttp or Playwright.
 
     Media downloads are bounded by `max_size` (in bytes) and by a stall timeout, not

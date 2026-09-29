@@ -279,16 +279,36 @@ class BrowserMedia:
     async def fetch_image(self, url: str, frame: Optional[MediaSource] = None,
                           fallback: Optional[str] = None, source_url: Optional[str] = None,
                           **kwargs) -> Optional[Image]:
+        from scrapemm.server.download.images import image_variant
+        variant = image_variant(kwargs.get("max_size"))
+        ignore_small = kwargs.get("ignore_small_images", True)
+        hit, image = await self._kept(url, fallback, variant, ignore_small)
+        if hit:
+            return image
         content, _ = await self.get(url, frame, limit=MAX_IMAGE_BYTES, fallback=fallback)
         if content:
             # CPU-bound; would otherwise stall every other retrieval on the event loop
-            return await decode_image(content, source_url or url, **kwargs)
+            image = await decode_image(content, source_url or url, **kwargs)
+            await self._keep(url, fallback, image, variant)
+            return image
         return None
 
     async def fetch_video(self, url: str, frame: Optional[MediaSource] = None,
                           fallback: Optional[str] = None, max_size: Optional[int] = None,
                           source_url: Optional[str] = None,
                           timeout: float = 180.0) -> Optional[Video]:
+        limit = max_size or MAX_VIDEO_BYTES
+        hit, video = await self._kept(url, fallback, max_bytes=limit)
+        if hit and video is not None:
+            return video
+        video = await self._fetch_video(url, frame, fallback, max_size, source_url, timeout)
+        if video is not None:
+            await self._keep(url, fallback, video)
+        return video
+
+    async def _fetch_video(self, url: str, frame: Optional[MediaSource], fallback: Optional[str],
+                           max_size: Optional[int], source_url: Optional[str],
+                           timeout: float) -> Optional[Video]:
         limit = max_size or MAX_VIDEO_BYTES
         content, content_type = await self.get(url, frame, limit, fallback, timeout)
 
@@ -320,6 +340,40 @@ class BrowserMedia:
         usually different srcset variants, and `url` is the larger one. In a replay
         archive, both name the same archived file, so any copy the browser has is taken
         before anything is fetched."""
+        found = await self._get(url, frame, limit, fallback, timeout)
+        if not found[0]:
+            # An archived capture's result without it is not kept for good
+            from scrapemm.server.cache import note_failed_medium
+            for candidate in (url, fallback):
+                if candidate:
+                    note_failed_medium(candidate, self._page_url())
+        return found
+
+    def _page_url(self) -> Optional[str]:
+        return getattr(self.page, "url", None)
+
+    async def _kept(self, url: str, fallback: Optional[str], variant: str = "",
+                    ignore_small: bool = True, max_bytes: Optional[int] = None):
+        """An archived medium's registry item from the scrapeMM cache (see
+        `ImmutableCache.item()`): (True, item or None) on a hit, (False, None) otherwise."""
+        from scrapemm.server.cache import immutable
+        for candidate in (url, fallback):
+            if candidate:
+                hit, item = await immutable.item(candidate, self._page_url(), variant,
+                                                 ignore_small, max_bytes)
+                if hit:
+                    self.stats["cache"] += 1
+                    return True, item
+        return False, None
+
+    async def _keep(self, url: str, fallback: Optional[str], item, variant: str = "") -> None:
+        from scrapemm.server.cache import immutable
+        for candidate in (url, fallback):
+            if candidate:
+                await immutable.keep_item(candidate, item, self._page_url(), variant)
+
+    async def _get(self, url: str, frame: Optional[MediaSource], limit: Optional[int],
+                   fallback: Optional[str], timeout: float) -> tuple[Optional[bytes], Optional[str]]:
         steps = [(self._copy, url), (self._fetch, url)]
         if fallback and fallback != url:
             steps += [(self._copy, fallback), (self._fetch, fallback)]
