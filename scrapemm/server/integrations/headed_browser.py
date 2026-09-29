@@ -1223,6 +1223,7 @@ class HeadedBrowser(RetrievalIntegration):
                 await self._settle_after_goto(page)
 
                 if target := await self._extract_content(page):
+                    shown_url = getattr(page, "url", "") or ""  # What the content came from
                     await annotate_rendered_media(target)
                     html, source = await self._html_and_source(target, page)
                     if html:
@@ -1238,6 +1239,10 @@ class HeadedBrowser(RetrievalIntegration):
                         )
                         if media.stats:
                             logger.debug(f"Media of {url} came from: {dict(media.stats)}")
+                        if "type=image" in shown_url and "type=image" not in url:
+                            # A Perma.cc record's screenshot in place of its replay: not
+                            # to be kept for good (see `cache.complete_capture()`)
+                            content.stand_in = True
                         return content
                 break  # No content found — not a crash, don't retry.
 

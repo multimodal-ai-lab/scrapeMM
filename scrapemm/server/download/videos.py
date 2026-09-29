@@ -35,8 +35,24 @@ async def download_video(
         **kwargs
 ) -> Optional[Video]:
     """Downloads the linked video (stream) and returns it as a Video object.
-    Videos larger than `max_video_size` bytes are skipped."""
+    Videos larger than `max_video_size` bytes are skipped. An archived video comes from
+    the scrapeMM cache, as the registry item it became before."""
+    from scrapemm.server.cache import immutable
+    hit, video = await immutable.item(video_url, max_bytes=max_video_size)
+    if hit and video is not None:
+        return video
+    video = await _download_video(video_url, session, max_video_size, **kwargs)
+    if video is not None:
+        await immutable.keep_item(video_url, video)
+    return video
 
+
+async def _download_video(
+        video_url: str,
+        session: Union[aiohttp.ClientSession, "APIRequestContext"],
+        max_video_size: Optional[int] = None,
+        **kwargs
+) -> Optional[Video]:
     try:
         content_type = ''
         try:

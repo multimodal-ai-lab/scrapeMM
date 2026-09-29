@@ -5,49 +5,57 @@ and nothing else; the web UI edits the configured chain through the admin API.
 
 The model
 ---------
-The chain is an ordered list of *steps*, each a general retrieval method, in two stages:
+The chain is one ordered list of *steps*, each a general retrieval method, and each
+either a *live* method (it fetches the page as it is now) or an *archive* method (it
+gets a copy an archive captured):
 
-    live      integrations -> browser -> firecrawl -> decodo -> plain_http
-    archive   perma_cc -> wayback
+    integrations -> browser -> firecrawl -> decodo -> plain_http -> perma_cc -> wayback
+    (live .......................................................)  (archive ........)
 
-Order within a stage is configurable, and so is whether a step is used at all. The
-stages themselves are not: archives only ever run after every live method failed,
-because an archived copy may be years old while the live page is current. The saved
-chain is normalised accordingly (live steps first).
+The order is the order the engine follows, exactly as given: archive methods may come
+before live ones (to prefer an archived copy, say), though by default they come last,
+because an archived copy may be years old while the live page is current. Whether a step
+is used at all is configurable too.
+
+*Exceptions* (`retrieval_exceptions`, the former domain routes) fix the live methods for
+particular domains. See below.
 
 Semantics, as `resolve()` and the engine apply them
 ---------------------------------------------------
 * **Platform integrations come first for their domains.** The `integrations` step stands
   for "the site's own integration, if it has one" (X, TikTok, Telegram, YouTube, the
   archive services, ...). For a domain without one it is skipped.
-* **Domain routes override the live stage.** Some domains are known to work only (or
-  best) with particular methods -- `DOMAIN_ROUTES`: social platforms go to their
-  integration alone, washingtonpost.com straight to Decodo, and so on. For such a domain
-  the route replaces the configured live stage; steps switched off in the chain stay off
-  there too. The archive stage applies unchanged.
+* **Exceptions replace the live methods.** Some domains are known to work only (or best)
+  with particular methods: social platforms with their integration alone,
+  washingtonpost.com with Decodo, and so on. An exception names a domain pattern
+  ("example.com" for the domain and its subdomains, "*.example.com" for its subdomains
+  only; the most specific one wins) and the live methods to use. They take the place of
+  the chain's live methods, at the position of its first one; the chain's archive methods
+  keep theirs. Steps switched off in the chain stay off there too. Exceptions list live
+  methods only.
 * **Plain HTTP is for the open web.** It is skipped for domains that have an integration
   (a plain GET of a tweet or a TikTok page yields a login wall, never the content).
 * **Archived copies of platform URLs must carry the platform's content.** For a domain
   with its own integration, an archived copy counts only with at least one image or video
   -- a video, for video URLs (`VIDEO_URL`) -- and not if it shows a login or consent page:
   a captured Facebook login wall is no post. Otherwise the copy is rejected and the
-  integration's own verdict (unavailable, blocked, ...) stands. The archive stage of a
-  platform URL also has a time budget (`engine.PLATFORM_ARCHIVE_BUDGET`), so that it adds
-  seconds to a URL the platform already refused, not minutes.
+  integration's own verdict (unavailable, blocked, ...) stands. The archive methods of a
+  platform URL also share a time budget (`engine.PLATFORM_ARCHIVE_BUDGET`), so that they
+  add seconds to a URL the platform already refused, not minutes.
 * **Archive URLs are not looked up in archives.** For a URL of an archive service itself
-  (web.archive.org, perma.cc, archive.today, ...) the archive stage is skipped.
+  (web.archive.org, perma.cc, archive.today, ...) the archive methods are skipped.
 * **Outcomes.** The first method whose result passes the checks (not empty, no CAPTCHA,
   no paywall teaser, in the requested format) wins. A CAPTCHA, a paywall teaser or an
   error moves on to the next step. A page reported missing (HTTP 404/410) or a host that
-  is down ends the live stage at once -- the other live methods would find the same --
-  and goes straight to the archives. So does a domain behind a CAPTCHA that already waits
-  for a human. A host that refuses this server skips the methods fetching from here
-  (browser, Firecrawl when self-hosted, plain HTTP).
-* **Hedging** (`hedging_delay`, off by default) applies to the live stage: each live
-  method gets that head start before the next one runs alongside it. Archive steps run
-  strictly one after another, and only after the live stage.
-* **Explicit method lists** from a client bypass the chain: exactly the named methods run,
-  in the given order (live ones first, archives after), minus any switched off.
+  is down skips the remaining live methods -- they would find the same -- while the
+  archive methods still run. So does a domain behind a CAPTCHA that already waits for a
+  human. A host that refuses this server skips the methods fetching from here (browser,
+  Firecrawl when self-hosted, plain HTTP).
+* **Hedging** (`hedging_delay`, off by default) applies to consecutive live methods: each
+  gets that head start before the next one runs alongside it. Archive methods run
+  strictly one after another.
+* **Explicit method lists** from a client bypass the chain and the exceptions: exactly
+  the named methods run, in the given order, minus any switched off.
 
 Whether a step is switched on is kept where every method's switch lives (`toggles.py`,
 also flipped from the dashboard), so there is one switch per method. The chain config
@@ -177,6 +185,100 @@ DOMAIN_ROUTES: dict[str, list[str]] = {
     "youturn.in": ["decodo", "plain_http"],
 }
 
+EXCEPTIONS_KEY = "retrieval_exceptions"
+LIVE_KEYS = [m.key for m in METHODS if m.stage == LIVE]
+
+# A domain, or "*." and a domain (its subdomains only)
+PATTERN = re.compile(r"^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$")
+
+
+@dataclass
+class DomainRule:
+    pattern: str
+    methods: list[str]
+
+    def to_dict(self) -> dict:
+        return {"pattern": self.pattern, "methods": list(self.methods)}
+
+
+def default_exceptions() -> list[DomainRule]:
+    return [DomainRule(domain, list(methods)) for domain, methods in DOMAIN_ROUTES.items()]
+
+
+def configured_exceptions() -> list[DomainRule]:
+    """The saved exceptions, or the defaults if none were ever saved."""
+    saved = get_config_var(EXCEPTIONS_KEY)
+    if not isinstance(saved, list):
+        return default_exceptions()
+    try:
+        return validate_exceptions(saved)
+    except ValueError:
+        logger.warning("The saved retrieval exceptions are invalid; using the defaults.",
+                       exc_info=True)
+        return default_exceptions()
+
+
+def validate_exceptions(entries: list) -> list[DomainRule]:
+    """Checks and normalises `[{"pattern": ..., "methods": [...]}, ...]`. Raises
+    ValueError, naming the entry, on anything invalid."""
+    result, seen = [], set()
+    for i, entry in enumerate(entries, 1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"Exception {i} is not an object.")
+        pattern = str(entry.get("pattern") or "").strip().lower()
+        pattern = re.sub(r"^https?://", "", pattern).strip("/")
+        if pattern.startswith("www."):
+            pattern = pattern[4:]
+        if not PATTERN.match(pattern):
+            raise ValueError(f"Exception {i}: '{pattern or entry.get('pattern')}' is not a "
+                             f"domain (like example.com) or *.domain.")
+        if pattern in seen:
+            raise ValueError(f"Exception {i}: '{pattern}' appears twice.")
+        seen.add(pattern)
+        methods = []
+        for m in entry.get("methods") or []:
+            key = canonical(m)
+            if key not in LIVE_KEYS:
+                raise ValueError(f"Exception {i} ({pattern}): '{m}' is not a live method. "
+                                 f"Allowed: {', '.join(LIVE_KEYS)}.")
+            if key in methods:
+                raise ValueError(f"Exception {i} ({pattern}): '{key}' appears twice.")
+            methods.append(key)
+        if not methods:
+            raise ValueError(f"Exception {i} ({pattern}) names no method.")
+        result.append(DomainRule(pattern, methods))
+    return result
+
+
+def save_exceptions(entries: list) -> list[DomainRule]:
+    exceptions = validate_exceptions(entries)
+    update_config(**{EXCEPTIONS_KEY: [e.to_dict() for e in exceptions]})
+    logger.info(f"Retrieval exceptions set: {len(exceptions)} domain(s).")
+    return exceptions
+
+
+def reset_exceptions() -> list[DomainRule]:
+    return save_exceptions([e.to_dict() for e in default_exceptions()])
+
+
+def match_exception(host: str, exceptions: list[DomainRule]) -> Optional[DomainRule]:
+    """The most specific exception whose pattern covers `host`."""
+    host = (host or "").lower().rstrip(".")
+    if host.startswith("www."):  # www.example.com is example.com itself, not a subdomain
+        host = host[4:]
+    best = None
+    for e in exceptions:
+        if e.pattern.startswith("*."):
+            base = e.pattern[2:]
+            hit = host.endswith("." + base)
+        else:
+            base = e.pattern
+            hit = host == base or host.endswith("." + base)
+        if hit and (best is None or len(base) > len(best[0])):
+            best = (base, e)
+    return best[1] if best else None
+
+
 # Integrations whose URLs are archives themselves, which the archive stage skips
 ARCHIVE_INTEGRATIONS = {"internet archive", "perma.cc", "archive.today", "ghostarchive"}
 
@@ -236,8 +338,8 @@ class Step:
 
 
 def configured_order() -> list[str]:
-    """The saved order, validated: unknown entries dropped, missing ones added at the end
-    of their stage (so a method introduced by an update shows up), live before archive."""
+    """The saved order, validated: unknown entries dropped, missing ones added at their
+    default position (so a method introduced by an update shows up)."""
     saved = get_config_var(CONFIG_KEY)
     order = [canonical(m) for m in saved] if isinstance(saved, list) else []
     return normalize_order(order)
@@ -256,8 +358,7 @@ def normalize_order(order: list[str]) -> list[str]:
             predecessors = [cleaned.index(k) for k in DEFAULT_ORDER[:default_index] if k in cleaned]
             cleaned.insert(max(predecessors) + 1 if predecessors else 0, key)
             seen.add(key)
-    return ([k for k in cleaned if METHOD_INFO[k].stage == LIVE]
-            + [k for k in cleaned if METHOD_INFO[k].stage == ARCHIVE])
+    return cleaned
 
 
 def configured_chain() -> list[Step]:
@@ -302,14 +403,19 @@ class Plan:
     """What the engine does for one URL."""
     domain: str
     integrations: list[str] = field(default_factory=list)  # The domain's own integrations
-    route: Optional[list[str]] = None  # The domain route that replaced the live stage
-    live: list[str] = field(default_factory=list)  # Steps and integration names, in order
-    archive: list[str] = field(default_factory=list)
+    exception: Optional[DomainRule] = None  # The exception that replaced the live methods
+    order: list[str] = field(default_factory=list)  # What runs, in order: steps, integrations
+    live: list[str] = field(default_factory=list)  # The live ones of `order`, in order
+    archive: list[str] = field(default_factory=list)  # The archive ones, in order
     skipped: list[tuple[str, str]] = field(default_factory=list)  # (method, why)
 
     @property
     def methods(self) -> list[str]:
-        return self.live + self.archive
+        return list(self.order)
+
+    @property
+    def route(self) -> Optional[list[str]]:
+        return self.exception.methods if self.exception else None
 
     def to_dict(self) -> dict:
         def describe(key: str) -> dict:
@@ -318,17 +424,21 @@ class Plan:
                     "stage": info.stage if info else LIVE,
                     "integration": info is None}
         return {"domain": self.domain, "integrations": self.integrations,
-                "route": self.route,
+                "exception": self.exception.to_dict() if self.exception else None,
+                "route": self.route,  # Former name of the exception's methods
+                "steps": [describe(k) for k in self.order],
                 "live": [describe(k) for k in self.live],
                 "archive": [describe(k) for k in self.archive],
                 "skipped": [{**describe(k), "reason": why} for k, why in self.skipped]}
 
 
 def resolve(url: str, methods: Literal["auto"] | list[str] = "auto",
-            chain: Optional[list[dict]] = None) -> Plan:
-    """The methods to try for `url`, by stage. `methods` is "auto" (the configured chain)
-    or a client's explicit list. `chain` replaces the configured chain (the UI's preview of
-    unsaved changes)."""
+            chain: Optional[list[dict]] = None,
+            exceptions: Optional[list] = None) -> Plan:
+    """The methods to try for `url`, in order. `methods` is "auto" (the configured chain
+    and exceptions) or a client's explicit list. `chain` and `exceptions` replace the
+    configured ones (the UI's preview of unsaved changes)."""
+    from urllib.parse import urlsplit
     from .integrations import get_integrations_for_url
     from .util import get_domain
     from .download.util import looks_like_pdf_url
@@ -346,26 +456,47 @@ def resolve(url: str, methods: Literal["auto"] | list[str] = "auto",
         step_on = is_enabled
 
     if methods == "auto":
-        plan.route = DOMAIN_ROUTES.get(domain)
-        live = plan.route or [k for k in order if METHOD_INFO[k].stage == LIVE]
-        archive = [k for k in order if METHOD_INFO[k].stage == ARCHIVE]
-        if plan.route:
+        rules = (validate_exceptions(exceptions) if exceptions is not None
+                 else configured_exceptions())
+        try:
+            host = urlsplit(url).hostname or domain
+        except ValueError:
+            host = domain
+        plan.exception = match_exception(host, rules)
+        if plan.exception:
+            # Its methods take the place of the chain's live ones, at the first one's
+            replaced, placed = [], False
             for key in order:
-                if METHOD_INFO[key].stage == LIVE and key not in plan.route:
-                    plan.skipped.append((key, f"{domain} is routed to "
-                                              f"{', '.join(_names(plan.route))}"))
+                if METHOD_INFO[key].stage == ARCHIVE:
+                    replaced.append(key)
+                elif not placed:
+                    replaced += plan.exception.methods
+                    placed = True
+            for key in order:
+                if METHOD_INFO[key].stage == LIVE and key not in plan.exception.methods:
+                    plan.skipped.append((key, f"the exception for {plan.exception.pattern} "
+                                              f"uses {', '.join(_names(plan.exception.methods))}"))
+            order = replaced
     else:
-        requested = [canonical(m) for m in methods]
-        live = [m for m in requested if METHOD_INFO.get(m, None) is None
-                or METHOD_INFO[m].stage == LIVE]
-        archive = [m for m in requested if m in METHOD_INFO and METHOD_INFO[m].stage == ARCHIVE]
+        order = [canonical(m) for m in methods]
 
-    for key in live:
+    for key in order:
         info = METHOD_INFO.get(key)
         if info is None:  # An integration named explicitly
             _add_integration(plan, key)
         elif not step_on(key):
             plan.skipped.append((key, "switched off"))
+        elif info.stage == ARCHIVE:
+            if not info.available:
+                plan.skipped.append((key, "not available yet"))
+            elif archive_url:
+                plan.skipped.append((key, "the URL is an archive itself"))
+            elif key == "wayback" and not is_enabled("Internet Archive"):
+                plan.skipped.append((key, "needs the Internet Archive integration, which is off"))
+            elif key == "perma_cc" and not is_enabled("Perma.cc"):
+                plan.skipped.append((key, "needs the Perma.cc integration, which is off"))
+            else:
+                plan.order.append(key)
         elif key == "integrations":
             if not plan.integrations:
                 plan.skipped.append((key, f"no integration for {domain or 'this URL'}"))
@@ -376,28 +507,22 @@ def resolve(url: str, methods: Literal["auto"] | list[str] = "auto",
         elif key == "browser" and looks_like_pdf_url(url):
             plan.skipped.append((key, "cannot extract a PDF's text"))
         else:
-            plan.live.append(key)
-
-    for key in archive:
-        info = METHOD_INFO[key]
-        if not step_on(key):
-            plan.skipped.append((key, "switched off"))
-        elif not info.available:
-            plan.skipped.append((key, "not available yet"))
-        elif archive_url:
-            plan.skipped.append((key, "the URL is an archive itself"))
-        elif key == "wayback" and not is_enabled("Internet Archive"):
-            plan.skipped.append((key, "needs the Internet Archive integration, which is off"))
-        elif key == "perma_cc" and not is_enabled("Perma.cc"):
-            plan.skipped.append((key, "needs the Perma.cc integration, which is off"))
-        else:
-            plan.archive.append(key)
+            plan.order.append(key)
+    plan.live = [k for k in plan.order if stage_of(k) == LIVE]
+    plan.archive = [k for k in plan.order if stage_of(k) == ARCHIVE]
     return plan
+
+
+def stage_of(key: str) -> Stage:
+    """A step's stage; an integration is a live method."""
+    info = METHOD_INFO.get(key)
+    return info.stage if info else LIVE
 
 
 def _add_integration(plan: Plan, name: str) -> None:
     if is_enabled(name):
-        plan.live.append(name)
+        if name not in plan.order:
+            plan.order.append(name)
     else:
         plan.skipped.append((name, "switched off"))
 

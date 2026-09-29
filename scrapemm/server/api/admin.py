@@ -18,7 +18,7 @@ from scrapemm.common.paths import APP_NAME
 from .. import registry, status as status_module
 from ..auth import api_key_from_environment, regenerate_api_key, require_api_key
 from ..blacklist import blacklist
-from ..cache import cache
+from ..cache import cache, immutable, KINDS
 from ..config import SETTINGS, get_config, update_config
 from ..jobs import SORTS, jobs
 from ..toggles import set_enabled
@@ -268,14 +268,47 @@ async def remove_from_blacklist(domain: str) -> dict:
 
 @router.get("/cache")
 async def read_cache() -> dict:
-    return {"entries": len(cache), "ttl": cache.ttl}
+    """Live figures and the settings: entries, size_mb, enabled, ttl, max_entries, max_mb."""
+    return cache.stats()
+
+
+class CacheConfig(BaseModel):
+    enabled: Optional[bool] = None
+    ttl: Optional[float] = None  # Seconds an entry lives; 0 disables the cache
+    max_entries: Optional[int] = None
+    max_mb: Optional[float] = None  # Text held in memory, in MB
+    immutable_max_mb: Optional[float] = None  # The permanent tier on disk, in MB
+
+
+@router.put("/cache/config")
+async def configure_cache(body: CacheConfig) -> dict:
+    """Changes the cache's settings; they apply at once, with no restart."""
+    if body.ttl is not None and body.ttl < 0:
+        raise HTTPException(status_code=400, detail="The lifetime cannot be negative.")
+    if body.max_entries is not None and not 1 <= body.max_entries <= 1_000_000:
+        raise HTTPException(status_code=400, detail="Max entries must be between 1 and 1,000,000.")
+    if body.max_mb is not None and not 1 <= body.max_mb <= 64 * 1024:
+        raise HTTPException(status_code=400, detail="Max size must be between 1 MB and 64 GB.")
+    if body.immutable_max_mb is not None and not 1 <= body.immutable_max_mb <= 1024 * 1024:
+        raise HTTPException(status_code=400,
+                            detail="The permanent cache's size must be between 1 MB and 1 TB.")
+    changes = {name: value for name, value in (
+        ("cache_enabled", body.enabled), ("cache_ttl", body.ttl),
+        ("cache_max_entries", body.max_entries), ("cache_max_mb", body.max_mb),
+        ("cache_immutable_max_mb", body.immutable_max_mb))
+        if value is not None}
+    update_config(**changes)  # Applies them to the cache, see `config._apply_config()`
+    return cache.stats()
 
 
 @router.post("/cache/clear")
-async def clear_the_cache() -> dict:
+async def clear_the_cache(tier: str = Query(default="recent", pattern="^(recent|all)$")) -> dict:
+    """Empties the recent tier; with `tier=all`, the permanent one too -- which holds
+    Archive.today pages that cannot be retrieved again without solving its CAPTCHA."""
     entries = len(cache)
     cache.clear()
-    return {"cleared": entries}
+    permanent = await asyncio.to_thread(immutable.clear, KINDS) if tier == "all" else 0
+    return {"cleared": entries, "cleared_permanent": permanent}
 
 
 # --- Job history ------------------------------------------------------------------

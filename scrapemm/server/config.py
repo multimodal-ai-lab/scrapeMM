@@ -14,7 +14,8 @@ import yaml
 from scrapemm.common.paths import APP_NAME
 from .paths import CONFIG_PATH
 from .blacklist import set_blacklist_ttl, DEFAULT_BLACKLIST_TTL
-from .cache import set_cache_ttl, DEFAULT_CACHE_TTL
+from .cache import (cache, immutable, DEFAULT_CACHE_TTL, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_MB,
+                    DEFAULT_IMMUTABLE_MAX_MB)
 
 logger = logging.getLogger(APP_NAME)
 
@@ -25,6 +26,10 @@ SETTINGS: dict[str, type] = {
     "firecrawl_urls": list,
     "hedging_delay": float,
     "cache_ttl": float,
+    "cache_enabled": bool,
+    "cache_max_entries": int,
+    "cache_max_mb": float,
+    "cache_immutable_max_mb": float,  # The permanent tier, on disk
     "blacklist_ttl": float,
     "archive_today_interactive_solve": bool,
     "archive_today_screenshot_fallback": bool,
@@ -62,9 +67,18 @@ def get_config() -> dict:
     return dict(_config)
 
 
+def _or_default(value, default):
+    return default if value is None else value
+
+
 def _apply_config():
     """Applies the config values that configure runtime behavior."""
-    set_cache_ttl(get_config_var("cache_ttl", DEFAULT_CACHE_TTL))
+    cache.configure(enabled=get_config_var("cache_enabled", True),
+                    ttl=_or_default(get_config_var("cache_ttl"), DEFAULT_CACHE_TTL),
+                    max_entries=_or_default(get_config_var("cache_max_entries"), DEFAULT_MAX_ENTRIES),
+                    max_mb=_or_default(get_config_var("cache_max_mb"), DEFAULT_MAX_MB))
+    immutable.configure(max_mb=_or_default(get_config_var("cache_immutable_max_mb"),
+                                           DEFAULT_IMMUTABLE_MAX_MB))
     set_blacklist_ttl(get_config_var("blacklist_ttl", DEFAULT_BLACKLIST_TTL))
 
 

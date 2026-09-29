@@ -330,7 +330,7 @@ async def _retrieve_single(
             f"the server's web UI to allow it again.")
         return _failure(url, output_format, dict(scrapemm=e), start_time)
 
-    # The retrieval chain's plan for this URL: the live methods, then the archives
+    # The retrieval chain's plan for this URL: its methods in order, live and archive
     plan = chain.resolve(url, methods)
     methods: list[str] = [chain.label(m) for m in plan.live]
     archives: list[str] = plan.archive
@@ -348,7 +348,7 @@ async def _retrieve_single(
         return _failure(url, output_format, dict(scrapeMM=e), start_time)
 
     # Re-use a recent, successful retrieval of the same URL, if there is any
-    key = cache_key(url, output_format, methods + [chain.label(a) for a in archives],
+    key = cache_key(url, output_format, [chain.label(m) for m in plan.order],
                     max_video_size)
     if use_cache:
         cached = cache.get(key)
@@ -463,38 +463,53 @@ async def _retrieve_single(
         # seconds. In a thread, the loop keeps getting its turns.
         return await run_light(_classify, url, method_name, content, output_format)
 
-    # The live stage, hedged if so configured
-    if not methods:
-        winner, errors, partial = None, {}, None
-    elif hedging_delay and hedging_delay > 0 and len(methods) > 1:
-        winner, errors, partial = await _run_methods_hedged(methods, evaluate, hedging_delay,
-                                                            output_format)
-    else:
-        winner, errors, partial = await _run_methods_sequentially(methods, evaluate, output_format)
+    # The chain in its order: consecutive live methods as one group (hedged if so
+    # configured), archive methods one after another, until one gets the page
+    winner, errors, partial = None, {}, None
+    live_over = False  # A live method found the page missing: the others would too
+    segments = _segments(plan.order)
+    last_live = max((i for i, (stage, _) in enumerate(segments) if stage == chain.LIVE),
+                    default=-1)
+    archive_deadline = _archive_deadline(url)
+    for i, (stage, keys) in enumerate(segments):
+        if stage == chain.ARCHIVE:
+            winner = await _run_archives(keys, url, session, errors, output_format,
+                                         max_video_size, deadline=archive_deadline)
+        else:
+            group = [chain.label(k) for k in keys if chain.label(k) in methods]
+            if group and not live_over:
+                if hedging_delay and hedging_delay > 0 and len(group) > 1:
+                    winner, found, part = await _run_methods_hedged(group, evaluate,
+                                                                    hedging_delay, output_format)
+                else:
+                    winner, found, part = await _run_methods_sequentially(group, evaluate,
+                                                                          output_format)
+                errors.update(found)
+                partial = partial or part
+                live_over = any(isinstance(e, TargetUnavailableError) for e in found.values())
+            # The browser also steps in for a Cloudflare-challenged page routed to other
+            # methods, once the last live method failed
+            if (winner is None and i == last_live and unreachable is None and methods
+                    and BROWSER not in methods
+                    and (content := await _cloudflare_fallback(url, domain, session, errors,
+                                                               output_format, max_video_size))):
+                winner = (BROWSER, content)
+        if winner is not None:
+            break
 
     if unreachable:
         for m in skipped:
             errors[m] = TargetUnavailableError(f"Skipped: {unreachable}")
-        if winner is None and all(isinstance(e, (TimeoutError, asyncio.TimeoutError,
-                                                  aiohttp.ClientConnectorError))
-                                  for m, e in errors.items() if m not in skipped):
+        tried = [errors[m] for m in methods if m in errors]
+        if winner is None and tried and all(isinstance(e, (TimeoutError, asyncio.TimeoutError,
+                                                            aiohttp.ClientConnectorError))
+                                            for e in tried):
             # Nobody got through from elsewhere either: the host is down. Its other
             # URLs need not try again.
             reachability.mark_dead(url, f"{unreachable} Remote services timed out on it too.")
 
-    # The browser also steps in for a Cloudflare-challenged page routed to other methods
-    if (unreachable is None and winner is None and methods and BROWSER not in methods
-            and (content := await _cloudflare_fallback(url, domain, session, errors,
-                                                       output_format, max_video_size))):
-        winner = (BROWSER, content)
-
     if winner is not None:
         return await _success(url, key, *winner, errors, output_format, start_time)
-
-    # The archive stage: only now that no live method got the page
-    if archived := await _run_archives(archives, url, session, errors, output_format,
-                                       max_video_size):
-        return await _success(url, key, *archived, errors, output_format, start_time)
 
     # All methods failed
     logger.warning(f"All retrieval methods failed for URL: {url}")
@@ -629,15 +644,38 @@ async def _last_resort(url: str, key, session: aiohttp.ClientSession,
 ARCHIVE_ORG = "Internet Archive"
 
 
+def _segments(order: list[str]) -> list[tuple[str, list[str]]]:
+    """The plan's methods as runs of the same stage, in order:
+    [browser, decodo, wayback, plain_http] -> [(live, [browser, decodo]), (archive,
+    [wayback]), (live, [plain_http])]."""
+    segments: list[tuple[str, list[str]]] = []
+    for key in order:
+        stage = chain.stage_of(key)
+        if segments and segments[-1][0] == stage:
+            segments[-1][1].append(key)
+        else:
+            segments.append((stage, [key]))
+    return segments
+
+
+def _archive_deadline(url: str) -> Optional[float]:
+    """When the archive methods of a platform URL must be done, all together (see
+    PLATFORM_ARCHIVE_BUDGET); None for the open web."""
+    return time.monotonic() + PLATFORM_ARCHIVE_BUDGET if chain.platform_of(url) else None
+
+
 async def _run_archives(archives: list[str], url: str, session: aiohttp.ClientSession,
                         errors: dict, output_format: OutputFormat,
-                        max_video_size: Optional[int]) -> Optional[tuple[str, ScrapedContent]]:
-    """The chain's archive stage: each archive method in turn, strictly one after another,
-    until one yields the page. Returns (method label, content), or None; failures are
-    filed into `errors`. Each outcome is judged like a live method's, so an archived
-    CAPTCHA or paywall teaser does not count either."""
+                        max_video_size: Optional[int],
+                        deadline: Optional[float] | str = "new") -> Optional[tuple[str, ScrapedContent]]:
+    """Archive methods, strictly one after another, until one yields the page. Returns
+    (method label, content), or None; failures are filed into `errors`. Each outcome is
+    judged like a live method's, so an archived CAPTCHA or paywall teaser does not count
+    either. `deadline` is the platform budget's end (shared by all archive methods of a
+    retrieval), by default one starting now."""
     platform = chain.platform_of(url)
-    deadline = time.monotonic() + PLATFORM_ARCHIVE_BUDGET if platform else None
+    if deadline == "new":
+        deadline = _archive_deadline(url)
     for key in archives:
         name = chain.label(key)
         if key == "wayback":
