@@ -20,6 +20,7 @@ This project is being developed by the [Multimodal AI Lab at TU Darmstadt](https
   - [🦭 Running under Podman](#-running-under-podman)
 - [🐍 Using the client](#-using-the-client)
   - [🖼️ Media on one machine is never copied](#-media-on-one-machine-is-never-copied)
+- [🔎 Web search](#-web-search)
 - [🖥️ The web UI](#-the-web-ui)
 - [⚡ Caching](#-caching)
 - [🤖 CAPTCHAs and blacklisted domains](#-captchas-and-blacklisted-domains)
@@ -178,12 +179,55 @@ when you want files that outlive the server's.
 deletes media on its own, precisely so that those references keep working; prune it
 yourself when you decide to, and expect older sequences to lose their media when you do.
 
+## 🔎 Web search
+
+scrapeMM can also *find* pages. Search APIs differ in their parameters and results, so each
+provider has its own query and response classes that mirror its API; the query you build picks
+the provider. Set the provider's key under **Secrets** in the web UI (Serper: `serper_api_key`).
+
+```python
+import asyncio, scrapemm
+from scrapemm.search import SerperQuery, search
+
+r = asyncio.run(search(SerperQuery(q="eiffel tower", type="images", num=20)))
+print(r.images[0].image_url)                     # Serper's own fields, typed
+pages = asyncio.run(scrapemm.retrieve(r.urls))   # every provider: the result pages
+```
+
+**Serper** (Google results) takes its own parameters (`q`, `type` = `"search"` or `"images"`,
+`gl`, `hl`, `location`, `num`, `page`, `tbs`, `autocorrect`) plus two of scrapeMM's:
+
+- `before="2024-05-01"`: only results from before that day, which is itself left out (not
+  combinable with a `qdr:` time filter in `tbs`)
+- `exclude_sites=["snopes.com"]`: leaves those sites and their subdomains out, so a page may
+  hold fewer than `num` results
+
+`SerperResponse` mirrors Serper's JSON in snake case (`organic`, `images`, `answer_box`,
+`knowledge_graph`, …); fields it does not know land in `extra`. Failures arrive as `ValueError`,
+`RateLimitError`, `QuotaExceededError`, `TimeoutError` or `ServerError`.
+
+Over HTTP, `GET /v1/search` lists the providers and each has its own route:
+
+```bash
+curl -X POST http://localhost:8080/v1/search/serper -H "Authorization: Bearer $SCRAPEMM_API_KEY" \
+     -H "Content-Type: application/json" -d '{"q": "eiffel tower", "num": 5}'
+```
+
+At most 10 searches reach a provider at once (**Max concurrent searches** under Settings); more
+wait their turn. Searches are not recorded as jobs.
+
+**Adding a provider:** its query and response classes in `scrapemm/search/<provider>.py`, its
+API calls in `scrapemm/server/search/<provider>.py`, an entry in `SEARCH_PROVIDERS` (which gives
+it its route and dashboard card), its key in `SECRETS`, and for the UI a component in
+`ui/app/components/search/`, listed in `ui/app/pages/playground/search.vue`.
+
 ## 🖥️ The web UI
 
 | Page | What it is for |
 |---|---|
 | **Dashboard** | Whether each retrieval method can be used right now, and which secret it is missing if not. Plus FFmpeg, the browser and disk usage. |
-| **Playground** | Try URLs and watch the results stream in, rendered with their media. |
+| **Playground › Retrieval** | Try URLs and watch the results stream in, rendered with their media. |
+| **Playground › Search** | Search the web or for images through a search provider, and send any result on to Retrieval. |
 | **Jobs** | Every retrieval this server has run, with per-URL outcomes and the content it produced. |
 | **CAPTCHA** | One challenge per gated site with its waiting URLs: solve it in the server's browser, or discard it. |
 | **Secrets** | Set the API credentials. Write-only: the server never gives a value back. |
@@ -191,7 +235,8 @@ yourself when you decide to, and expect older sequences to lose their media when
 
 Every card on the dashboard carries its own status colour and names the missing secrets
 as chips you can go and fill in. The Browser, Firecrawl and Decodo get cards too, even though
-they are general retrieval methods rather than per-platform integrations, and each card counts
+they are general retrieval methods rather than per-platform integrations, and so does each
+search provider (Serper), and each card counts
 the URLs it has retrieved.
 
 | Colour | Means |

@@ -38,6 +38,7 @@ SETTINGS: dict[str, type] = {
     "browser_user_agent": str,
     "max_concurrency": int,
     "max_browser_pages": int,
+    "max_search_concurrency": int,
     "disabled_methods": list,
     "youtube_min_interval": float,
     "youtube_cooldown": float,

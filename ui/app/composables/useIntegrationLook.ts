@@ -80,8 +80,8 @@ export const TONES: Record<string, {
 
 /**
  * The icon for each method, by its lower-case key. Font Awesome carries brand marks for
- * the platforms, which read faster than any generic glyph; the archives and the general
- * scrapers fall back to solid icons that say what they do.
+ * the platforms, which read faster than any generic glyph; the archives, the general
+ * scrapers and the search providers fall back to solid icons that say what they do.
  */
 const ICONS: Record<string, string> = {
   'x (twitter)': 'i-fa7-brands-x-twitter',
@@ -102,6 +102,7 @@ const ICONS: Record<string, string> = {
   'browser': 'i-fa7-solid-window-maximize',
   'firecrawl': 'i-fa7-solid-fire',
   'decodo': 'i-fa7-solid-tower-broadcast',
+  'serper': 'i-fa7-solid-magnifying-glass',
 }
 
 export function integrationIcon(key: string): string {

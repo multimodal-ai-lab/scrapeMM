@@ -5,6 +5,7 @@ admin endpoints, and reaching out to the actual web would only make these flaky.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -15,6 +16,7 @@ import httpx  # noqa: E402
 
 from scrapemm.common import ScrapedContent, ScrapingResponse  # noqa: E402
 from scrapemm.common.exceptions import (CaptchaEncounteredError,  # noqa: E402
+                                        QuotaExceededError, RateLimitError,
                                         RetrievalFailed)
 
 pytestmark = pytest.mark.server
@@ -233,3 +235,207 @@ async def test_retrieve_records_a_job(client, stub_engine):
     assert job["succeeded"] == 1
     assert job["results"][0]["url"] == "https://example.com/recorded"
     assert job["results"][0]["content"]["markdown"] == "# Hi"
+
+
+# --- Search -----------------------------------------------------------------------
+
+SERPER_SAMPLE = json.loads(
+    (Path(__file__).parent / "data" / "serper_search.json").read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+async def serper_key(client):
+    """Serper configured the way a user would: through the Secrets API."""
+    await client.put("/v1/secrets/serper_api_key", headers=AUTH, json={"value": "sk-test"})
+    yield
+    await client.delete("/v1/secrets/serper_api_key", headers=AUTH)
+
+
+class SerperStub:
+    """Stands in for Serper's API: records each call and answers with `answer`, or
+    raises it if it is an exception."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+        self.answer: dict | Exception = SERPER_SAMPLE
+
+    async def call(self, path: str, body: dict) -> dict:
+        self.calls.append((path, body))
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+@pytest.fixture
+def stub_serper(monkeypatch):
+    from scrapemm.server.search.serper import Serper
+
+    stub = SerperStub()
+
+    async def fake(self, path, body, session):
+        return await stub.call(path, body)
+
+    monkeypatch.setattr(Serper, "_call", fake)
+    return stub
+
+
+async def test_search_lists_its_providers(client):
+    response = await client.get("/v1/search", headers=AUTH)
+    assert response.status_code == 200
+    serper = next(p for p in response.json()["providers"] if p["name"] == "serper")
+    assert serper["configured"] is False
+    assert serper["missing_secrets"] == ["serper_api_key"]
+
+
+async def test_search_requires_the_key(client):
+    response = await client.post("/v1/search/serper", json={"q": "x"})
+    assert response.status_code == 401
+
+
+async def test_search_with_an_unknown_provider_is_404(client):
+    response = await client.post("/v1/search/nope", headers=AUTH, json={"q": "x"})
+    assert response.status_code == 404
+    assert isinstance(response.json()["detail"], str)
+    assert "serper" in response.json()["detail"]
+    assert response.json()["error"]["type"] == "ValueError"
+
+
+async def test_search_without_the_providers_key_says_so(client, stub_serper):
+    response = await client.post("/v1/search/serper", headers=AUTH, json={"q": "x"})
+    assert response.status_code == 503
+    assert "serper_api_key" in response.json()["detail"]
+    assert stub_serper.calls == []
+
+
+@pytest.mark.parametrize("body", [{"q": "x", "type": "videos"}, {"num": 5},
+                                  {"q": "x", "num": "many"}])
+async def test_search_rejects_a_malformed_query(client, body):
+    response = await client.post("/v1/search/serper", headers=AUTH, json=body)
+    assert response.status_code == 422
+
+
+async def test_search_rejects_an_invalid_query(client, serper_key, stub_serper):
+    response = await client.post("/v1/search/serper", headers=AUTH, json={"q": "x", "num": 0})
+    assert response.status_code == 400
+    assert "between 1 and 100" in response.json()["detail"]
+    assert stub_serper.calls == []
+
+
+async def test_search_answers_in_the_providers_own_format(client, serper_key, stub_serper):
+    response = await client.post("/v1/search/serper", headers=AUTH,
+                                 json={"q": "apple inc", "type": "search", "gl": "us"})
+    assert response.status_code == 200
+    assert response.json() == SERPER_SAMPLE
+    assert stub_serper.calls == [("/search", {"q": "apple inc", "gl": "us"})]
+
+
+@pytest.mark.parametrize("raised, status", [
+    (RateLimitError("slow down"), 429),
+    (QuotaExceededError("no credits"), 402),
+    (TimeoutError("too slow"), 504),
+    (ValueError("bad query"), 400),
+    (RuntimeError("Serper rejected the API key"), 502),
+    (KeyError("a bug"), 500),
+])
+async def test_search_failures_keep_their_meaning(client, serper_key, stub_serper,
+                                                  raised, status):
+    stub_serper.answer = raised
+    response = await client.post("/v1/search/serper", headers=AUTH, json={"q": "x"})
+    assert response.status_code == status
+    assert isinstance(response.json()["detail"], str)
+    assert response.json()["error"]["type"] == type(raised).__name__
+
+
+async def test_a_rejected_provider_key_does_not_look_like_a_rejected_api_key(
+        client, serper_key, stub_serper):
+    """The UI signs out on a 401, which would be the wrong key to blame."""
+    stub_serper.answer = RuntimeError("Serper rejected the API key (403).")
+    response = await client.post("/v1/search/serper", headers=AUTH, json={"q": "x"})
+    assert response.status_code != 401
+
+
+async def test_a_search_is_no_job(client, serper_key, stub_serper):
+    before = (await client.get("/v1/jobs", headers=AUTH)).json()["total"]
+    await client.post("/v1/search/serper", headers=AUTH, json={"q": "x"})
+    assert (await client.get("/v1/jobs", headers=AUTH)).json()["total"] == before
+
+
+async def test_a_search_key_refreshes_only_its_own_card(client, monkeypatch):
+    """Changing a secret re-probes the cards it affects, and not every integration."""
+    from scrapemm.server import status
+
+    monkeypatch.setitem(status._cache, "youtube", "cached status")
+    monkeypatch.setitem(status._cache, "serper", "cached status")
+    await client.put("/v1/secrets/serper_api_key", headers=AUTH, json={"value": "sk"})
+    assert "serper" not in status._cache
+    await client.delete("/v1/secrets/serper_api_key", headers=AUTH)
+    assert status._cache.get("youtube") == "cached status"
+
+
+async def test_a_secret_no_card_uses_leaves_the_dashboard_alone(client, monkeypatch):
+    """`invalidate()` with no names means "everything"; an empty list of affected cards
+    must not end up there."""
+    from scrapemm.server import status
+    from scrapemm.server.api import admin
+
+    monkeypatch.setattr(admin.status_module, "secrets_to_integrations", lambda name: [])
+    monkeypatch.setitem(status._cache, "youtube", "cached status")
+    await client.put("/v1/secrets/serper_api_key", headers=AUTH, json={"value": "sk"})
+    await client.delete("/v1/secrets/serper_api_key", headers=AUTH)
+    assert status._cache.get("youtube") == "cached status"
+
+
+async def test_a_search_provider_disabled_on_the_dashboard_refuses(client, serper_key,
+                                                                    stub_serper):
+    toggled = await client.put("/v1/integrations/serper/enabled", headers=AUTH,
+                               json={"enabled": False})
+    assert toggled.status_code == 200
+    assert toggled.json()["state"] == "disabled"
+    try:
+        listed = (await client.get("/v1/search", headers=AUTH)).json()["providers"]
+        assert next(p for p in listed if p["name"] == "serper")["enabled"] is False
+        response = await client.post("/v1/search/serper", headers=AUTH, json={"q": "x"})
+        assert response.status_code == 503
+        assert "disabled" in response.json()["detail"]
+        assert stub_serper.calls == []
+    finally:
+        await client.put("/v1/integrations/serper/enabled", headers=AUTH,
+                         json={"enabled": True})
+
+
+async def test_search_passes_before_on_as_a_date_range(client, serper_key, stub_serper):
+    response = await client.post("/v1/search/serper", headers=AUTH,
+                                 json={"q": "x", "before": "2024-05-01"})
+    assert response.status_code == 200
+    assert stub_serper.calls == [
+        ("/search", {"q": "x", "tbs": "cdr:1,cd_min:1/1/1900,cd_max:4/30/2024"})]
+
+
+@pytest.mark.parametrize("body, status", [
+    ({"q": "x", "before": "2024-13-01"}, 422),
+    ({"q": "x", "before": "2024-05-01", "tbs": "qdr:w"}, 400),
+])
+async def test_search_refuses_a_before_it_cannot_use(client, serper_key, stub_serper,
+                                                    body, status):
+    response = await client.post("/v1/search/serper", headers=AUTH, json=body)
+    assert response.status_code == status
+    assert stub_serper.calls == []
+
+
+async def test_search_leaves_out_excluded_sites(client, serper_key, stub_serper):
+    response = await client.post("/v1/search/serper", headers=AUTH, json={
+        "q": "apple inc", "exclude_sites": ["wikipedia.org", "https://finance.yahoo.com/"]})
+    assert response.status_code == 200
+    assert stub_serper.calls == [
+        ("/search", {"q": "apple inc -site:wikipedia.org -site:finance.yahoo.com"})]
+    links = [r["link"] for r in response.json()["organic"]]
+    assert links == ["https://www.apple.com/"]
+    assert "answerBox" not in response.json()
+
+
+async def test_search_refuses_an_excluded_site_that_is_no_domain(client, serper_key,
+                                                                stub_serper):
+    response = await client.post("/v1/search/serper", headers=AUTH,
+                                 json={"q": "x", "exclude_sites": ["not a domain"]})
+    assert response.status_code == 400
+    assert stub_serper.calls == []

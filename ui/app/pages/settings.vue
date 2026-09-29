@@ -15,6 +15,7 @@ interface RetrievalForm {
   firecrawl_urls: string
   max_concurrency: string
   max_browser_pages: string
+  max_search_concurrency: string
   youtube_min_interval: string
   youtube_cooldown: string
   blacklist_ttl: string
@@ -22,8 +23,8 @@ interface RetrievalForm {
   archive_today_screenshot_fallback: boolean
 }
 
-const NUMBERS = ['max_concurrency', 'max_browser_pages', 'youtube_min_interval',
-  'youtube_cooldown', 'blacklist_ttl'] as const
+const NUMBERS = ['max_concurrency', 'max_browser_pages', 'max_search_concurrency',
+  'youtube_min_interval', 'youtube_cooldown', 'blacklist_ttl'] as const
 
 const retrievalSaved = ref<RetrievalForm | null>(null)
 const retrieval = ref<RetrievalForm | null>(null)
@@ -34,6 +35,7 @@ function toForm(config: Record<string, any>): RetrievalForm {
     firecrawl_urls: (config.firecrawl_urls || []).join('\n'),
     max_concurrency: text(config.max_concurrency),
     max_browser_pages: text(config.max_browser_pages),
+    max_search_concurrency: text(config.max_search_concurrency),
     youtube_min_interval: text(config.youtube_min_interval),
     youtube_cooldown: text(config.youtube_cooldown),
     blacklist_ttl: text(config.blacklist_ttl),
@@ -241,6 +243,12 @@ onBeforeUnmount(() => clearInterval(statsTimer))
             description="Retrievals in the server's browser (the Browser method, the archives) at once; more wait. Lower it if the server runs short of memory."
           >
             <UInput v-model="retrieval.max_browser_pages" type="number" min="1" placeholder="32 (default)" />
+          </UFormField>
+          <UFormField
+            label="Max concurrent searches"
+            description="Searches with a search provider at once, across all clients; more wait. Keeps bursts within the provider's rate limit."
+          >
+            <UInput v-model="retrieval.max_search_concurrency" type="number" min="1" placeholder="10 (default)" />
           </UFormField>
           <UFormField
             label="YouTube pace (s)"

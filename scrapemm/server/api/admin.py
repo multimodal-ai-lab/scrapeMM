@@ -165,8 +165,7 @@ async def put_secret(name: str, body: SecretValue) -> dict:
         raise HTTPException(status_code=400, detail="The value must not be empty.")
 
     set_secret(name, body.value.strip())
-    # The dashboard should show the effect at once, not after the status TTL lapses
-    status_module.invalidate(*status_module.secrets_to_integrations(name))
+    _refresh_dashboard(name)
     logger.info(f"Secret '{name}' was set through the API.")
     return {"name": name, "is_set": True}
 
@@ -176,8 +175,17 @@ async def delete_secret(name: str) -> dict:
     if name not in SECRETS:
         raise HTTPException(status_code=404, detail=f"Unknown secret '{name}'.")
     removed = remove_secret(name)
-    status_module.invalidate(*status_module.secrets_to_integrations(name))
+    _refresh_dashboard(name)
     return {"name": name, "removed": removed, "is_set": False}
+
+
+def _refresh_dashboard(secret_name: str) -> None:
+    """Re-probes the cards a changed secret affects, so the dashboard shows the effect
+    at once rather than after the status TTL lapses. A secret no card uses, like a
+    search provider's key, affects nothing -- and must not reach `invalidate()` with no
+    names, which means "everything" and would re-probe every integration."""
+    if affected := status_module.secrets_to_integrations(secret_name):
+        status_module.invalidate(*affected)
 
 
 @router.post("/secrets/rotate-key")

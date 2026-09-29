@@ -7,8 +7,9 @@ why it failed if it did, and names the secrets that are missing -- the dashboard
 is to turn "Instagram doesn't work" into "Instagram needs instagram_cookie".
 
 The Browser, Firecrawl and Decodo are not integrations (they are general retrieval
-methods), but from a dashboard's point of view they are the same kind of thing: something
-that either works or needs configuring. They get cards here too.
+methods), and the search providers retrieve nothing at all, but from a dashboard's point
+of view they are the same kind of thing: something that either works or needs
+configuring. They get cards here too.
 
 Statuses are cached for STATUS_TTL, because connecting costs real API calls.
 """
@@ -29,6 +30,7 @@ from .blacklist import blacklist
 from .cache import cache
 from .environment import ffmpeg_available, ffprobe_available
 from .jobs import jobs
+from .search import SEARCH_PROVIDERS
 from .secrets import is_set
 from .toggles import is_enabled, resolve_alias
 from .workers import run_light
@@ -74,8 +76,15 @@ OPTIONAL_SECRETS: dict[str, tuple[str, ...]] = {
     "instagram": ("instagram_cookie",),
 }
 
+# The search providers declare their own secrets; repeating them here could only drift
+REQUIRED_SECRETS.update({provider.name: provider.secret_names
+                         for provider in SEARCH_PROVIDERS})
+
 # The general retrieval methods, which are not tied to a platform like the integrations
 METHOD_KEYS = ("browser", "firecrawl", "decodo")
+
+# The search providers (see `scrapemm.server.search`), keyed by the name in their route
+SEARCH_KEYS = tuple(provider.name for provider in SEARCH_PROVIDERS)
 
 # The states a card can be in, which is also the colour it gets in the UI
 READY, UNCONFIGURED, ERROR, DISABLED = "ready", "unconfigured", "error", "disabled"
@@ -90,7 +99,7 @@ GATED = "gated"
 class IntegrationStatus:
     name: str
     key: str = ""  # Stable lower-case id, used by the API and the UI
-    kind: str = "integration"  # "integration" or "method"
+    kind: str = "integration"  # "integration", "method" or "search"
     domains: list[str] = field(default_factory=list)
     required_secrets: list[str] = field(default_factory=list)
     missing_secrets: list[str] = field(default_factory=list)
@@ -158,6 +167,9 @@ def all_methods() -> list[dict]:
                 {"key": "firecrawl", "name": "Firecrawl", "kind": "method",
                  "domains": []},
                 {"key": "decodo", "name": "Decodo", "kind": "method", "domains": []}]
+    methods += [{"key": provider.name, "name": provider.label, "kind": "search",
+                 "domains": []}
+                for provider in SEARCH_PROVIDERS]
     return methods
 
 
@@ -166,7 +178,7 @@ async def check(name: str, force: bool = False) -> IntegrationStatus:
     from .integrations import NAME_TO_INTEGRATION
 
     key = name.lower()
-    if key not in NAME_TO_INTEGRATION and key not in METHOD_KEYS:
+    if key not in NAME_TO_INTEGRATION and key not in METHOD_KEYS and key not in SEARCH_KEYS:
         raise KeyError(f"Unknown integration or method '{name}'.")
 
     if not force:
@@ -182,6 +194,8 @@ async def check(name: str, force: bool = False) -> IntegrationStatus:
 
         if key in METHOD_KEYS:
             status = await _probe_method(key)
+        elif key in SEARCH_KEYS:
+            status = _probe_search(key)
         else:
             status = await _probe(key, NAME_TO_INTEGRATION[key])
         _cache[key] = (time.time(), status)
@@ -333,6 +347,18 @@ async def _probe_method(key: str) -> IntegrationStatus:
     status.connected = status.configured and status.enabled
     if status.enabled and status.configured:
         status.detail = "Token configured."
+    return _settle(status)
+
+
+def _probe_search(key: str) -> IntegrationStatus:
+    """A search provider. Like Decodo, it is paid per request and has no free endpoint to
+    ping, so a configured key counts as ready; a key Serper rejects shows up as the error
+    of the first search instead."""
+    provider = next(p for p in SEARCH_PROVIDERS if p.name == key)
+    status = _base_status(key, provider.label, "search", [])
+    status.connected = status.configured and status.enabled
+    if status.enabled and status.configured:
+        status.detail = "API key configured."
     return _settle(status)
 
 
