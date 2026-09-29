@@ -140,11 +140,21 @@ onBeforeUnmount(stopFollowing)
           </span>
           <span class="inline-flex items-center gap-1.5 text-success">
             <UIcon name="i-fa7-solid-circle-check" class="size-3" />
-            {{ job.succeeded }} succeeded
+            {{ job.outcomes?.ok ?? job.succeeded }} retrieved
           </span>
-          <span class="inline-flex items-center gap-1.5" :class="job.failed ? 'text-error' : ''">
+          <span
+            v-if="job.outcomes?.unavailable" class="inline-flex items-center gap-1.5 text-warning"
+            title="scrapeMM did its part, but the target was unavailable, behind a paywall or a CAPTCHA, or rate-limited"
+          >
+            <UIcon name="i-fa7-solid-circle-minus" class="size-3" />
+            {{ job.outcomes.unavailable }} unavailable
+          </span>
+          <span
+            class="inline-flex items-center gap-1.5"
+            :class="(job.outcomes?.error ?? job.failed) ? 'text-error' : ''"
+          >
             <UIcon name="i-fa7-solid-circle-exclamation" class="size-3" />
-            {{ job.failed }} failed
+            {{ job.outcomes?.error ?? job.failed }} failed
           </span>
           <span v-if="pendingCount && running" class="inline-flex items-center gap-1.5 text-info">
             <UIcon name="i-fa7-solid-circle-notch" class="size-3 animate-spin" />
@@ -188,6 +198,7 @@ onBeforeUnmount(stopFollowing)
             :url="entry.url" :content="entry.result.content" :method="entry.result.method"
             :errors="entry.result.errors" :retrieval-time="entry.result.retrieval_time"
             :from-cache="entry.result.from_cache" :success="entry.result.success"
+            :outcome="entry.result.outcome" :outcome-kind="entry.result.outcome_kind"
             collapsible :collapsed="entries.length > 1 && entry.url !== focus"
             class="scroll-mt-6"
           />

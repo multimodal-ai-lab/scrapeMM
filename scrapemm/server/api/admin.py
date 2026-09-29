@@ -301,6 +301,12 @@ async def list_jobs(
             default=None,
             description="True keeps jobs with at least one success, False with at "
                         "least one failure"),
+        outcome: Optional[str] = Query(
+            default=None,
+            description="Keeps jobs with at least one result of this outcome: ok, "
+                        "unavailable or error, or a kind of unavailability (missing, "
+                        "paywall, captcha, blocked, rate_limit, unsupported). See "
+                        "scrapemm.common.outcome."),
         since: Optional[float] = Query(default=None,
                                        description="UNIX timestamp, inclusive"),
         until: Optional[float] = Query(default=None,
@@ -322,19 +328,25 @@ async def list_jobs(
         raise HTTPException(status_code=400, detail=f"Unknown sort '{sort}'. Allowed: "
                                                     f"{', '.join(SORTS)}.")
     criteria = dict(status=job_status, url=url, output_format=output_format,
-                    method=method, success=success, since=since, until=until)
-    return {
-        "version": jobs.version,
-        "jobs": jobs.list_jobs(limit=limit, offset=offset, sort=sort, **criteria),
-        "total": jobs.count_jobs(**criteria),
-        "stats": jobs.stats(),
-        "methods": jobs.known_methods(),
-    }
+                    method=method, success=success, since=since, until=until,
+                    outcome=outcome)
+
+    # In a thread: a filtered query over a large history can take seconds, and on the
+    # event loop that would freeze every retrieval in flight
+    def answer() -> dict:
+        return {
+            "version": jobs.version,
+            "jobs": jobs.list_jobs(limit=limit, offset=offset, sort=sort, **criteria),
+            "total": jobs.count_jobs(**criteria),
+            "stats": jobs.stats(),
+            "methods": jobs.known_methods(),
+        }
+    return await asyncio.to_thread(answer)
 
 
 @router.get("/jobs/{job_id}")
 async def get_job(job_id: str) -> dict:
-    job = jobs.get_job(job_id)
+    job = await asyncio.to_thread(jobs.get_job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"No job '{job_id}'.")
     return job
@@ -343,6 +355,31 @@ async def get_job(job_id: str) -> dict:
 @router.delete("/jobs/{job_id}")
 async def delete_job(job_id: str) -> dict:
     return {"job_id": job_id, "deleted": jobs.delete_job(job_id)}
+
+
+# --- Statistics -------------------------------------------------------------------
+
+@router.get("/stats/retrievals")
+async def retrieval_statistics(
+        bucket: str = Query(default="day", description="hour, day or week"),
+        group: str = Query(default="outcome", description="method, outcome or kind"),
+        periods: Optional[int] = Query(
+            default=None, ge=1, le=400,
+            description="How many buckets, up to the current one (default: 48 hours, "
+                        "30 days or 26 weeks)"),
+        tz_offset: int = Query(
+            default=0, ge=-14 * 60, le=14 * 60,
+            description="The viewer's offset from UTC in minutes (east positive), so "
+                        "that days and weeks start at local midnight"),
+) -> dict:
+    """Past retrievals over time, per method or outcome, for the Statistics view."""
+    from ..retrieval_stats import BUCKET_SECONDS, retrieval_stats
+    if bucket not in BUCKET_SECONDS:
+        raise HTTPException(status_code=400, detail="bucket must be hour, day or week.")
+    if group not in ("method", "outcome", "kind"):
+        raise HTTPException(status_code=400, detail="group must be method, outcome or kind.")
+    # A query over a large range reads many rows: off the event loop
+    return await asyncio.to_thread(retrieval_stats, jobs, bucket, group, periods, tz_offset)
 
 
 # --- Media ------------------------------------------------------------------------

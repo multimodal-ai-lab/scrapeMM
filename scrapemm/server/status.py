@@ -33,6 +33,7 @@ from .jobs import jobs
 from .search import SEARCH_PROVIDERS
 from .secrets import is_set
 from .toggles import is_enabled, resolve_alias
+from .workers import run_light
 
 logger = logging.getLogger(APP_NAME)
 
@@ -420,9 +421,11 @@ async def environment() -> dict:
         "playwright": await _playwright_status(),
         "display": _display_status(),
         "captcha": _captcha_backlog(),
+        "queue": _queue(),
         "media": _media_usage(),
         "address": _address(),
-        **_job_figures(),
+        # In a thread: they are queries of the job history
+        **(await run_light(_job_figures)),
         "blacklist": {
             "domains": len(blacklist),
             "ttl": blacklist.ttl,
@@ -455,25 +458,16 @@ def _job_figures() -> dict:
             "last_24h": jobs.count_since(24 * 60 * 60),
             "success_rate": jobs.recent_success_rate(RECENT_WINDOW),
         },
-        "jobs": jobs.stats(),
+        "jobs": {**jobs.stats(), "running": jobs.count_jobs(status="running")},
     }
     _job_figures_cache = (version, time.time(), figures)
     return figures
 
 
-# Walking the media tree is O(files), so after new retrievals it is re-walked at most
-# this often; with nothing retrieved, the registry's own longer TTL applies.
-MEDIA_MIN_AGE = 15.0
-
-_media_version = -1
-
-
 def _media_usage() -> dict:
-    """Never walks the tree itself (see `registry.usage`); after new retrievals it asks
-    for a background re-measurement, which a walk started from now on will include."""
-    global _media_version
-    if jobs.version != _media_version and registry.refresh(MEDIA_MIN_AGE):
-        _media_version = jobs.version
+    """Never walks the tree itself (see `registry.usage`), and never because of a job:
+    re-measuring after every job kept a walk over a shared registry of millions of files
+    running for a whole batch. The figure is refreshed on the registry's TTL instead."""
     return registry.usage()
 
 
@@ -534,6 +528,22 @@ def _address() -> dict:
         # True when those addresses are container-internal and should not be offered
         # as something to hand to a colleague.
         "containerised": os.path.exists("/.dockerenv"),
+    }
+
+
+def _queue() -> dict:
+    """The URLs waiting in line: accepted by a running job but not yet started, because
+    the server's concurrency limit is full. URLs parked with a CAPTCHA challenge are not
+    in line (see `_captcha_backlog()`); they wait for a human, not for a free slot."""
+    from . import engine
+    from .config import get_config_var
+    in_flight = len(getattr(engine, "_in_flight", {}))
+    active = getattr(engine, "_active", 0)
+    return {
+        "waiting": max(0, in_flight - active),
+        "active": active,
+        "limit": int(get_config_var("max_concurrency",
+                                    getattr(engine, "DEFAULT_MAX_CONCURRENCY", 40))),
     }
 
 

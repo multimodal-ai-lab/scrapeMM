@@ -21,10 +21,16 @@ from contextlib import suppress
 from typing import Optional, Union
 from urllib.parse import urlencode, urlparse
 
+import aiohttp
 from ezmm import Image, Video
 from playwright.async_api import Page, Frame, Response
+from yarl import URL
 
-from scrapemm.server.download.images import image_from_binary
+from scrapemm.server.download.common import HEADERS
+from scrapemm.server.download.requests import MEDIA_TIMEOUT
+from scrapemm.server.download.util import stream
+
+from scrapemm.server.download.images import decode_image
 from scrapemm.server.download.videos import video_from_binary, download_hls_video, is_hls
 
 logger = logging.getLogger("scrapeMM")
@@ -39,8 +45,17 @@ CURRENT_ATTR = "data-scrapemm-current"  # The URL the browser actually rendered
 BLOB_SCHEME = "scrapemm-blob:"  # How `resolve_media()` refers to such a Blob
 
 # Bytes per message when reading a Blob or stream out of the browser: bounds the size of
-# every single message, however large the video
-READ_CHUNK = 8 * 1024 * 1024
+# every single message, however large the video. Kept small because Playwright's Python
+# client reassembles each message from 32 KB pieces by repeated concatenation -- on the
+# event loop every retrieval shares, at a cost growing with the square of the message
+# size. An 8 MB chunk (11 MB as base64) blocked the loop for a good fraction of a second;
+# a whole video as one message, for minutes.
+READ_CHUNK = 1024 * 1024
+
+# Largest body taken from the browser in one message (`Response.body()`). Larger media,
+# and media of unknown size other than images, are read in chunks or downloaded directly
+# instead, see `READ_CHUNK`.
+MAX_BODY_MESSAGE = 2 * 1024 * 1024
 
 # How long to wait for the body of a response the browser is still receiving
 LOADED_BODY_TIMEOUT = 60
@@ -187,7 +202,10 @@ class BrowserMedia:
         self._session_lock = asyncio.Lock()
         self._frame_id: Optional[str] = None
         self._replay_frames: dict[MediaSource, bool] = {}
+        self._http: Optional[aiohttp.ClientSession] = None  # See `_http_session()`
+        self._cookie_hosts: set[str] = set()
         self.stats: Counter = Counter()  # Where the media came from, for the log
+        self._last_failure: dict[str, str] = {}  # Why fetching a medium failed, by URL
         try:
             page.on("response", self._record)
         except Exception:
@@ -210,11 +228,49 @@ class BrowserMedia:
 
     async def close(self) -> None:
         """Detaches the page's CDP session, if one was opened. Call before closing the
-        page: the Playwright connection is shared and outlives it."""
+        page: the Playwright connection is shared and outlives it. Also lets go of the
+        page's responses, which the connection would otherwise keep alive."""
+        with suppress(Exception):
+            self.page.remove_listener("response", self._record)
+        self._loaded.clear()
+        self._replay_frames.clear()
         session, self._session = self._session, None
         if session is not None:
             with suppress(Exception):
                 await asyncio.wait_for(session.detach(), timeout=5)
+        http, self._http = self._http, None
+        if http is not None:
+            with suppress(Exception):
+                await http.close()
+
+    async def _http_session(self, url: str) -> aiohttp.ClientSession:
+        """A plain HTTP client carrying the browser's user agent and its cookies for
+        `url`'s host: for downloads too large to pass through Playwright (see
+        `READ_CHUNK`), which Playwright's own request context would do."""
+        if self._http is None:
+            headers = {k: v for k, v in HEADERS.items() if not k.startswith(("Sec-", "Upgrade"))}
+            headers["Accept"] = "*/*"
+            with suppress(Exception):
+                headers["User-Agent"] = await self.page.evaluate("navigator.userAgent")
+            with suppress(Exception):
+                headers["Referer"] = self.page.url
+            # The browser ignores certificate errors (archives), so this client does too
+            self._http = aiohttp.ClientSession(
+                headers=headers, cookie_jar=aiohttp.CookieJar(unsafe=True),
+                connector=aiohttp.TCPConnector(ssl=False))
+        host = urlparse(url).netloc
+        if host and host not in self._cookie_hosts:
+            self._cookie_hosts.add(host)
+            try:
+                for cookie in await self.page.context.cookies([url]):
+                    domain = cookie["domain"].lstrip(".")
+                    self._http.cookie_jar.update_cookies(
+                        {cookie["name"]: cookie["value"]},
+                        response_url=URL(f"https://{domain}{cookie.get('path') or '/'}"))
+            except Exception:
+                logger.debug(f"Could not take over the browser's cookies for {host}.",
+                             exc_info=True)
+        return self._http
 
     def has_copy(self, url: str) -> bool:
         """Whether the browser holds a complete copy of the medium at `url`."""
@@ -226,8 +282,7 @@ class BrowserMedia:
         content, _ = await self.get(url, frame, limit=MAX_IMAGE_BYTES, fallback=fallback)
         if content:
             # CPU-bound; would otherwise stall every other retrieval on the event loop
-            return await asyncio.to_thread(image_from_binary, content,
-                                           source_url=source_url or url, **kwargs)
+            return await decode_image(content, source_url or url, **kwargs)
         return None
 
     async def fetch_video(self, url: str, frame: Optional[MediaSource] = None,
@@ -241,12 +296,17 @@ class BrowserMedia:
             logger.debug(f"{url} does not replay; using the capture {capture} instead.")
             content, content_type = await self.get(capture, frame, limit, timeout=timeout)
 
-        # HLS playlists are plain text manifests, not raw video: remux via ffmpeg,
-        # reusing the shared request context so segment downloads stay authenticated
+        # HLS playlists are plain text manifests, not raw video: remux via ffmpeg. The
+        # segments are downloaded directly, with the browser's cookies: through
+        # Playwright's request context, each segment blocked the event loop (READ_CHUNK)
         if content_type and is_hls(content_type) and not url.startswith(BLOB_SCHEME):
-            return await download_hls_video(url, session=self.page.context.request)
+            return await download_hls_video(url, session=await self._http_session(url),
+                                            max_video_size=max_size)
 
-        return video_from_binary(content, source_url=source_url or url) if content else None
+        if not content:
+            return None
+        # Writes the file: off the event loop
+        return await asyncio.to_thread(video_from_binary, content, source_url or url)
 
     async def get(self, url: str, frame: Optional[MediaSource] = None,
                   limit: Optional[int] = None, fallback: Optional[str] = None,
@@ -266,10 +326,22 @@ class BrowserMedia:
             if frame is not None and await self._is_replay_frame(frame):
                 steps = steps[0::2] + steps[1::2]  # All copies first
 
-        for step, candidate in steps:
-            if found := await step(candidate, frame, limit, timeout):
-                return found
+        # `timeout` bounds the medium as a whole, not each step: the steps' own timeouts
+        # added up, and a stream that kept trickling (thequint.com's ad video) held the
+        # retrieval until the browser's 10-minute limit failed the entire page
+        try:
+            async with asyncio.timeout(timeout):
+                for step, candidate in steps:
+                    if found := await step(candidate, frame, limit, timeout):
+                        return found
+        except TimeoutError:
+            self._last_failure[url] = f"no answer within {timeout:.0f} s"
 
+        # Visible at info level: a medium silently missing from a result is hard to trace
+        # (archive.org once stopped serving an image its index still listed, HTTP 404)
+        reason = self._last_failure.get(url) or (fallback and self._last_failure.get(fallback))
+        logger.info(f"Dropped the medium {url[:150]}: "
+                    f"{reason or 'the browser has no copy and could not fetch it'}.")
         self.stats["failed"] += 1
         return None, None
 
@@ -295,6 +367,15 @@ class BrowserMedia:
         response = self._loaded.get(url)
         if response is None or _too_large(response.headers, limit):
             return None
+        # One message: only for bodies known to be small (see MAX_BODY_MESSAGE). Images
+        # of unknown size are small in practice; a video of unknown size is not.
+        length = _header(response.headers, "content-length")
+        if length and length.isdigit():
+            if int(length) > MAX_BODY_MESSAGE:
+                return None
+        elif not (response.headers.get("content-type", "").startswith("image/")
+                  or response.request.resource_type == "image"):
+            return None
         try:
             body = await asyncio.wait_for(response.body(), timeout=LOADED_BODY_TIMEOUT)
         except Exception as e:
@@ -312,7 +393,7 @@ class BrowserMedia:
         cross-origin medium, so the browser's network stack goes first."""
         if url.startswith(BLOB_SCHEME):
             return None  # Exists only inside the frame, see `_copy()`
-        strategies = [("network", self._from_network), ("context", self._from_request_context)]
+        strategies = [("network", self._from_network), ("http", self._from_http)]
         if frame is not None:
             in_frame = ("frame", lambda u, l, t: self._from_frame(frame, u, l, t))
             first = _same_origin(url, frame.url) or await self._is_replay_frame(frame)
@@ -361,22 +442,34 @@ class BrowserMedia:
         """`Network.loadNetworkResource`: the browser's own network stack -- its TLS
         fingerprint, cookies and HTTP cache -- without CORS, streamed in chunks. Bypasses
         service workers, so it cannot replay archived media."""
-        try:
-            session = await self._cdp()
-            resource = (await asyncio.wait_for(session.send("Network.loadNetworkResource", {
-                "frameId": self._frame_id, "url": url,
-                "options": {"disableCache": False, "includeCredentials": True},
-            }), timeout=timeout))["resource"]
-        except Exception as e:
-            logger.debug(f"Browser network fetch of {url} failed: {e}")
-            return None
+        for attempt in range(len(THROTTLE_BACKOFF) + 1):
+            try:
+                session = await self._cdp()
+                resource = (await asyncio.wait_for(session.send("Network.loadNetworkResource", {
+                    "frameId": self._frame_id, "url": url,
+                    "options": {"disableCache": False, "includeCredentials": True},
+                }), timeout=timeout))["resource"]
+            except Exception as e:
+                logger.debug(f"Browser network fetch of {url} failed: {e}")
+                self._last_failure[url] = f"{type(e).__name__}: {e}"
+                return None
+            status = resource.get("httpStatusCode")
+            if status not in THROTTLE_STATUSES or attempt == len(THROTTLE_BACKOFF):
+                break
+            if stream := resource.get("stream"):
+                with suppress(Exception):
+                    await session.send("IO.close", {"handle": stream})
+            logger.info(f"{urlparse(url).netloc} throttles media (HTTP {status}); retrying "
+                        f"{url[:120]} in {THROTTLE_BACKOFF[attempt]:.0f} s.")
+            await asyncio.sleep(THROTTLE_BACKOFF[attempt])
 
         stream = resource.get("stream")
         headers = resource.get("headers") or {}
         try:
             if not resource.get("success") or not stream:
-                logger.debug(f"Browser network fetch of {url} failed: HTTP "
-                             f"{resource.get('httpStatusCode')} {resource.get('netErrorName', '')}")
+                reason = f"HTTP {resource.get('httpStatusCode')} {resource.get('netErrorName', '')}"
+                logger.debug(f"Browser network fetch of {url} failed: {reason}")
+                self._last_failure[url] = reason.strip()
                 return None
             if _too_large(headers, limit):
                 return None
@@ -401,21 +494,41 @@ class BrowserMedia:
                 with suppress(Exception):
                     await session.send("IO.close", {"handle": stream})
 
-    async def _from_request_context(self, url: str, limit: Optional[int],
-                                    timeout: float) -> Optional[tuple[bytes, Optional[str]]]:
-        """Playwright's own HTTP client with the browser context's cookies: the last
-        resort, as it is not the browser's network stack."""
+    async def _from_http(self, url: str, limit: Optional[int],
+                         timeout: float) -> Optional[tuple[bytes, Optional[str]]]:
+        """A direct download with the browser's user agent and cookies: the last resort,
+        as it is not the browser's network stack. Replaces Playwright's request context,
+        whose bodies pass through its pipe in one message (see `READ_CHUNK`)."""
         try:
-            response = await self.page.context.request.get(url, timeout=timeout * 1000)
-            if not response.ok or _too_large(response.headers, limit):
-                return None
-            content = await response.body()
-            if not content or (limit and len(content) > limit):
-                return None
-            return content, response.headers.get("content-type")
-        except Exception as e:
-            logger.debug(f"Request-context fetch of {url} failed: {e}")
+            session = await self._http_session(url)
+            for attempt in range(len(THROTTLE_BACKOFF) + 1):
+                async with session.get(url, timeout=MEDIA_TIMEOUT, allow_redirects=True) as response:
+                    if response.status in THROTTLE_STATUSES and attempt < len(THROTTLE_BACKOFF):
+                        logger.info(f"{urlparse(url).netloc} throttles media (HTTP "
+                                    f"{response.status}); retrying {url[:120]} in "
+                                    f"{THROTTLE_BACKOFF[attempt]:.0f} s.")
+                        await asyncio.sleep(THROTTLE_BACKOFF[attempt])
+                        continue
+                    if response.status != 200:
+                        self._last_failure[url] = f"HTTP {response.status}"
+                        return None
+                    if _too_large(dict(response.headers), limit):
+                        return None
+                    content = await asyncio.wait_for(stream(response, max_size=limit), timeout=timeout)
+                    if not content:
+                        return None
+                    return content, response.headers.get("content-type")
             return None
+        except Exception as e:
+            logger.debug(f"Direct download of {url} failed: {type(e).__name__}: {e}")
+            self._last_failure[url] = f"{type(e).__name__}: {e}"
+            return None
+
+
+# Answers that mean "not now" rather than "not at all": retried after these pauses
+# (archive.org answers 429 once a client fetches too much, and 503 while overloaded)
+THROTTLE_STATUSES = {429, 503}
+THROTTLE_BACKOFF = (2.0, 6.0)
 
 
 def _same_origin(url: str, other: str) -> bool:

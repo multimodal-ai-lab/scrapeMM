@@ -14,6 +14,8 @@ are literally the same one.
 
 import logging
 import shutil
+import signal
+import subprocess
 import threading
 import time
 import os
@@ -136,8 +138,13 @@ def resolve_item(kind: str, identifier: int) -> Optional[Item]:
         return None
 
 
-# How long a measured size is served before the tree is walked again
-USAGE_TTL = 60.0
+# How long a measured size is served before the tree is walked again. A shared lab
+# registry holds millions of files, whose walk takes long and loads the disk, so the
+# dashboard's figure may well be half an hour old.
+USAGE_TTL = 30 * 60.0
+
+# A walk that takes longer than this is given up (and retried after the TTL)
+WALK_TIMEOUT = 2 * 60 * 60.0
 
 # A walk is never repeated sooner than this many times its own duration, so a registry
 # of millions of files is not re-measured back to back
@@ -183,22 +190,10 @@ def _walk() -> None:
     global _usage, _walk_duration, _walking
     started = time.time()
     try:
-        total, count = 0, 0
-        pending = [str(registry_root())]
-        while pending:
-            try:
-                with os.scandir(pending.pop()) as entries:
-                    for entry in entries:
-                        try:
-                            if entry.is_dir(follow_symlinks=False):
-                                pending.append(entry.path)
-                            elif entry.is_file(follow_symlinks=False):
-                                total += entry.stat(follow_symlinks=False).st_size
-                                count += 1
-                        except OSError:
-                            continue
-            except OSError:
-                continue
+        measured = _measure_with_find()
+        if measured is None:
+            measured = _measure_in_python()
+        total, count = measured
         _usage = {"bytes": total, "files": count, "measured_at": time.time()}
         _walk_duration = time.time() - started
         logger.debug(f"Measured the media registry: {count} files in {_walk_duration:.1f}s.")
@@ -207,6 +202,52 @@ def _walk() -> None:
     finally:
         with _walk_lock:
             _walking = False
+
+
+# Sums up the sizes in the subprocess, so that Python reads a single line. `%.0f`, as
+# some awks print `%d` as a 32-bit integer.
+_FIND_SCRIPT = r"""find "$1" -type f -printf '%s\n' 2>/dev/null | awk '{s += $1; n++} END {printf "%.0f %d\n", s, n}'"""
+
+
+def _measure_with_find() -> Optional[tuple[int, int]]:
+    """Total size and number of files, measured by `find` in a subprocess at the lowest
+    CPU priority. A walk in Python over millions of files held the GIL for most of the
+    time and so stalled the event loop, i.e. every retrieval. None where there is no
+    GNU find (e.g. on Windows)."""
+    if os.name != "posix" or not shutil.which("find") or not shutil.which("awk"):
+        return None
+    process = subprocess.Popen(
+        ["nice", "-n", "19", "sh", "-c", _FIND_SCRIPT, "sh", str(registry_root())],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+    try:
+        stdout, _ = process.communicate(timeout=WALK_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)  # The whole pipeline, not just the shell
+        process.wait()
+        raise TimeoutError(f"Measuring the media registry took over {WALK_TIMEOUT:.0f} s.")
+    total, count = stdout.split()
+    return int(total), int(count)
+
+
+def _measure_in_python() -> tuple[int, int]:
+    """The fallback where there is no `find`. Holds the GIL for much of the walk."""
+    total, count = 0, 0
+    pending = [str(registry_root())]
+    while pending:
+        try:
+            with os.scandir(pending.pop()) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                            count += 1
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return total, count
 
 
 def _disk_usage() -> dict:

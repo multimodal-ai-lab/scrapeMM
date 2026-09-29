@@ -7,7 +7,7 @@ import aiohttp
 from aiohttp import ClientConnectorError
 
 from scrapemm.common import (AccessBlockedError, QuotaExceededError, RateLimitError,
-                             RetrievalFailed, UnsupportedDomainError)
+                             RetrievalFailed, TargetUnavailableError, UnsupportedDomainError)
 from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
 from scrapemm.server.secrets import get_secret
 from scrapemm.server.util import get_domain, to_scraped_content
@@ -181,6 +181,8 @@ class Decodo:
                             if status_code and status_code >= 400:
                                 msg = f"Target website returned status {status_code} for {url}"
                                 logger.warning(msg)
+                                if status_code in (404, 410):
+                                    raise TargetUnavailableError(msg)
                                 raise RetrievalFailed(msg)
 
                             html_content = result.get("content")

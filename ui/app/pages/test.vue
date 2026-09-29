@@ -18,7 +18,8 @@ const error = ref('')
 const starting = ref(false)
 const outcomeFilter = ref<'all' | 'running' | 'failed' | 'partial' | 'passed'>('all')
 
-const newUrl = reactive({ url: '', category: '', image: 0, video: 0 })
+// `unavailable`: the entry expects the target to be unavailable instead of content
+const newUrl = reactive({ url: '', category: '', image: 0, video: 0, unavailable: false })
 const adding = ref(false)
 const showSuite = ref(false)
 
@@ -124,10 +125,13 @@ async function addUrl() {
   error.value = ''
   try {
     const expected: Record<string, number> = {}
-    if (newUrl.image > 0) expected.image = Number(newUrl.image)
-    if (newUrl.video > 0) expected.video = Number(newUrl.video)
-    await api.post('/v1/test/suite', { url: newUrl.url, category: newUrl.category || 'Added', expected })
-    Object.assign(newUrl, { url: '', image: 0, video: 0 })
+    if (!newUrl.unavailable && newUrl.image > 0) expected.image = Number(newUrl.image)
+    if (!newUrl.unavailable && newUrl.video > 0) expected.video = Number(newUrl.video)
+    await api.post('/v1/test/suite', {
+      url: newUrl.url, category: newUrl.category || 'Added', expected,
+      expect: newUrl.unavailable ? 'unavailable' : null,
+    })
+    Object.assign(newUrl, { url: '', image: 0, video: 0, unavailable: false })
     await load()
   } catch (e: any) {
     error.value = e.message
@@ -580,13 +584,30 @@ function media(record: Record<string, number> | undefined) {
                 <span>{{ r.category }}</span>
                 <span v-if="r.method">{{ r.method }}</span>
                 <span v-if="r.outcome === 'running'">
-                  in progress<template v-if="Object.keys(r.expected).length"> · expects {{ media(r.expected) }}</template>
+                  in progress<template v-if="r.expect"> · expects: {{ r.expect }}</template>
+                  <template v-else-if="Object.keys(r.expected).length"> · expects {{ media(r.expected) }}</template>
+                </span>
+                <span v-else-if="r.expect" class="inline-flex items-center gap-1.5">
+                  expected: {{ r.expect }} · got:
+                  <span
+                    class="inline-flex items-center gap-1"
+                    :class="outcomeLook(r.result_class, r.result_kind).text"
+                  >
+                    <UIcon :name="outcomeLook(r.result_class, r.result_kind).icon" class="size-3" />
+                    {{ outcomeLook(r.result_class, r.result_kind).label }}
+                  </span>
                 </span>
                 <span v-else-if="Object.keys(r.expected).length">
                   expected {{ media(r.expected) }} · found {{ media(r.found) }}
                 </span>
               </p>
-              <p v-if="r.outcome === 'failed'" class="text-xs text-error/90 mt-0.5" :title="r.error?.message">
+              <p
+                v-if="r.outcome === 'failed' && r.expect && r.result_class === 'ok'"
+                class="text-xs text-error/90 mt-0.5"
+              >
+                Content came back, but the target was expected to be unavailable.
+              </p>
+              <p v-else-if="r.outcome === 'failed'" class="text-xs text-error/90 mt-0.5" :title="r.error?.message">
                 {{ describeError(r.error?.type) }}
               </p>
               <p v-else-if="r.outcome === 'partial'" class="text-xs text-warning/90 mt-0.5">
@@ -611,7 +632,7 @@ function media(record: Record<string, number> | undefined) {
         </div>
       </template>
 
-      <form class="grid gap-2 sm:grid-cols-[1fr_12rem_auto_auto_auto] items-end" @submit.prevent="addUrl">
+      <form class="grid gap-2 sm:grid-cols-[1fr_12rem_auto_auto_auto_auto] items-end" @submit.prevent="addUrl">
         <UFormField label="Add a URL">
           <UInput v-model="newUrl.url" placeholder="https://…" class="w-full" />
         </UFormField>
@@ -622,10 +643,24 @@ function media(record: Record<string, number> | undefined) {
           </datalist>
         </UFormField>
         <UFormField label="Images" hint="at least">
-          <UInput v-model.number="newUrl.image" type="number" min="0" class="w-20" />
+          <UInput
+            v-model.number="newUrl.image" type="number" min="0" class="w-20"
+            :disabled="newUrl.unavailable"
+          />
         </UFormField>
         <UFormField label="Videos" hint="at least">
-          <UInput v-model.number="newUrl.video" type="number" min="0" class="w-20" />
+          <UInput
+            v-model.number="newUrl.video" type="number" min="0" class="w-20"
+            :disabled="newUrl.unavailable"
+          />
+        </UFormField>
+        <!-- For targets that are not there to be had: a private post, a removed page.
+             Such an entry passes when scrapeMM recognises that. -->
+        <UFormField label="Expects" hint="instead of media">
+          <UCheckbox
+            v-model="newUrl.unavailable" label="Unavailable" class="h-8 items-center"
+            title="Passes when the target is recognised as unavailable (yellow), fails when content comes back or scrapeMM errs"
+          />
         </UFormField>
         <UButton type="submit" icon="i-fa7-solid-plus" label="Add" :loading="adding" :disabled="!newUrl.url.trim()" />
       </form>
@@ -634,7 +669,13 @@ function media(record: Record<string, number> | undefined) {
         <div v-for="e in suite" :key="e.url" class="py-1.5 flex items-center gap-3 group">
           <UrlLabel :url="e.url" class="text-sm flex-1" />
           <span class="text-xs text-dimmed shrink-0">{{ e.category }}</span>
-          <span class="text-xs text-dimmed shrink-0 w-28 text-right">{{ media(e.expected) }}</span>
+          <span class="shrink-0 w-28 text-right text-xs text-dimmed">
+            <UBadge
+              v-if="e.expect" size="sm" variant="subtle" color="warning"
+              :icon="outcomeLook(e.expect).icon" :label="`expects: ${e.expect}`"
+            />
+            <template v-else>{{ media(e.expected) }}</template>
+          </span>
           <UBadge v-if="e.source === 'user'" size="sm" variant="subtle" color="neutral" label="added" />
           <UButton
             size="xs" variant="ghost" color="error" icon="i-fa7-solid-xmark"

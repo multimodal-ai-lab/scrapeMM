@@ -36,6 +36,7 @@ const links: NavLink[] = [
     ],
   },
   { label: 'Jobs', icon: 'i-fa7-solid-clock-rotate-left', to: '/jobs' },
+  { label: 'Statistics', icon: 'i-fa7-solid-chart-column', to: '/statistics' },
   { label: 'Test', icon: 'i-fa7-solid-flask', to: '/test' },
   { label: 'CAPTCHA', icon: 'i-fa7-solid-shield-halved', to: '/captcha' },
   { label: 'Blacklist', icon: 'i-fa7-solid-ban', to: '/blacklist' },

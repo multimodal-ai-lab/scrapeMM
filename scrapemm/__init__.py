@@ -23,7 +23,17 @@ from .common import (APP_NAME, AccessBlockedError, CaptchaEncounteredError, Disk
 from .client import Settings, configure, retrieve, settings
 from . import search
 
-__version__ = "1.0.0"
+try:  # pyproject.toml is the single source of the version
+    from importlib.metadata import version as _version
+    __version__ = _version("scrapeMM")
+except Exception:  # Running from a source tree that was never installed
+    try:
+        import tomllib
+        from pathlib import Path
+        with open(Path(__file__).parent.parent / "pyproject.toml", "rb") as _f:
+            __version__ = tomllib.load(_f)["project"]["version"]
+    except Exception:
+        __version__ = "unknown"
 
 __all__ = [
     "retrieve",

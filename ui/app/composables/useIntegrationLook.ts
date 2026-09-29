@@ -61,6 +61,14 @@ export const TONES: Record<string, {
     surface: 'tone-muted',
     text: 'text-dimmed',
   },
+  // A retrieval-chain slot for a method that is not implemented yet
+  unavailable: {
+    icon: 'i-fa7-solid-hourglass-half',
+    color: 'neutral',
+    label: 'Coming soon',
+    surface: 'tone-muted',
+    text: 'text-dimmed',
+  },
   checking: {
     icon: 'i-fa7-solid-spinner',
     color: 'neutral',

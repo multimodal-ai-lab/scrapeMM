@@ -39,7 +39,6 @@ async function save() {
   try {
     const body: Record<string, any> = {
       firecrawl_urls: firecrawlUrls.value.split('\n').map((u) => u.trim()).filter(Boolean),
-      hedging_delay: numberOrNull(config.value.hedging_delay),
       cache_ttl: numberOrNull(config.value.cache_ttl),
       blacklist_ttl: numberOrNull(config.value.blacklist_ttl),
       max_concurrency: numberOrNull(config.value.max_concurrency),
@@ -131,6 +130,9 @@ onMounted(() => {
     <UAlert v-if="error" color="error" variant="subtle" :description="error" />
     <UAlert v-if="notice" color="success" variant="subtle" :description="notice" />
 
+    <!-- The most consequential setting, so it comes first and saves on its own -->
+    <ChainEditor />
+
     <UCard>
       <template #header><h2 class="font-medium">Retrieval</h2></template>
       <div class="space-y-4">
@@ -141,12 +143,6 @@ onMounted(() => {
           <UTextarea v-model="firecrawlUrls" :rows="3" class="w-full" placeholder="http://firecrawl:3002" />
         </UFormField>
         <div class="grid sm:grid-cols-2 gap-4">
-          <UFormField
-            label="Hedging delay (s)"
-            description="Head start each method gets before the next runs alongside it. Empty disables hedging."
-          >
-            <UInput v-model="config.hedging_delay" type="number" step="0.5" min="0" />
-          </UFormField>
           <UFormField label="Max concurrent URLs">
             <UInput v-model="config.max_concurrency" type="number" min="1" />
           </UFormField>

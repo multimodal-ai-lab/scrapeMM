@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from contextlib import suppress
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Union, TYPE_CHECKING
 
@@ -15,7 +16,7 @@ try:
 except ImportError:
     CurlSession = None
 
-from scrapemm.server.download.common import ssl_context, RELAXED_SSL_DOMAINS, BROWSER_TLS_DOMAINS
+from scrapemm.server.download.common import ssl_context, RELAXED_SSL_DOMAINS, BROWSER_TLS_DOMAINS, HEADERS
 from scrapemm.server.download.util import stream, MediaTooLarge
 
 logger = logging.getLogger("scrapeMM")
@@ -34,17 +35,25 @@ MEDIA_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=20)
 _CURL_CFFI_IMPERSONATIONS = ("chrome124", "chrome", "safari")
 
 
+# Largest binary body taken through Playwright's request context, see `request_static()`
+MAX_PLAYWRIGHT_BODY = 2 * 1024 * 1024
+
 # Per attempt. curl's own default would let a stalled request hold its thread for long.
 CURL_CFFI_TIMEOUT = 30
 
-# Its own threads: in the default pool, curl requests would queue behind yt-dlp
-# downloads, which can take minutes each
-_curl_executor = ThreadPoolExecutor(max_workers=16, thread_name_prefix="curl-cffi")
+# Their own threads: in the default pool, curl requests would queue behind yt-dlp
+# downloads, which can take minutes each. Two pools: media downloads, and page fetches
+# and lookups (archive.today pages, Perma.cc's TimeMap, Instagram's API). A page fetch
+# that Archive.today tarpits holds its thread for up to CURL_CFFI_TIMEOUT per attempt;
+# in a shared pool, a burst of those left every image of a page waiting for a thread.
+_curl_executor = ThreadPoolExecutor(max_workers=32, thread_name_prefix="curl-media")
+_curl_lookup_executor = ThreadPoolExecutor(max_workers=16, thread_name_prefix="curl-lookup")
 
 
 async def _request_via_curl_cffi(
         url: str,
         headers: Optional[dict] = None,
+        lookup: bool = False,
 ) -> Optional[tuple[int, dict, bytes]]:
     """GET ``url`` with browser TLS impersonation. Returns (status, headers, body) or None.
 
@@ -55,12 +64,41 @@ async def _request_via_curl_cffi(
     failure happens inside curl's socket callback and leaves curl_cffi's shared transfer
     loop broken, so every later request through it hung and the server stopped
     recovering. In a thread, curl does its own I/O and never touches the event loop.
+
+    `lookup` marks a page fetch or an API lookup rather than a media download: the two
+    run in separate thread pools, so that neither can starve the other.
     """
+    from scrapemm.server.workers import run_in
     if CurlSession is None:
         logger.debug("curl_cffi not available; cannot bypass bot-gated 403 for %s", url)
         return None
-    return await asyncio.get_running_loop().run_in_executor(
-        _curl_executor, _request_via_curl_cffi_sync, url, headers)
+    if lookup:
+        return await run_in(_curl_lookup_executor, "curl lookup",
+                            _request_via_curl_cffi_sync, url, headers)
+    return await run_in(_curl_executor, "curl media", _request_via_curl_cffi_sync, url, headers)
+
+
+async def curl_get(url: str, **kwargs):
+    """A GET through curl_cffi (browser TLS impersonation), e.g.
+    `curl_get(url, impersonate="chrome124", cookies=..., timeout=30)`. Returns curl_cffi's
+    response. Always use this rather than curl_cffi's AsyncSession: that one drives curl's
+    sockets through the server's event loop, and when the OS reuses a socket number the
+    loop still attributes to a closed connection, the loop refuses it ("File descriptor N
+    is used by transport") -- which broke other requests at random, and left curl's
+    shared transfer loop wedged (see `_request_via_curl_cffi()`). In a worker thread, curl
+    does its own I/O and never touches the event loop. Raises ImportError without
+    curl_cffi, and whatever curl raises."""
+    if CurlSession is None:
+        raise ImportError("curl_cffi is not installed.")
+
+    from scrapemm.server.workers import run_in
+
+    def curl_page_get():
+        with CurlSession() as session:
+            return session.get(url, **kwargs)
+
+    # A page fetch, not a medium: its own pool (see `_curl_lookup_executor`)
+    return await run_in(_curl_lookup_executor, "curl lookup", curl_page_get)
 
 
 def _request_via_curl_cffi_sync(url: str, headers: Optional[dict]) -> Optional[tuple[int, dict, bytes]]:
@@ -217,7 +255,19 @@ async def request_static(url: str,
             # Playwright APIRequestContext
             response = await session.get(url, **kwargs)
             if response.ok:
-                return await response.text() if get_text else await response.body()
+                if get_text:
+                    return await response.text()
+                length = response.headers.get("content-length", "")
+                if length.isdigit() and int(length) <= MAX_PLAYWRIGHT_BODY:
+                    return await response.body()
+                # Too large, or of unknown size, to pass through Playwright's pipe: its
+                # Python client reassembles a message in time quadratic in its size, on
+                # the event loop (see `download.browser.READ_CHUNK`). Downloaded directly.
+                with suppress(Exception):
+                    await response.dispose()
+                async with aiohttp.ClientSession(headers=HEADERS) as direct:
+                    return await request_static(url, direct, get_text=False,
+                                                max_size=max_size, headers=kwargs.get("headers"))
             if response.status == 403:
                 return await _from_curl_cffi()
             return None

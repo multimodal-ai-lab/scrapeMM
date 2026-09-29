@@ -14,6 +14,9 @@ const props = defineProps<{
   retrievalTime?: number | null
   fromCache?: boolean
   success?: boolean
+  // The server's classification (see useOutcome.ts); derived here when absent
+  outcome?: string | null
+  outcomeKind?: string | null
   // With `collapsible`, the header toggles the content; `collapsed` is where it starts
   collapsible?: boolean
   collapsed?: boolean
@@ -69,6 +72,13 @@ const tabs = computed(() => {
 })
 
 const errorList = computed(() => Object.entries(props.errors || {}))
+
+/** Green, yellow or red, with the kind of yellow: from the server, or derived alike. */
+const look = computed(() => {
+  const derived = classifyOutcome(!!props.success, props.errors)
+  return outcomeLook(props.outcome || derived.outcome,
+                     props.outcome ? props.outcomeKind : derived.kind)
+})
 
 /**
  * What actually came back, in numbers.
@@ -144,11 +154,7 @@ function compact(n: number): string {
             <UrlLabel :url="url" />
           </a>
           <div class="flex flex-wrap items-center gap-2 mt-1.5">
-            <UBadge
-              :color="success ? 'success' : 'error'" variant="subtle"
-              :icon="success ? 'i-fa7-solid-circle-check' : 'i-fa7-solid-circle-xmark'"
-              :label="success ? 'Retrieved' : 'Failed'"
-            />
+            <UBadge :color="look.color" variant="subtle" :icon="look.icon" :label="look.label" />
             <UBadge v-if="method" color="neutral" variant="outline" :label="method" />
             <UBadge
               v-if="fromCache" color="info" variant="outline"
@@ -222,9 +228,15 @@ function compact(n: number): string {
     </template>
 
     <div v-if="errorList.length" class="space-y-2 mb-4">
+      <!-- Yellow where the target was to blame, red where scrapeMM was. A method's error
+           that did not decide the outcome -- another method retrieved the page, or found
+           the target unavailable -- is only worth a quiet note. -->
       <UAlert
         v-for="[method_, error] in errorList" :key="method_"
-        color="error" variant="subtle" icon="i-fa7-solid-triangle-exclamation"
+        :color="isUnavailableError(error.type) && !success ? 'warning'
+          : success || look.color !== 'error' ? 'neutral' : 'error'"
+        variant="subtle"
+        :icon="isUnavailableError(error.type) ? 'i-fa7-solid-circle-minus' : 'i-fa7-solid-triangle-exclamation'"
         :title="`${method_}: ${error.type}`" :description="error.message"
       />
     </div>

@@ -165,6 +165,10 @@ async def retrieve(
             elif kind == "error":
                 raise ServerError(message.get("message", "The server reported an error."))
 
+            # Anything else -- "heartbeat" lines that keep a slow batch's connection from
+            # going silent, the closing "summary", kinds a newer server adds -- carries
+            # nothing the results need
+
         if progress is not None:
             progress.close()
 

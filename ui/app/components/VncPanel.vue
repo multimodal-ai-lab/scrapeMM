@@ -39,6 +39,13 @@ async function connect() {
     rfb = new RFB(container.value, socketUrl(), {})
     rfb.scaleViewport = true
     rfb.clipViewport = true
+    // A held button must reach the server's browser as a drag (slider CAPTCHAs), not
+    // pan the view
+    rfb.dragViewport = false
+    rfb.viewOnly = false
+    // Your own pointer is shown instead of a copy of the server's (see the style below
+    // and x11vnc's -cursor none in docker/entrypoint.sh), so nothing extra is drawn
+    rfb.showDotCursor = false
     rfb.addEventListener('connect', () => { state.value = 'connected' })
     rfb.addEventListener('disconnect', (event: any) => {
       state.value = event?.detail?.clean ? 'idle' : 'failed'
@@ -86,7 +93,15 @@ onBeforeUnmount(disconnect)
 
     <div
       ref="container"
-      class="w-full h-[600px] bg-black rounded border border-default overflow-hidden"
+      class="vnc w-full h-[600px] bg-black rounded border border-default overflow-hidden"
     />
   </div>
 </template>
+
+<style scoped>
+/* noVNC paints the server's cursor shape as an inline `cursor: url(...)` bitmap, or as
+   `cursor: none` while it has none. The native pointer is crisper and never lags. */
+.vnc :deep(canvas) {
+  cursor: default !important;
+}
+</style>

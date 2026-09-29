@@ -6,7 +6,9 @@ import os
 import socket
 import sys
 import urllib.request
-from contextlib import suppress
+import uuid
+from contextlib import suppress, contextmanager
+from contextvars import ContextVar
 
 import aiohttp
 from pathlib import Path
@@ -20,6 +22,7 @@ from seleniumbase import cdp_driver
 from seleniumbase.undetected.cdp_driver.browser import Browser
 
 from scrapemm.common import RetrievalFailed
+from scrapemm.common.exceptions import TargetUnavailableError
 from scrapemm.server.config import get_config_var
 from scrapemm.server.download.browser import BrowserMedia, annotate_rendered_media
 from scrapemm.server.paths import BROWSER_PROFILE_PATH
@@ -64,7 +67,21 @@ def _browser_args() -> list[str]:
         "--disable-infobars",
         "--no-first-run",
         "--no-default-browser-check",
+        *_fill_screen_args(),
     ]
+
+
+def _fill_screen_args() -> list[str]:
+    """Makes the window fill the container's virtual screen. Xvfb runs without a window
+    manager, so --start-maximized does nothing there, and the window kept SeleniumBase's
+    default of 1280x840 at (20, 54): the CAPTCHA panel showed it small, in a black
+    frame. Later flags win, so these override SeleniumBase's own."""
+    size = os.environ.get("SCRAPEMM_SCREEN_SIZE", "")  # E.g. "1440x900x24"
+    try:
+        width, height = (int(n) for n in size.split("x")[:2])
+    except ValueError:
+        return []
+    return ["--window-position=0,0", f"--window-size={width},{height}"]
 
 
 async def _close_browser_gracefully(browser: Browser, settle: float = 2.0) -> bool:
@@ -320,6 +337,121 @@ async def _own(page: Page) -> None:
     except Exception as e:
         # Harmless now (the sweep asks a tab before closing it), but worth seeing
         logger.info(f"Could not register a browser tab: {type(e).__name__}: {e}")
+
+
+# --- The human's tab ------------------------------------------------------------------
+# While somebody solves a CAPTCHA through the web UI's panel, the tab they see has to stay
+# in front. Retrievals keep opening tabs meanwhile, and a tab opened the usual way
+# (`context.new_page()`) becomes the window's foreground tab: it hid the CAPTCHA, even in
+# the middle of a drag. So while a human tab is up, retrieval tabs open in the background
+# (CDP `Target.createTarget` with `background`), and whatever else comes to the front, a
+# popup say, is put behind it again. Background tabs render and run at full speed: the
+# browser is started with SeleniumBase's --disable-background-timer-throttling,
+# --disable-renderer-backgrounding and --disable-backgrounding-occluded-windows.
+_opening_human_tab: ContextVar[bool] = ContextVar("scrapemm_opening_human_tab", default=False)
+_human_page: Optional[Page] = None
+_BACKGROUND_TAB_PREFIX = "about:blank#scrapemm-background-"
+# Tasks started without anyone awaiting them, referenced so they are not collected
+_background_tasks: set[asyncio.Task] = set()
+
+
+@contextmanager
+def human_tab():
+    """Makes the tab that `HeadedBrowser._new_page()` opens within this block the one a
+    human is looking at, and keeps it in front of all others until the block ends."""
+    global _human_page
+    token = _opening_human_tab.set(True)
+    try:
+        yield
+    finally:
+        _opening_human_tab.reset(token)
+        _human_page = None
+
+
+def _shown_human_tab() -> Optional[Page]:
+    page = _human_page
+    return page if page is not None and not page.is_closed() else None
+
+
+def _run_soon(coroutine) -> None:
+    task = asyncio.ensure_future(coroutine)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+def _become_human_tab(page: Page) -> None:
+    global _human_page
+    _human_page = page
+    context = page.context
+    if not getattr(context, "_scrapemm_keeps_human_tab", False):
+        context._scrapemm_keeps_human_tab = True
+        context.on("page", _on_new_tab)
+    _run_soon(_bring_to_front(page))
+
+
+def _on_new_tab(page: Page) -> None:
+    human = _shown_human_tab()
+    if human is None or page is human or page.url.startswith(_BACKGROUND_TAB_PREFIX):
+        return
+    _run_soon(keep_in_front(human, settle=0.3))
+
+
+async def keep_in_front(page: Page, settle: float = 0.0) -> None:
+    """Brings the page to the front, unless it is there already. Needlessly bringing it
+    there is not harmless: it activates the window, which ends a drag in progress (a
+    slider CAPTCHA reset itself that way)."""
+    if settle:
+        await asyncio.sleep(settle)  # For the new tab to take the front first, if it does
+    with suppress(Exception):
+        if await asyncio.wait_for(page.evaluate("document.visibilityState"), 5) == "visible":
+            return
+    await _bring_to_front(page)
+
+
+async def _bring_to_front(page: Page) -> None:
+    with suppress(Exception):
+        await asyncio.wait_for(page.bring_to_front(), timeout=10)
+
+
+async def _open_background_tab(context: BrowserContext, timeout: float = 25) -> Page:
+    """Opens a tab behind the one in front. Playwright cannot do that itself, so the tab
+    is created over CDP, with a unique blank URL to recognise its page by."""
+    marker = _BACKGROUND_TAB_PREFIX + uuid.uuid4().hex
+    opened = asyncio.get_running_loop().create_future()
+
+    def on_page(page: Page) -> None:
+        if page.url == marker and not opened.done():
+            opened.set_result(page)
+
+    context.on("page", on_page)
+    target_id = None
+    try:
+        session = await context.browser.new_browser_cdp_session()
+        try:
+            target_id = (await session.send("Target.createTarget",
+                                            {"url": marker, "background": True}))["targetId"]
+        finally:
+            with suppress(Exception):
+                await session.detach()
+        for page in context.pages:  # In case the event came before the answer
+            on_page(page)
+        return await asyncio.wait_for(opened, timeout)
+    except BaseException:
+        if target_id is not None and not opened.done():
+            _run_soon(_close_target(target_id))
+        raise
+    finally:
+        context.remove_listener("page", on_page)
+
+
+def renderer_crashed(page: Page) -> bool:
+    """Whether the tab's renderer died (see `HeadedBrowser._browse()`)."""
+    return getattr(page, "_scrapemm_crashed", False)
+
+
+def release_page_soon(page: Page) -> None:
+    """`release_page()` without waiting for it."""
+    _run_soon(release_page(page))
 
 
 async def release_page(page: Page) -> None:
@@ -625,6 +757,15 @@ async def _browser_alive(browser: Optional[Browser]) -> bool:
 # Seconds to give a Cloudflare challenge to clear by itself, before and after solving it
 CLOUDFLARE_SELF_CLEAR_WAIT = 6
 CLOUDFLARE_SOLVE_ATTEMPTS = 3
+# Bounds the wait for the solver and its run, which drives the browser through CDP calls
+# without timeouts of their own: one that hung held the solver's lock, and every page
+# behind a challenge then waited out the full retrieval timeout (thip.media, 10 minutes)
+CLOUDFLARE_SOLVE_TIMEOUT = 120
+
+# Reading a page that navigates meanwhile (see `HeadedBrowser._html_and_source()`)
+REDIRECT_READ_ATTEMPTS = 3
+ANUBIS_WAIT = 20  # Seconds for Anubis' proof of work, which takes a second or two
+_ANUBIS_MARKER = "anubis_challenge"  # The id of the script holding its challenge
 
 # The challenge page, not the bot-management scripts ordinary Cloudflare pages carry too
 _CLOUDFLARE_CHALLENGE_EXPR = ("/^just a moment/i.test(document.title) || !!document.querySelector("
@@ -673,7 +814,7 @@ async def _solve_cloudflare_in_own_tab(url: str) -> bool:
     finally:
         if tab is not None:
             with suppress(Exception):
-                await tab.close()
+                await asyncio.wait_for(tab.close(), 10)
 
 
 @atexit.register
@@ -699,6 +840,13 @@ class HeadedBrowser(RetrievalIntegration):
     generic retrieval method built on it."""
     name = "Headed Browser"
     domains = []
+    # Whether a page answering 404/410 counts as missing rather than as content. Off for
+    # the archive integrations: a replay may pass on the archived page's own status.
+    fails_on_not_found = False
+    # Seconds a page gets to load its document, and whether a page that missed that is
+    # tried once more on a new tab (under load, a page that is quick alone can miss it)
+    navigation_timeout: ClassVar[float] = 60
+    retry_on_timeout: ClassVar[bool] = True
 
     # Shared UC browser for all HeadedBrowser integrations (Perma.cc, Archive.org, …).
     _browser: ClassVar[Optional[Browser]] = None
@@ -901,7 +1049,11 @@ class HeadedBrowser(RetrievalIntegration):
                 await self._prepare_context(context)
                 # Shielded: a tab whose opening is cancelled half-way still opens, and
                 # would then stay open for good. So it is closed once it is there.
-                creating = asyncio.ensure_future(context.new_page())
+                # Behind the tab a human is solving a CAPTCHA in, if there is one
+                human = _opening_human_tab.get()
+                creating = asyncio.ensure_future(
+                    _open_background_tab(context) if not human and _shown_human_tab()
+                    else context.new_page())
                 try:
                     page = await asyncio.wait_for(asyncio.shield(creating), timeout=30)
                 except BaseException:
@@ -913,6 +1065,8 @@ class HeadedBrowser(RetrievalIntegration):
                 except BaseException:
                     await release_page(page)
                     raise
+                if human:
+                    _become_human_tab(page)
                 return page, generation
 
             except (PlaywrightError, asyncio.TimeoutError) as e:
@@ -994,6 +1148,7 @@ class HeadedBrowser(RetrievalIntegration):
         """Opens `url` in a tab of its own and extracts it. The tab is closed, and `slot`
         released, as soon as the page is no longer needed -- before media downloads that
         do not need it (see `resolve_media()`)."""
+        target_url = url  # What is loaded; after a renderer crash, maybe a lighter page
         for attempt in range(2):  # one try + one crash-triggered retry
             page, generation = await self._new_page(None)
             media: Optional[BrowserMedia] = None
@@ -1012,6 +1167,10 @@ class HeadedBrowser(RetrievalIntegration):
                 if slot is not None:
                     slot.release()
 
+            # A crashed renderer does not fail every call at once (a reload on it waits
+            # out its timeout), so extraction steps can ask `renderer_crashed()`
+            with suppress(AttributeError):  # Test doubles may lack events
+                page.on("crash", lambda p: setattr(p, "_scrapemm_crashed", True))
             try:
                 # Before navigating, so it sees every medium the page loads
                 media = BrowserMedia(page)
@@ -1021,7 +1180,16 @@ class HeadedBrowser(RetrievalIntegration):
                 # domcontentloaded: return as soon as the DOM is parseable. Waiting for "load"
                 # often burns many seconds on archive/analytics assets after content is ready.
                 try:
-                    response = await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+                    response = await page.goto(target_url,
+                                               timeout=self.navigation_timeout * 1000,
+                                               wait_until="domcontentloaded")
+                    # The final document's status: goto follows redirects (www -> bare)
+                    if (self.fails_on_not_found and response is not None
+                            and response.status in (404, 410)):
+                        # The site's "not found" page is no content; the engine then
+                        # turns to the archives
+                        raise TargetUnavailableError(
+                            f"{url} does not exist on the live site (HTTP {response.status}).")
                     if response is not None and "pdf" in response.headers.get("content-type", ""):
                         # The browser shows a PDF in its viewer, from which there is no
                         # text to extract. Failing at once lets the next method (e.g.
@@ -1034,7 +1202,8 @@ class HeadedBrowser(RetrievalIntegration):
                         # change that, but other methods (remote services) still may
                         raise RetrievalFailed(f"{self.name} could not reach {url}: "
                                               f"{str(e).splitlines()[0]}") from e
-                    if attempt == 0 and isinstance(e, PlaywrightTimeoutError):
+                    if (attempt == 0 and self.retry_on_timeout
+                            and isinstance(e, PlaywrightTimeoutError)):
                         # With dozens of heavy pages loading at once, a page that
                         # takes seconds on its own can miss the deadline; it is a
                         # matter of load, and worth another try on a fresh page
@@ -1073,6 +1242,14 @@ class HeadedBrowser(RetrievalIntegration):
                 break  # No content found — not a crash, don't retry.
 
             except PlaywrightError as e:
+                if attempt == 0 and page_open and "target crashed" in str(e).lower():
+                    # The tab's renderer died; the browser is fine (it would say
+                    # "closed"/"disconnected"). Some pages crash it every time, so the
+                    # retry may load a lighter page instead (see `_after_renderer_crash()`)
+                    target_url = self._after_renderer_crash(url)
+                    logger.info(f"The page for {url} crashed its renderer; retrying on a new "
+                                f"page{f' with {target_url}' if target_url != url else ''}.")
+                    continue
                 # Not once the page is closed: the slot is gone, and the error is not the page's
                 if attempt == 0 and page_open and self._is_browser_crash(e):
                     if await _browser_alive(HeadedBrowser._browser):
@@ -1089,11 +1266,26 @@ class HeadedBrowser(RetrievalIntegration):
                         # Trigger (or await an already in-flight) single-flight recovery before retrying.
                         await self._ensure_browser(generation)
                     continue
-                raise
+                if attempt == 0 and page_open and "detached" in str(e).lower():
+                    # A frame the retrieval was working in went away: the page replaced
+                    # it (e.g. a replay reloading itself). A fresh page usually settles.
+                    logger.info(f"A frame of {url} was detached mid-retrieval; retrying on "
+                                f"a new page.")
+                    continue
+                if isinstance(e, PlaywrightTimeoutError):
+                    raise  # The engine reports timeouts as such
+                # Not a crash: as a failure of this method, not as a raw Playwright error
+                raise RetrievalFailed(f"{self.name} failed in the browser at {url}: "
+                                      f"{str(e).splitlines()[0][:300]}") from e
             finally:
                 await close_page()
 
         raise RetrievalFailed(f"{self.name} integration was unable to extract content from {url}.")
+
+    def _after_renderer_crash(self, url: str) -> str:
+        """What to load on the new page after `url` crashed its tab's renderer. The same
+        URL by default: a renderer may die of the load of dozens of heavy pages at once."""
+        return url
 
     async def _pass_cloudflare(self, page: Page) -> None:
         """Gets the page past a Cloudflare challenge ("Just a moment..."), if it shows one.
@@ -1117,8 +1309,14 @@ class HeadedBrowser(RetrievalIntegration):
             return
         logger.info(f"☁️ Cloudflare challenge at {page.url}; solving it in a SeleniumBase tab.")
         # One at a time: the click goes through the one shared browser window
-        async with HeadedBrowser._cloudflare_lock:
-            solved = await _solve_cloudflare_in_own_tab(page.url)
+        try:
+            async with asyncio.timeout(CLOUDFLARE_SOLVE_TIMEOUT):
+                async with HeadedBrowser._cloudflare_lock:
+                    solved = await _solve_cloudflare_in_own_tab(page.url)
+        except TimeoutError:
+            logger.warning(f"Solving the Cloudflare challenge at {page.url} did not finish "
+                           f"within {CLOUDFLARE_SOLVE_TIMEOUT} s; given up.")
+            solved = False
         if not solved:
             logger.info(f"Could not get past the Cloudflare challenge at {page.url}.")
             return
@@ -1129,16 +1327,45 @@ class HeadedBrowser(RetrievalIntegration):
                 await page.wait_for_load_state("domcontentloaded", timeout=30_000)
             logger.info(f"☁️ Passed the Cloudflare challenge at {page.url}.")
 
-    @staticmethod
     async def _html_and_source(
-            target: ContentTarget, page: Page
+            self, target: ContentTarget, page: Page
     ) -> tuple[Optional[str], Page | Frame]:
-        """Resolve HTML and a Frame/Page suitable for in-page media fetch."""
+        """Resolve HTML and a Frame/Page suitable for in-page media fetch.
+
+        A page may still be replacing itself: an interstitial that redirects once its
+        script is done, such as Anubis' proof-of-work check (newsmobile.in), navigates
+        right while its HTML is read, and Playwright then refuses ("the page is
+        navigating"). The new document is waited for and read instead."""
         if isinstance(target, ElementHandle):
             html = await target.evaluate("el => el.outerHTML")
             source = await target.owner_frame() or page
             return html, source
-        return await target.content(), target
+        for attempt in range(REDIRECT_READ_ATTEMPTS):
+            last = attempt == REDIRECT_READ_ATTEMPTS - 1
+            try:
+                html = await target.content()
+            except PlaywrightError as e:
+                if last or "is navigating" not in str(e):
+                    raise
+                logger.debug(f"{page.url} was navigating while being read; waiting for it.")
+                await self._await_new_document(page)
+                continue
+            if last or _ANUBIS_MARKER not in html:
+                return html, target
+            logger.debug(f"Waiting for {page.url} to pass its Anubis proof-of-work check.")
+            with suppress(PlaywrightError):
+                await page.wait_for_function(
+                    f"() => !document.getElementById({_ANUBIS_MARKER!r})",
+                    timeout=ANUBIS_WAIT * 1000)
+            await self._await_new_document(page)
+        return None, target  # Not reached
+
+    async def _await_new_document(self, page: Page) -> None:
+        """Lets the document a page navigated to load and build itself."""
+        with suppress(PlaywrightError):
+            await page.wait_for_load_state("domcontentloaded", timeout=30_000)
+        with suppress(PlaywrightError):
+            await self._settle_after_goto(page)
 
     def _cleanup_resources(self):
         """Close the shared UC browser. Caller must hold `_lock` if racing with `_ensure_browser`.
@@ -1192,12 +1419,44 @@ _DOM_STATE_JS = ("() => [document.documentElement ? document.documentElement.out
                  " document.readyState]")
 
 
-async def _is_thin(page: Page) -> bool:
+async def _is_thin(target: Page | Frame, min_text: int) -> bool:
     try:
-        return await page.evaluate(
-            "() => (document.body ? document.body.innerText.length : 0)") < DOM_THIN_TEXT
+        return await target.evaluate(
+            "() => (document.body ? document.body.innerText.length : 0)") < min_text
     except PlaywrightError:
         return True  # Mid-navigation: the next document is still to come
+
+
+async def settle_dom(target: Page | Frame, min_text: int = 0) -> None:
+    """Waits until a page or frame stops building itself (see DOM_SETTLE_*). With
+    `min_text`, a document with less text than that counts as a shell still waiting for
+    its content and gets up to DOM_THIN_TIMEOUT.
+
+    Measured by time, not by a number of samples: while calls were slow (under load),
+    three samples spanned seconds; once they got fast, they spanned half a second, and
+    pages were taken in a pause of their build-up -- Animal Político's article before its
+    text arrived, EFE Verifica's before its last blocks."""
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    anchor, since = None, start  # The size the DOM holds still at, and since when
+    while (now := loop.time()) < start + (DOM_THIN_TIMEOUT if min_text else DOM_SETTLE_TIMEOUT):
+        try:
+            size, state = await target.evaluate(_DOM_STATE_JS)
+        except PlaywrightError:
+            size, state = None, None  # Mid-navigation: whatever comes next is a new page
+        settled = False
+        if size and anchor and abs(size - anchor) <= anchor * DOM_SETTLE_TOLERANCE:
+            loaded = state == "complete" or now - start >= DOM_LOAD_WAIT
+            settled = loaded and now - since >= DOM_STABLE_WINDOW
+        else:
+            anchor, since = size, now
+        if settled or now - start >= DOM_SETTLE_TIMEOUT:
+            # Only now, as it costs a layout: a shell (Animal Político's article sat at
+            # 600 characters for 6 s before its text arrived) is worth waiting for
+            if not min_text or not await _is_thin(target, min_text):
+                return
+            since = now  # Look again after another stable window
+        await asyncio.sleep(DOM_SETTLE_INTERVAL)
 
 
 class Browser(HeadedBrowser):
@@ -1207,34 +1466,11 @@ class Browser(HeadedBrowser):
     not `get()`."""
     name = "Browser"
     domains = []
+    fails_on_not_found = True
 
     async def _settle_after_goto(self, page: Page) -> None:
         """Waits until the page stops building itself. At `domcontentloaded` the markup is
         parsed, but scripts may still be adding the content: Kyiv Independent's page grew
         by another sixth over the next 1.5 s, and UNDP's was sometimes taken at less than
         half its size, with most of the text missing."""
-        # Measured by time, not by a number of samples: while calls were slow (under load),
-        # three samples spanned seconds; once they got fast, they spanned half a second,
-        # and pages were taken in a pause of their build-up -- Animal Político's article
-        # before its text arrived, EFE Verifica's before its last blocks.
-        loop = asyncio.get_running_loop()
-        start = loop.time()
-        anchor, since = None, start  # The size the DOM holds still at, and since when
-        while (now := loop.time()) < start + DOM_THIN_TIMEOUT:
-            try:
-                size, state = await page.evaluate(_DOM_STATE_JS)
-            except PlaywrightError:
-                size, state = None, None  # Mid-navigation: whatever comes next is a new page
-            settled = False
-            if size and anchor and abs(size - anchor) <= anchor * DOM_SETTLE_TOLERANCE:
-                loaded = state == "complete" or now - start >= DOM_LOAD_WAIT
-                settled = loaded and now - since >= DOM_STABLE_WINDOW
-            else:
-                anchor, since = size, now
-            if settled or now - start >= DOM_SETTLE_TIMEOUT:
-                # Only now, as it costs a layout: a shell (Animal Político's article sat
-                # at 600 characters for 6 s before its text arrived) is worth waiting for
-                if not await _is_thin(page):
-                    return
-                since = now  # Look again after another stable window
-            await asyncio.sleep(DOM_SETTLE_INTERVAL)
+        await settle_dom(page, min_text=DOM_THIN_TEXT)

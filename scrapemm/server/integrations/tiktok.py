@@ -10,6 +10,7 @@ from ezmm.common.items import Video, Image
 from tiktok_research_api import (TikTokResearchAPI, QueryUserInfoRequest, Criteria, Query,
                                  APIErrorResponse)
 
+from scrapemm.server.workers import run_light
 from scrapemm.common.exceptions import (AccessBlockedError, RateLimitError, RetrievalFailed,
                                         TargetUnavailableError)
 from scrapemm.server.download import download_image
@@ -31,9 +32,13 @@ VIDEO_FIELDS = ("id,create_time,username,region_code,video_description,video_dur
                 "hashtag_names,view_count,like_count,comment_count,share_count,music_id,"
                 "voice_to_text")
 
-# Error codes worth a second attempt. Everything else (a malformed query, an exhausted
-# quota) fails the same way no matter how often we ask.
-RETRYABLE_ERROR_CODES = (APIErrorResponse.ACCESS_TOKEN_INVALID, APIErrorResponse.TIMEOUT)
+# Error codes that fail the same way no matter how often we ask: the query itself is
+# wrong, or (with "cannot find" in the message) its target does not exist. The client
+# library names the first "invalid_param", the API answers "invalid_params". Everything
+# else -- a stale token, a timeout, a rate limit, a hiccup of the API -- is retried.
+PERMANENT_ERROR_CODES = {APIErrorResponse.INVALID_PARAM, "invalid_params",
+                         APIErrorResponse.INVALID_REQUEST}
+API_ATTEMPTS = 3
 
 
 class TikTok(RetrievalIntegration):
@@ -159,36 +164,57 @@ class TikTok(RetrievalIntegration):
             "end_date": (created_at + timedelta(days=1)).strftime("%Y%m%d"),
             "max_count": 1,
         }
-        endpoint = f"{self.api.url}/v2/research/video/query/?fields={VIDEO_FIELDS}"
+        try:
+            data = await self._api_post(f"/v2/research/video/query/?fields={VIDEO_FIELDS}",
+                                        body, session, f"video {video_id}")
+        except (RetrievalFailed, TargetUnavailableError) as e:
+            logger.warning(str(e))
+            return None
+        videos = data.get("videos") or []
+        return videos[0] if videos else None
 
-        error = {}
-        # Cap how many of these queries run at once: bypassing the client library also
-        # bypasses its (blocking) rate limiter, and a batch retrieval runs up to 40 URLs
-        # in parallel.
+    async def _api_post(self, path: str, body: dict, session: aiohttp.ClientSession,
+                        subject: str) -> dict:
+        """Posts a query to the Research API and returns the response's data.
+
+        Raises TargetUnavailableError only when the API says the subject does not exist,
+        and RetrievalFailed for any other failure, once retrying did not help. The client
+        library could not tell these apart: it returned None for every error, which
+        reported users as non-existent whenever the API merely hiccuped (and stopped
+        every fallback, too). Posting ourselves also avoids its blocking retry loops and
+        `time.sleep` rate limiter.
+        """
+        endpoint = f"{self.api.url}{path}"
+        error: dict = {}
+        # Cap how many queries run at once: a batch retrieval runs up to 40 URLs in parallel
         async with self.api_semaphore:
-            for attempt in range(2):
+            for attempt in range(API_ATTEMPTS):
+                if attempt:
+                    await asyncio.sleep(attempt)  # 1 s, then 2 s
                 try:
-                    async with session.post(endpoint, json=body, headers=self.api.headers()) as response:
-                        payload = await response.json()
+                    async with session.post(endpoint, json=body, headers=self.api.headers(),
+                                            timeout=aiohttp.ClientTimeout(total=20)) as response:
+                        payload = await response.json(content_type=None)
                 except Exception as e:
-                    logger.warning(f"TikTok Research API query for video {video_id} failed: {e}")
-                    return None
+                    error = {"code": type(e).__name__, "message": str(e)}
+                    continue
 
                 error = payload.get("error") or {}
-                if error.get("code") == APIErrorResponse.OK:
-                    videos = (payload.get("data") or {}).get("videos") or []
-                    return videos[0] if videos else None
-
-                if error.get("code") not in RETRYABLE_ERROR_CODES or attempt:
+                code = error.get("code")
+                if code == APIErrorResponse.OK:
+                    return payload.get("data") or {}
+                logger.debug(f"TikTok Research API query for {subject} failed (attempt "
+                             f"{attempt + 1}): {code}: {error.get('message')}")
+                if code in PERMANENT_ERROR_CODES:
+                    if "cannot find" in (error.get("message") or "").lower():
+                        raise TargetUnavailableError(f"TikTok reports that {subject} does not exist.")
                     break
-
-                if error.get("code") == APIErrorResponse.ACCESS_TOKEN_INVALID:
-                    # The client fetches its access token once on connect and never renews it.
+                if code == APIErrorResponse.ACCESS_TOKEN_INVALID:
+                    # The client fetches its access token once on connect and never renews it
                     await asyncio.to_thread(self.api.refresh_token)
 
-        logger.warning(f"TikTok Research API query for video {video_id} failed: "
-                       f"{error.get('code')}: {error.get('message')}")
-        return None
+        raise RetrievalFailed(f"TikTok Research API query for {subject} failed: "
+                              f"{error.get('code')}: {error.get('message')}")
 
     @staticmethod
     def _created_at(video_id: str) -> datetime | None:
@@ -209,9 +235,34 @@ class TikTok(RetrievalIntegration):
 
     async def _get_photo(self, url: str, session: aiohttp.ClientSession,
                          output_format: OutputFormat = "multimodal") -> ScrapedContent:
-        content = await decodo.scrape(url, session, output_format="html")
-        html = self._prepare_photo_html(content.html)
-        return await to_scraped_content(html, session=session, output_format=output_format, url=url)
+        """Decodo first; the shared browser if Decodo brings no post. Decodo often gets
+        only TikTok's page shell -- scripts, no rendered post -- while the browser gets
+        the post even when TikTok lays its CAPTCHA over it (the content is loaded
+        underneath). A CAPTCHA that really hides the post is then one the browser met,
+        which a human can solve in the CAPTCHA panel."""
+        from scrapemm.server.captcha_detect import detect_captcha
+        try:
+            content = await decodo.scrape(url, session, output_format="html")
+            html = await run_light(self._prepare_photo_html, content.html)
+            scraped = await to_scraped_content(html, session=session,
+                                               output_format=output_format, url=url)
+            if "<img" in html and not detect_captcha(scraped):
+                return scraped
+            reason = "no post in the page"
+        except Exception as e:
+            reason = f"{type(e).__name__}: {e}"
+        logger.info(f"Decodo's copy of {url} is unusable ({reason}); rendering it in the "
+                    f"browser.")
+        from scrapemm.server.integrations import browser
+        rendered = await browser._get(url, output_format=output_format, session=session)
+        # The page's title says "Log in | TikTok" even when the post is there, under a
+        # login dialog; the post's own markup is what counts. A page without it that
+        # shows a CAPTCHA is passed on as it is: the engine queues it for a human.
+        html = rendered.html or ""
+        if ('data-e2e="video-desc"' not in html and "photomode" not in html
+                and not detect_captcha(rendered)):
+            raise RetrievalFailed(f"TikTok's page at {url} shows no post.")
+        return rendered
 
     @staticmethod
     def _prepare_photo_html(html: str) -> str:
@@ -251,16 +302,11 @@ class TikTok(RetrievalIntegration):
         if not self.api_available:
             raise RuntimeError("Retrieving TikTok profiles requires TikTok Research API credentials.")
 
-        try:
-            user_info_request = QueryUserInfoRequest(username=username)
-            # The API call is synchronous/blocking, so keep it off the event loop --
-            # otherwise it stalls every other URL being retrieved in parallel.
-            user_info = await asyncio.to_thread(self.api.query_user_info, user_info_request)
-        except Exception as e:
-            raise RuntimeError(f"Error retrieving TikTok user profile with API: {e}")
-
+        fields = QueryUserInfoRequest(username=username).fields
+        user_info = await self._api_post(f"/v2/research/user/info/?fields={fields}",
+                                         {"username": username}, session, f"user @{username}")
         if not user_info:
-            raise TargetUnavailableError(f"TikTok user @{username} not available.")
+            raise RetrievalFailed(f"The TikTok Research API returned no data for @{username}.")
 
         sequence = await self._create_profile_sequence_from_api(username, user_info, url, session)
         return ScrapedContent(multimodal=sequence)

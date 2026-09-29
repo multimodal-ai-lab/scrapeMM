@@ -176,9 +176,8 @@ async def download_hls_video(
             # Use ffmpeg to remux HLS (CMAF/fMP4) directly into MP4.
             mp4_bytes = await _ffmpeg_remux_hls_to_mp4(final_playlist_url)
             if mp4_bytes:
-                video = Video(binary_data=mp4_bytes, source_url=playlist_url)
-                video.relocate(move_not_copy=True)
-                return video
+                # Writes the whole video: off the event loop
+                return await asyncio.to_thread(video_from_binary, mp4_bytes, playlist_url)
             return None
 
         # Download all segments concurrently. A playlist routinely has hundreds of
@@ -215,13 +214,9 @@ async def download_hls_video(
 
         # Combine all segments
         if video_segments:
-            ts_bytes = b''.join(video_segments)
-            mp4_bytes = await _ts_to_mp4(ts_bytes)
-
-            # Create Video object with MP4 content
-            video = Video(binary_data=mp4_bytes, source_url=playlist_url)
-            video.relocate(move_not_copy=True)
-            return video
+            mp4_bytes = await _ts_to_mp4(video_segments)
+            # Writes the whole video: off the event loop
+            return await asyncio.to_thread(video_from_binary, mp4_bytes, playlist_url)
 
     except Exception as e:
         # A warning, not debug: the page is still returned, just without its video, and
@@ -251,7 +246,7 @@ async def is_maybe_video_url(url: str, session: Union[aiohttp.ClientSession, "AP
         return False
 
 
-async def _ts_to_mp4(ts_bytes: bytes) -> bytes:
+async def _ts_to_mp4(segments: list[bytes]) -> bytes:
     """Remuxes an MPEG-TS video into MP4, without re-encoding.
 
     With the FFmpeg `_resolve_ffmpeg_path()` finds, not ezMM's `ts_to_mp4()`: that one
@@ -264,7 +259,8 @@ async def _ts_to_mp4(ts_bytes: bytes) -> bytes:
 
     with tempfile.TemporaryDirectory() as tmp:
         ts_path, mp4_path = Path(tmp) / "video.ts", Path(tmp) / "video.mp4"
-        ts_path.write_bytes(ts_bytes)
+        # Hundreds of MB, written off the event loop, which it blocked for seconds
+        await asyncio.to_thread(_write_segments, ts_path, segments)
         proc = await asyncio.create_subprocess_exec(
             ffmpeg_path, "-loglevel", "error", "-hide_banner", "-y", "-i", str(ts_path),
             "-c", "copy", "-f", "mp4", str(mp4_path),
@@ -273,7 +269,13 @@ async def _ts_to_mp4(ts_bytes: bytes) -> bytes:
         if proc.returncode != 0 or not mp4_path.is_file():
             raise RuntimeError(f"FFmpeg exited with {proc.returncode}: "
                                f"{stderr.decode(errors='ignore').strip()[-500:]}")
-        return mp4_path.read_bytes()
+        return await asyncio.to_thread(mp4_path.read_bytes)
+
+
+def _write_segments(path: Path, segments: list[bytes]) -> None:
+    with open(path, "wb") as f:
+        for segment in segments:
+            f.write(segment)
 
 
 async def _ffmpeg_remux_hls_to_mp4(playlist_url: str) -> Optional[bytes]:

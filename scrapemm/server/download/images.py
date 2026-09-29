@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from typing import Optional, Union, TYPE_CHECKING
 
@@ -21,6 +22,18 @@ logger = logging.getLogger("scrapeMM")
 # Tolerate images that are truncated
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
+# Threads decoding and rescaling images. Bounded: every busy Python thread competes with
+# the event loop for the GIL, and a page with hundreds of images otherwise put a dozen
+# of them to work at once, stalling the loop -- and so every retrieval -- for up to a
+# second at a time.
+_image_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="images")
+
+
+async def decode_image(content: bytes, source_url: str, **kwargs) -> Optional[Image]:
+    """`image_from_binary()` in the image threads, off the event loop."""
+    return await asyncio.get_running_loop().run_in_executor(
+        _image_executor, lambda: image_from_binary(content, source_url, **kwargs))
+
 
 async def download_image(
         image_url: str,
@@ -36,10 +49,8 @@ async def download_image(
         assert isinstance(content, bytes)
         # Decoding and rescaling are CPU-bound and would otherwise stall every other
         # retrieval running on this event loop.
-        return await asyncio.to_thread(
-            image_from_binary, content, image_url,
-            ignore_small_images=ignore_small_images, max_size=max_size,
-        )
+        return await decode_image(content, image_url,
+                                  ignore_small_images=ignore_small_images, max_size=max_size)
 
 
 def image_from_binary(
@@ -61,7 +72,16 @@ def image_from_binary(
         if not ignore_small_images or (pillow_img.width > 256 and pillow_img.height > 256):
             image = Image(pillow_image=pillow_img, source_url=source_url)
             image.relocate(move_not_copy=True)  # Ensure the image is in the temp dir + follows simple naming
+            # The pixels are on disk now and reload lazily. Kept, they add up to GBs over
+            # a batch; the size is all the retrieval still needs (see `image_size()`).
+            image._scrapemm_size = (pillow_img.width, pillow_img.height)
+            image._image = None
             return image
+
+
+def image_size(image: Image) -> tuple[int, int]:
+    """The image's size, without loading its pixels if `image_from_binary()` made it."""
+    return getattr(image, "_scrapemm_size", None) or (image.width, image.height)
 
 
 async def is_maybe_image_url(url: str, session: Union[aiohttp.ClientSession, "APIRequestContext"]) -> bool:
