@@ -181,79 +181,45 @@ yourself when you decide to, and expect older sequences to lose their media when
 
 ## 🔎 Web search
 
-scrapeMM can also *find* pages, through search APIs. Search APIs disagree on almost
-everything, their parameters and their results alike, so scrapeMM does not force them
-into one schema: every provider comes with its own query and response classes that
-mirror that provider's API. The query you build picks the provider.
-
-| Provider | Search types | Secret |
-|---|---|---|
-| [Serper](https://serper.dev) (Google results) | `"search"` (web), `"images"` | `serper_api_key` |
-
-The provider's API key lives on the server: set it under **Secrets** in the web UI, the
-same way as Decodo's token. Each provider has a card on the dashboard, which names the
-missing key; disabling the card makes the server refuse that provider's searches.
+scrapeMM can also *find* pages. Search APIs differ in their parameters and results, so each
+provider has its own query and response classes that mirror its API; the query you build picks
+the provider. Set the provider's key under **Secrets** in the web UI (Serper: `serper_api_key`).
 
 ```python
-import asyncio
-import scrapemm
+import asyncio, scrapemm
 from scrapemm.search import SerperQuery, search
 
-response = asyncio.run(search(SerperQuery(q="eiffel tower", gl="fr", num=20)))
-for result in response.organic:
-    print(result.position, result.title, result.link)
-print(response.knowledge_graph.description if response.knowledge_graph else None)
-
-images = asyncio.run(search(SerperQuery(q="eiffel tower", type="images")))
-print(images.images[0].image_url, images.images[0].image_width)
-
-# Every response has `urls`, the result pages, ready to be retrieved
-pages = asyncio.run(scrapemm.retrieve(response.urls[:5]))
+r = asyncio.run(search(SerperQuery(q="eiffel tower", type="images", num=20)))
+print(r.images[0].image_url)                     # Serper's own fields, typed
+pages = asyncio.run(scrapemm.retrieve(r.urls))   # every provider: the result pages
 ```
 
-`SerperQuery` holds Serper's own parameters; anything left at `None` is Serper's default:
+**Serper** (Google results) takes its own parameters (`q`, `type` = `"search"` or `"images"`,
+`gl`, `hl`, `location`, `num`, `page`, `tbs`, `autocorrect`) plus two of scrapeMM's:
 
-| Field | Meaning |
-|---|---|
-| `q` | The search terms |
-| `type` | `"search"` (default) or `"images"` |
-| `gl`, `hl` | Country (`"us"`) and language (`"en"`) of the results |
-| `location` | Place to search from, e.g. `"Berlin, Germany"` |
-| `num`, `page` | Results per page (1–100) and which page (from 1) |
-| `tbs` | Time filter: `"qdr:h"`, `"qdr:d"`, `"qdr:w"`, `"qdr:m"` or `"qdr:y"` |
-| `autocorrect` | Whether Google may correct the spelling of `q` |
-| `before` | Only results from before this day, which is itself left out: a `datetime.date` or `"2024-05-01"`. scrapeMM's own option, sent as Google's date range in `tbs`, so not combinable with a `qdr:` filter |
-| `exclude_sites` | Websites to leave out, e.g. `["snopes.com"]`, subdomains included. scrapeMM's own option: sent as `-site:` operators (as many as fit Google's 32-word limit) and filtered out of the response too, so a page can hold fewer than `num` results |
+- `before="2024-05-01"`: only results from before that day, which is itself left out (not
+  combinable with a `qdr:` time filter in `tbs`)
+- `exclude_sites=["snopes.com"]`: leaves those sites and their subdomains out, so a page may
+  hold fewer than `num` results
 
-`SerperResponse` has one typed attribute per field of Serper's JSON, in snake case:
-`organic`, `images`, `answer_box`, `knowledge_graph`, `people_also_ask`,
-`related_searches`, `top_stories`, `search_parameters` and `credits`. Whatever else Serper
-sends lands in `extra`, on every level, so nothing is lost when Serper adds a field.
+`SerperResponse` mirrors Serper's JSON in snake case (`organic`, `images`, `answer_box`,
+`knowledge_graph`, …); fields it does not know land in `extra`. Failures arrive as `ValueError`,
+`RateLimitError`, `QuotaExceededError`, `TimeoutError` or `ServerError`.
 
-Failures arrive as exceptions you can catch: `ValueError` for a query Serper (or scrapeMM)
-refuses, `RateLimitError`, `QuotaExceededError` when the credits are used up,
-`TimeoutError`, and `ServerError` for everything on the server's side, including a key
-that is missing or wrong.
-
-Over HTTP, each provider has a route of its own, which takes the query as JSON and answers
-in the provider's own format (`GET /v1/search` lists the providers):
+Over HTTP, `GET /v1/search` lists the providers and each has its own route:
 
 ```bash
-curl -X POST http://localhost:8080/v1/search/serper \
-     -H "Authorization: Bearer $SCRAPEMM_API_KEY" -H "Content-Type: application/json" \
-     -d '{"q": "eiffel tower", "type": "images", "num": 5}'
+curl -X POST http://localhost:8080/v1/search/serper -H "Authorization: Bearer $SCRAPEMM_API_KEY" \
+     -H "Content-Type: application/json" -d '{"q": "eiffel tower", "num": 5}'
 ```
 
-Searches queue server-wide: at most 10 are with a provider at once (**Max concurrent
-searches** under Settings), so a burst waits its turn instead of running into the
-provider's rate limit all at once. Searches are not recorded as jobs. The job history is about retrieving URLs, and a
-search retrieves none.
+At most 10 searches reach a provider at once (**Max concurrent searches** under Settings); more
+wait their turn. Searches are not recorded as jobs.
 
-Adding a provider takes four steps: its query and response classes in
-`scrapemm/search/<provider>.py`, the code calling its API in
-`scrapemm/server/search/<provider>.py`, an entry in `SEARCH_PROVIDERS`, which also gives it
-its route and its dashboard card, and its key in `SECRETS`. For the web UI, add a component under
-`ui/app/components/search/` and list it in `ui/app/pages/search.vue`.
+**Adding a provider:** its query and response classes in `scrapemm/search/<provider>.py`, its
+API calls in `scrapemm/server/search/<provider>.py`, an entry in `SEARCH_PROVIDERS` (which gives
+it its route and dashboard card), its key in `SECRETS`, and for the UI a component in
+`ui/app/components/search/`, listed in `ui/app/pages/playground/search.vue`.
 
 ## 🖥️ The web UI
 
