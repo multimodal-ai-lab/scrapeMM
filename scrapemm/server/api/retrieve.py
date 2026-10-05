@@ -61,6 +61,7 @@ class RetrieveRequest(BaseModel):
     prioritize: Literal["completeness", "speed"] = "completeness"
     use_cache: bool = True
     hedging_delay: Optional[float] = None
+    only_main_content: bool = False
 
 
 @router.post("/retrieve")
@@ -102,6 +103,7 @@ async def _stream(request: RetrieveRequest) -> AsyncIterator[bytes]:
                     prioritize=request.prioritize,
                     use_cache=request.use_cache,
                     hedging_delay=request.hedging_delay,
+                    only_main_content=request.only_main_content,
                 )): url for url in urls
             }
             pending = set(tasks)

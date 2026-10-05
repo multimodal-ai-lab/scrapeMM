@@ -74,6 +74,7 @@ async def retrieve(
         prioritize: Literal["completeness", "speed"] = "completeness",
         use_cache: bool = True,
         hedging_delay: float | None = None,
+        only_main_content: bool = False,
         config: Optional[Settings] = None,
 ) -> ScrapingResponse | list[ScrapingResponse]:
     """Retrieves the contents present at the given URL(s) through a scrapeMM server.
@@ -109,6 +110,9 @@ async def retrieve(
         instead of scraping it again.
     :param hedging_delay: Seconds of head start each retrieval method gets before the
         next one is launched alongside it. None uses the server's configured default.
+    :param only_main_content: Whether to leave the page's UI elements (navigation, headers,
+        footers, sidebars, cookie banners, etc.) out of every output format, the HTML
+        included, keeping only the main content.
     :param config: Connection settings to use instead of the global ones.
     """
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
@@ -137,6 +141,7 @@ async def retrieve(
         "prioritize": prioritize,
         "use_cache": use_cache,
         "hedging_delay": hedging_delay,
+        "only_main_content": only_main_content,
     }
 
     by_url: dict[str, ScrapingResponse] = {}

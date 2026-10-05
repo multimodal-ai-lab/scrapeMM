@@ -211,6 +211,23 @@ async def test_retrieve_deduplicates_urls(client, stub_engine):
     assert len([m for m in messages if m["type"] == "result"]) == 1
 
 
+async def test_retrieve_passes_only_main_content_on(client, monkeypatch):
+    """The option reaches the engine, and is off unless asked for."""
+    seen = []
+
+    async def fake(url, session, **kwargs):
+        seen.append(kwargs["only_main_content"])
+        return ScrapingResponse(url=url, content=ScrapedContent(markdown="# Hi"),
+                                method="stub", output_format="markdown")
+
+    from scrapemm.server.api import retrieve as retrieve_api
+    monkeypatch.setattr(retrieve_api, "retrieve_one", fake)
+    await _lines(client, {"urls": ["https://example.com/a"], "output_format": "markdown"})
+    await _lines(client, {"urls": ["https://example.com/a"], "output_format": "markdown",
+                          "only_main_content": True})
+    assert seen == [False, True]
+
+
 async def test_retrieve_rejects_unknown_output_format(client, stub_engine):
     """Refused before the stream opens, so the caller gets a plain error status rather
     than a 200 whose body turns out to be an apology."""

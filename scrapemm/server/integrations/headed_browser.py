@@ -1233,6 +1233,7 @@ class HeadedBrowser(RetrievalIntegration):
                         content = await to_scraped_content(
                             html, session=page.context.request,
                             output_format=kwargs.get("output_format", "multimodal"),
+                            only_main_content=kwargs.get("only_main_content", False),
                             url=url, source_element=source, media=media,
                             max_video_size=kwargs.get("max_video_size"),
                             on_browser_done=done_with_page,

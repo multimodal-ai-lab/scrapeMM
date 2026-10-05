@@ -87,7 +87,15 @@ def detect_captcha(content: ScrapedContent) -> Optional[str]:
     if "<video" in markup:
         return None
     if len(text) <= MAX_CHALLENGE_TEXT_LENGTH:
-        return _find(markup, CHALLENGE_PHRASES) or _find(markup, CAPTCHA_WIDGETS)
+        label = _find(markup, CHALLENGE_PHRASES) or _find(markup, CAPTCHA_WIDGETS)
+        # Content stripped to its main part is short by design. Judge the page as a
+        # whole then, as it would be judged without the stripping: a short article with
+        # a reCAPTCHA in its (stripped) footer is no challenge.
+        if label and content.main_content_html is not None:
+            from scrapemm.server.util import html2md  # Heavy module, needed rarely
+            return detect_captcha(ScrapedContent(html=content.html,
+                                                 markdown=html2md(content.html)))
+        return label
 
     return None
 

@@ -39,7 +39,7 @@ from scrapemm.server.integrations.firecrawl.firecrawl import configured_firecraw
 from scrapemm.server.toggles import is_enabled
 from scrapemm.server.workers import run_light
 from scrapemm.server.util import (run_with_semaphore, get_domain, normalize_video, preprocess_url,
-                                  to_scraped_content)
+                                  strip_to_main_content, to_scraped_content)
 
 logger = logging.getLogger("scrapeMM")
 
@@ -64,7 +64,8 @@ async def retrieve(
         max_video_size: int | None = None,
         prioritize: Literal["completeness", "speed"] = "completeness",
         use_cache: bool = True,
-        hedging_delay: float | None = None
+        hedging_delay: float | None = None,
+        only_main_content: bool = False
 ) -> ScrapingResponse | list[ScrapingResponse]:
     """Main function of this repository. Downloads the contents present at the given URL(s).
     For each URL, returns a ScrapingResponse containing the retrieved content, error, and method.
@@ -110,6 +111,11 @@ async def retrieve(
         work (and, for paid methods, duplicated requests), hence disabled by default.
         Pass a number to enable it for this call, or set it process-wide via
         `update_config(hedging_delay=5)`. None or 0 runs the methods one after another.
+    :param only_main_content: If True, the page's UI elements (navigation, headers,
+        footers, sidebars, cookie banners, etc.) are left out of every output format,
+        the HTML included, keeping only the main content. All web methods strip alike,
+        by the rules of Firecrawl's option of the same name. API integrations (e.g.
+        TikTok) return the content only anyway.
     """
     # Ensure URLs are string or list
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
@@ -157,7 +163,7 @@ async def retrieve(
         # Retrieve URLs concurrently
         tasks = [_retrieve_single(url, session, url_to_methods[url], actions,
                                   output_format, max_video_size, prioritize, use_cache,
-                                  hedging_delay) for url in
+                                  hedging_delay, only_main_content) for url in
                  urls_unique]
         results = await run_with_semaphore(tasks, limit=40, show_progress=show_progress and len(urls_unique) > 1,
                                            progress_description="Retrieving URLs...")
@@ -200,6 +206,7 @@ async def retrieve_one(
         prioritize: Literal["completeness", "speed"] = "completeness",
         use_cache: bool = True,
         hedging_delay: float | None = None,
+        only_main_content: bool = False,
 ) -> ScrapingResponse:
     """Retrieves a single URL, subject to the server's concurrency limit. This is what
     the API streams over: it needs results one at a time, as they finish, rather than
@@ -214,13 +221,13 @@ async def retrieve_one(
     # once the first of them has finished.
     key = (preprocess_url(url), output_format, json.dumps(methods, default=str),
            json.dumps(actions, sort_keys=True, default=str), max_video_size, prioritize,
-           use_cache, hedging_delay)
+           use_cache, hedging_delay, only_main_content)
     shared = _in_flight.get(key)
     joined = shared is not None
     if shared is None:
         shared = _InFlight(asyncio.create_task(_gated_retrieve(
             url, session, methods, actions, output_format, max_video_size, prioritize,
-            use_cache, hedging_delay)))
+            use_cache, hedging_delay, only_main_content)))
         _in_flight[key] = shared
         shared.task.add_done_callback(lambda _, k=key, s=shared: _forget(k, s))
     else:
@@ -262,7 +269,8 @@ def _forget(key: tuple, shared: _InFlight) -> None:
 
 
 async def _gated_retrieve(url, session, methods, actions, output_format, max_video_size,
-                          prioritize, use_cache, hedging_delay) -> ScrapingResponse:
+                          prioritize, use_cache, hedging_delay,
+                          only_main_content) -> ScrapingResponse:
     # Its own HTTP session rather than the first caller's: that one closes when its job
     # ends or its client disconnects, while others may still be waiting on this result
     global _active
@@ -270,7 +278,8 @@ async def _gated_retrieve(url, session, methods, actions, output_format, max_vid
         _active += 1
         try:
             return await _retrieve_single(url, own, methods, actions, output_format,
-                                          max_video_size, prioritize, use_cache, hedging_delay)
+                                          max_video_size, prioritize, use_cache, hedging_delay,
+                                          only_main_content)
         finally:
             _active -= 1
             _release_media_memory()
@@ -310,7 +319,8 @@ async def _retrieve_single(
         max_video_size: int | None = None,
         prioritize: Literal["completeness", "speed"] = "completeness",
         use_cache: bool = True,
-        hedging_delay: float | None = None
+        hedging_delay: float | None = None,
+        only_main_content: bool = False
 ) -> ScrapingResponse:
     logger.debug(f"Retrieving {url}")
     start_time = time.time()
@@ -349,7 +359,7 @@ async def _retrieve_single(
 
     # Re-use a recent, successful retrieval of the same URL, if there is any
     key = cache_key(url, output_format, [chain.label(m) for m in plan.order],
-                    max_video_size)
+                    max_video_size, only_main_content)
     if use_cache:
         cached = cache.get(key)
         if cached is not None:
@@ -370,7 +380,7 @@ async def _retrieve_single(
             return await _success(url, key, *winner, errors, output_format, start_time)
         challenge = challenges.store.get(domain)
         challenges.store.record(domain, url, challenge.captcha if challenge else "CAPTCHA",
-                                output_format, methods, max_video_size)
+                                output_format, methods, max_video_size, only_main_content)
         return _failure(url, output_format, errors, start_time)
 
     # A host that is down fails every method only after its full timeout, minutes in
@@ -426,19 +436,22 @@ async def _retrieve_single(
         def map_method_to_retrieval_routine(m: str) -> Coroutine:
             if m.lower() == "firecrawl":
                 return fire.scrape(url, session=session, output_format=output_format,
-                                   actions=actions, max_video_size=max_video_size)
+                                   actions=actions, max_video_size=max_video_size,
+                                   only_main_content=only_main_content)
             elif m.lower() == BROWSER:
                 return browser._get(url, output_format=output_format,
-                                    max_video_size=max_video_size)
+                                    max_video_size=max_video_size,
+                                    only_main_content=only_main_content)
             elif m == PLAIN_HTTP:
-                return _plain_http(url, session, output_format, max_video_size)
+                return _plain_http(url, session, output_format, max_video_size, only_main_content)
             elif m.lower() == "decodo":
                 # Tight when the host is unreachable from here: a proxy getting through
                 # does so quickly, and otherwise the host is most likely down
                 return decodo.scrape(url, session, output_format=output_format,
                                      timeout=15 if prioritize == "speed" else 30 if unreachable else 60,
                                      max_retries=1 if prioritize == "speed" or unreachable else 5,
-                                     max_video_size=max_video_size)
+                                     max_video_size=max_video_size,
+                                     only_main_content=only_main_content)
             else:
                 return retrieve_via_integration(url, integration_name=m, session=session,
                                                 max_video_size=max_video_size,
@@ -492,7 +505,8 @@ async def _retrieve_single(
             if (winner is None and i == last_live and unreachable is None and methods
                     and BROWSER not in methods
                     and (content := await _cloudflare_fallback(url, domain, session, errors,
-                                                               output_format, max_video_size))):
+                                                               output_format, max_video_size,
+                                                               only_main_content))):
                 winner = (BROWSER, content)
         if winner is not None:
             break
@@ -515,10 +529,13 @@ async def _retrieve_single(
     logger.warning(f"All retrieval methods failed for URL: {url}")
 
     # Queue the URL with a CAPTCHA challenge for a human to decide on
-    _record_challenge(domain, url, errors, output_format, methods, max_video_size)
+    _record_challenge(domain, url, errors, output_format, methods, max_video_size,
+                      only_main_content)
 
-    if partial is not None and partial.multimodal is not None:
-        await postprocess_media(partial.multimodal)
+    if partial is not None:
+        strip_to_main_content(partial)  # Passed the detection too
+        if partial.multimodal is not None:
+            await postprocess_media(partial.multimodal)
     return _failure(url, output_format, errors, start_time, content=partial)
 
 
@@ -620,6 +637,7 @@ async def _success(url: str, key, method_name: str, content: ScrapedContent,
                    errors: dict, output_format: OutputFormat,
                    start_time: float) -> ScrapingResponse:
     logger.info(f"🎉 Successfully retrieved with method: {method_name}")
+    strip_to_main_content(content)  # Only now, past CAPTCHA and paywall detection
     if content.multimodal is not None:
         await postprocess_media(content.multimodal)
     response = ScrapingResponse(url=url, content=content, method=method_name, errors=errors,
@@ -1061,7 +1079,8 @@ PLAIN_HTTP = "Plain HTTP"
 
 
 async def _plain_http(url: str, session: aiohttp.ClientSession, output_format: OutputFormat,
-                      max_video_size: Optional[int]) -> ScrapedContent:
+                      max_video_size: Optional[int],
+                      only_main_content: bool = False) -> ScrapedContent:
     """GETs the page directly, as static HTML. The last resort for the open web: scraping
     services refuse some domains outright (Decodo: gov.ru) or fail where a plain request
     goes through (archive.premier.gov.ru, which Firecrawl could not load). Its result goes
@@ -1080,13 +1099,15 @@ async def _plain_http(url: str, session: aiohttp.ClientSession, output_format: O
         html = await response.text(errors="replace")
         final_url = str(response.url)
     return await to_scraped_content(html, session=session, output_format=output_format,
-                                    url=final_url, max_video_size=max_video_size)
+                                    only_main_content=only_main_content, url=final_url,
+                                    max_video_size=max_video_size)
 
 
 async def _cloudflare_fallback(url: str, domain: str, session: aiohttp.ClientSession,
                                errors: dict[str, Optional[Exception]],
                                output_format: OutputFormat,
-                               max_video_size: Optional[int]) -> Optional[ScrapedContent]:
+                               max_video_size: Optional[int],
+                               only_main_content: bool = False) -> Optional[ScrapedContent]:
     """Last resort for a URL behind a Cloudflare challenge when the Browser method was not
     among the methods tried (e.g. a domain routed to Firecrawl or Decodo only): the
     browser gets past the challenge where scraping services cannot (see
@@ -1102,7 +1123,8 @@ async def _cloudflare_fallback(url: str, domain: str, session: aiohttp.ClientSes
     logger.info(f"☁️ {url} is behind a Cloudflare challenge; trying the browser.")
     try:
         content = await browser._get(url, output_format=output_format,
-                                     max_video_size=max_video_size)
+                                     max_video_size=max_video_size,
+                                     only_main_content=only_main_content)
     except Exception as e:
         errors[BROWSER] = e
         return None
@@ -1134,7 +1156,7 @@ async def _behind_cloudflare_challenge(url: str, session: aiohttp.ClientSession,
 
 def _record_challenge(domain: str, url: str, errors: dict[str, Optional[Exception]],
                       output_format: OutputFormat, methods: list[str],
-                      max_video_size: Optional[int]) -> None:
+                      max_video_size: Optional[int], only_main_content: bool = False) -> None:
     """Opens (or joins) a CAPTCHA challenge for the domain if a method ran into one.
     A human decides on it in the web UI: solve it, or discard it -- which blacklists the
     domain, as used to happen straight away. Integrations that queue their own gated
@@ -1153,7 +1175,7 @@ def _record_challenge(domain: str, url: str, errors: dict[str, Optional[Exceptio
     if getattr(integration, "handles_captchas", False):
         return
     challenges.store.record(domain, url, _captcha_name(error), output_format, methods,
-                            max_video_size)
+                            max_video_size, only_main_content)
 
 
 def _captcha_name(error: Exception) -> str:

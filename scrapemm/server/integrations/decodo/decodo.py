@@ -51,6 +51,7 @@ class Decodo:
             timeout: int = 30,
             max_retries: int = 5,
             max_video_size: int | None = None,
+            only_main_content: bool = False,
     ) -> ScrapedContent:
         """Downloads the contents of the specified webpage using Decodo's API.
 
@@ -63,6 +64,8 @@ class Decodo:
             timeout: Request timeout in seconds (default: 30)
             max_retries: Maximum number of retries for failed requests (default: 5)
             max_video_size: Maximum size of videos embedded in the page, in bytes
+            only_main_content: Whether to leave the page's UI elements (navigation, banners,
+                etc.) out of the Markdown and multimodal output (default: False)
 
         Returns:
             ScrapedContent holding the scraped HTML along with the requested output format
@@ -85,7 +88,8 @@ class Decodo:
                                        use_premium_proxy=use_premium_proxy)
 
         return await to_scraped_content(html, session=session, output_format=output_format,
-                                        url=url, max_video_size=max_video_size)
+                                        only_main_content=only_main_content, url=url,
+                                        max_video_size=max_video_size)
 
     async def _call_decodo(
             self, url: str,

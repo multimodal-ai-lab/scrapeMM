@@ -6,6 +6,8 @@ from scrapemm.server.download.common import HEADERS
 from scrapemm.server.util import (
     _extract_media_elements,
     get_markdown_hyperlinks,
+    remove_ui_elements,
+    to_scraped_content,
     unshorten,
 )
 
@@ -46,6 +48,57 @@ def test_extract_skips_emoji_background_image():
     )
     soup = BeautifulSoup(html, "html.parser")
     assert _extract_media_elements(soup) == []
+
+
+PAGE_WITH_UI = """<html><body>
+<header><nav><a href="/">Home</a> <a href="/news">News</a></nav></header>
+<div class="cookie">We use cookies. Accept?</div>
+<main>
+  <article>
+    <header><h1>Headline</h1><p>By A. Author</p></header>
+    <p>The article text.</p>
+    <img src="https://example.com/photo.jpg">
+  </article>
+  <aside><article><a href="/other">A related story</a></article></aside>
+</main>
+<footer>Imprint and privacy</footer>
+</body></html>"""
+
+
+def test_remove_ui_elements():
+    html = remove_ui_elements(PAGE_WITH_UI)
+    for ui in ("Home", "cookies", "A related story", "Imprint"):
+        assert ui not in html
+    # The article's own header carries its headline and byline
+    for content in ("Headline", "By A. Author", "The article text.", "photo.jpg"):
+        assert content in html
+
+
+@pytest.mark.parametrize("main", [
+    '<div class="side"><div id="main"><p>Content</p></div></div>',
+    '<div class="side"><main><p>Content</p></main></div>',
+    '<div class="widget"><div role="main"><p>Content</p></div></div>',
+    '<main class="top"><p>Content</p></main>',  # Matches a UI selector itself
+])
+def test_remove_ui_elements_keeps_main_content(main: str):
+    html = remove_ui_elements(f"<html><body><nav>Menu</nav>{main}</body></html>")
+    assert "Menu" not in html
+    assert "Content" in html
+
+
+def test_remove_ui_elements_keeps_page_it_would_empty():
+    html = '<html><head><title>Site</title></head><body class="side"><p>All there is</p></body></html>'
+    assert remove_ui_elements(html) == html
+
+
+@pytest.mark.asyncio
+async def test_to_scraped_content_removes_ui_from_markdown_only():
+    content = await to_scraped_content(PAGE_WITH_UI, session=None, output_format="markdown",
+                                       only_main_content=True)
+    assert "Home" not in content.markdown
+    assert "The article text." in content.markdown
+    # CAPTCHA and paywall detection need the page as scraped
+    assert content.html == PAGE_WITH_UI
 
 
 async def do_unshorten(short_url):

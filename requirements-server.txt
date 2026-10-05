@@ -19,7 +19,7 @@ websockets  # Proxying the CAPTCHA panel's VNC connection
 # --- Scraping stack --------------------------------------------------------------
 async_lru
 atproto~=0.0.71
-beautifulsoup4
+beautifulsoup4>=4.12  # Tag.css, see util.remove_ui_elements()
 backports.zstd~=1.7.0  # For better content parsing with Firecrawl
 brotli  # Required to read brotli-encoded media
 cryptography  # Encrypts the secrets store at rest

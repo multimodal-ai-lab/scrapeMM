@@ -8,6 +8,7 @@ const route = useRoute()
 const input = ref((route.query.url as string) || '')
 const outputFormat = ref('multimodal')
 const useCache = ref(true)
+const onlyMainContent = ref(false)
 const prioritize = ref('completeness')
 const running = ref(false)
 const error = ref('')
@@ -42,6 +43,7 @@ async function run() {
       output_format: outputFormat.value,
       use_cache: useCache.value,
       prioritize: prioritize.value,
+      only_main_content: onlyMainContent.value,
     }, (message) => {
       if (message.type === 'header') progress.value.total = message.total
       else if (message.type === 'result') {
@@ -85,6 +87,7 @@ function succeeded(payload: any) {
             <USelect v-model="prioritize" :items="priorities" class="w-40" />
           </UFormField>
           <UCheckbox v-model="useCache" label="Use cache" class="mb-2" />
+          <UCheckbox v-model="onlyMainContent" label="Main content only" class="mb-2" />
           <UButton
             class="ml-auto" size="lg" icon="i-fa7-solid-play" :loading="running"
             :disabled="!urls.length" label="Retrieve" @click="run"

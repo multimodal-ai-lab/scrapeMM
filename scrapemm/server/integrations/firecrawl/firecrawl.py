@@ -146,10 +146,13 @@ class Firecrawl:
                      output_format: OutputFormat = "multimodal",
                      max_attempts: int = 3,
                      max_video_size: int | None = None,
+                     only_main_content: bool = False,
                      **kwargs) -> ScrapedContent:
         """Scrapes the given URL with Firecrawl. Returns the scraped HTML along with
         the requested output format. Media is downloaded only for the "multimodal"
-        format. Raises an exception if the scraping failed."""
+        format. With `only_main_content`, the Markdown and multimodal output leave out
+        the page's UI elements (navigation, banners, etc.). Raises an exception if the
+        scraping failed."""
 
         domain = get_domain(url)
         if domain in NO_BOT_DOMAINS:
@@ -179,6 +182,8 @@ class Firecrawl:
                 document = await client.scrape(
                     url,
                     formats=["html"],
+                    # Stripped by scrapeMM instead, as for every other method (see
+                    # `remove_ui_elements()`): the HTML stays whole for CAPTCHA detection
                     only_main_content=False,
                     remove_base64_images=False,
                     exclude_tags=["script", "style", "noscript", "footer", "aside"],
@@ -237,7 +242,8 @@ class Firecrawl:
             raise error(f"Firecrawl got HTTP {status} from {url}.")
 
         return await to_scraped_content(html, session=session, output_format=output_format,
-                                        url=url, max_video_size=max_video_size)
+                                        only_main_content=only_main_content, url=url,
+                                        max_video_size=max_video_size)
 
     async def _ensure_availability(self, url: str, session: aiohttp.ClientSession):
         """Probe if the URL is reachable. If an HTTP error >= 400 occurs, raise an exception."""

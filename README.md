@@ -134,6 +134,15 @@ whenever the method had access to them, nothing beyond it is computed, and media
 downloaded only for `"multimodal"`. `result.success` says whether the requested format
 could be produced.
 
+To get just the page's content, without its navigation, headers, footers, sidebars and
+cookie banners, pass `only_main_content=True`:
+
+```python
+result = asyncio.run(scrapemm.retrieve(url, only_main_content=True))
+```
+
+Media in the removed parts are not downloaded.
+
 Pass a list of URLs to retrieve them concurrently; results come back in the order you
 asked for them, and a progress bar fills in as each one lands:
 

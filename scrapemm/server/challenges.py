@@ -64,6 +64,7 @@ class Pending:
     output_format: str = "multimodal"
     methods: list[str] = field(default_factory=list)  # As resolved, for the cache key
     max_video_size: Optional[int] = None
+    only_main_content: bool = False
     queued_at: float = field(default_factory=time.time)
 
 
@@ -86,7 +87,8 @@ class ChallengeStore:
         self._challenges: dict[str, Challenge] = self._load()
 
     def record(self, domain: str, url: str, captcha: str, output_format: str,
-               methods: list[str], max_video_size: Optional[int]) -> None:
+               methods: list[str], max_video_size: Optional[int],
+               only_main_content: bool = False) -> None:
         """Opens a challenge for the domain, or queues the URL with the open one."""
         if domain in REPLAYING_ARCHIVES:
             logger.info(f"Not queueing {url} for a human: the {captcha} is part of the "
@@ -101,9 +103,10 @@ class ChallengeStore:
                                f"on the CAPTCHA page of the web UI.")
             challenge.last_seen = time.time()
             if not any(p.url == url and p.output_format == output_format
-                       for p in challenge.pending):
+                       and p.only_main_content == only_main_content for p in challenge.pending):
                 if len(challenge.pending) < MAX_PENDING:
-                    challenge.pending.append(Pending(url, output_format, methods, max_video_size))
+                    challenge.pending.append(Pending(url, output_format, methods, max_video_size,
+                                                     only_main_content))
                 else:
                     logger.warning(f"Not queueing {url}: {MAX_PENDING} URLs are already "
                                    f"waiting on the {domain} CAPTCHA.")
@@ -307,6 +310,8 @@ async def drain(domain: str, trust_content: bool = False) -> tuple[int, int]:
     from .cache import cache, cache_key
     from .captcha_detect import detect_captcha
     from .engine import postprocess_media
+    from .integrations import browser as web_browser
+    from .util import strip_to_main_content
 
     browser = _browser_for(domain)
     remaining = list(challenge.pending)
@@ -315,7 +320,10 @@ async def drain(domain: str, trust_content: bool = False) -> tuple[int, int]:
         entry = remaining[0]
         started = time.time()
         try:
-            content = await browser._get(entry.url, output_format=entry.output_format)
+            # As in the engine: a site's own integration (e.g. Perma.cc) does not strip
+            content = await browser._get(
+                entry.url, output_format=entry.output_format,
+                only_main_content=entry.only_main_content if browser is web_browser else False)
         except Exception as e:
             if "captcha" in type(e).__name__.lower():
                 break
@@ -332,13 +340,14 @@ async def drain(domain: str, trust_content: bool = False) -> tuple[int, int]:
         if content.get(entry.output_format) is None:
             logger.info(f"The queued {entry.url} yielded no {entry.output_format} content.")
             continue
+        strip_to_main_content(content)  # Past the CAPTCHA check
         if content.multimodal is not None:
             await postprocess_media(content.multimodal)
         response = ScrapingResponse(url=entry.url, content=content, method=browser.name,
                                     output_format=entry.output_format,
                                     retrieval_time=time.time() - started)
         cache.put(cache_key(entry.url, entry.output_format, entry.methods,
-                            entry.max_video_size), response)
+                            entry.max_video_size, entry.only_main_content), response)
         retrieved += 1
 
     store.keep_pending(domain, remaining)

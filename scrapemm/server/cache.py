@@ -39,14 +39,15 @@ DEFAULT_MAX_MB = 512  # The text the entries hold, see `_size()`; media stay on 
 MAX_ENTRIES = DEFAULT_MAX_ENTRIES  # Kept for callers of the former constant
 
 # A cache entry is identified by all the parameters that influence the retrieved content:
-# the URL, the requested output format, the methods used, and the video size limit
-CacheKey = tuple[str, str, tuple[str, ...], Optional[int]]
+# the URL, the requested output format, the methods used, the video size limit, and
+# whether only the main content is kept
+CacheKey = tuple[str, str, tuple[str, ...], Optional[int], bool]
 
 
 def cache_key(url: str, output_format: OutputFormat, methods: list[str],
-              max_video_size: Optional[int] = None) -> CacheKey:
+              max_video_size: Optional[int] = None, only_main_content: bool = False) -> CacheKey:
     """Constructs the cache key identifying a particular retrieval request."""
-    return url, output_format, tuple(methods), max_video_size
+    return url, output_format, tuple(methods), max_video_size, only_main_content
 
 
 def _size(response: ScrapingResponse) -> int:
@@ -403,10 +404,12 @@ class ImmutableCache:
 
     @staticmethod
     def _result_key(key) -> Optional[str]:
-        url, output_format, _methods, max_video_size = key
+        url, output_format, _methods, max_video_size, only_main_content = key
         if (capture := capture_key(url)) is None:
             return None
-        return f"{capture}|{output_format}|{max_video_size}|{_result_version()}"
+        # Main-content results apart, without changing the keys of those kept before
+        suffix = "|main" if only_main_content else ""
+        return f"{capture}|{output_format}|{max_video_size}|{_result_version()}{suffix}"
 
     def result(self, key) -> Optional[ScrapingResponse]:
         """The kept result for the cache key of an archive capture, if there is one and

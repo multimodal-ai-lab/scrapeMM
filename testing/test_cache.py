@@ -4,6 +4,7 @@ import time
 
 import pytest
 
+from scrapemm.common.scraping_response import ScrapedContent, ScrapingResponse
 from scrapemm.server.engine import retrieve
 from scrapemm.server.cache import set_cache_ttl, clear_cache
 from scrapemm.server.cache import cache, cache_key, DEFAULT_CACHE_TTL
@@ -83,3 +84,18 @@ async def test_caching_disabled():
     assert response.success, response.errors
     assert not response.from_cache
     assert len(cache) == 0
+
+
+def test_cache_separates_main_content_only():
+    """A page retrieved with its UI elements must not be served without them, nor
+    the other way round."""
+    methods = resolve_best_methods(URL, "auto")
+    full_page = cache_key(URL, "markdown", methods)
+    main_content = cache_key(URL, "markdown", methods, only_main_content=True)
+    assert full_page != main_content
+
+    response = ScrapingResponse(url=URL, content=ScrapedContent(markdown="# Hi"),
+                                output_format="markdown")
+    cache.put(full_page, response)
+    assert cache.get(full_page) is response
+    assert cache.get(main_content) is None

@@ -155,6 +155,46 @@ def preprocess_html(html: str) -> str:
     return html
 
 
+# Elements that hold page chrome rather than content. This is Firecrawl's list for its
+# `onlyMainContent` option, so that all methods strip alike.
+UI_SELECTORS = ", ".join((
+    "header", "footer", "nav", "aside", ".header", ".top", ".navbar", "#header",
+    ".footer", ".bottom", "#footer", ".sidebar", ".side", ".aside", "#sidebar",
+    ".modal", ".popup", "#modal", ".overlay", ".ad", ".ads", ".advert", "#ad",
+    ".lang-selector", ".language", "#language-selector", ".social", ".social-media",
+    ".social-links", "#social", ".menu", ".navigation", "#nav", ".breadcrumbs",
+    "#breadcrumbs", ".share", "#share", ".widget", "#widget", ".cookie", "#cookie"))
+# The page's main content, which is never removed along with the chrome around it.
+# Not <article>: related-article sidebars are full of <article> teaser cards.
+MAIN_CONTENT_SELECTORS = "#main, main, [role=main]"
+
+
+def remove_ui_elements(html: str) -> str:
+    """Strips navigation, headers, footers, sidebars, banners and the like from the
+    HTML, keeping the page's content. Returns the HTML unchanged if nothing is left.
+    The result is re-serialized by BeautifulSoup (entities decoded, void tags closed),
+    not the page's bytes as scraped."""
+    soup = BeautifulSoup(html, "html.parser")
+    has_body = soup.body is not None
+    # The main content and everything wrapping it, never removed as chrome
+    keep = {id(node) for main in soup.select(MAIN_CONTENT_SELECTORS)
+            for node in (main, *main.parents)}
+    for element in soup.select(UI_SELECTORS):
+        if element.decomposed:
+            continue  # Gone with an ancestor already
+        if id(element) in keep:
+            continue  # Is or wraps the main content
+        if element.name == "header" and element.find_parent("article"):
+            continue  # An article's own header: its headline and byline
+        element.decompose()
+    # The body's content only: the <title> is none. Media count as content, as they
+    # do for `engine._is_empty()`: a photo page's text may all sit in the chrome
+    body = soup.body if has_body else soup
+    if body is None or not (body.get_text(strip=True) or body.find(["img", "video", "iframe"])):
+        return html  # The heuristic misfired (e.g. <body class="side">)
+    return str(soup)
+
+
 def postprocess_markdown(text: str) -> str:
     # Media worth keeping was already turned into items; any base64 left over is
     # unresolvable or too small, and only bloats the text
@@ -721,15 +761,23 @@ async def to_scraped_content(
         html: str,
         session: Union[aiohttp.ClientSession, "APIRequestContext"],
         output_format: "OutputFormat" = "multimodal",
+        only_main_content: bool = False,
         **kwargs
 ) -> "ScrapedContent":
     """Turns the scraped HTML into a ScrapedContent object, converting it format by
     format until the requested `output_format` is reached. That is, no work is done
     beyond what the caller asked for: Markdown is converted only if more than the raw
-    HTML is needed and media is downloaded only for the 'multimodal' format."""
+    HTML is needed and media is downloaded only for the 'multimodal' format.
+
+    With `only_main_content`, the Markdown and multimodal output leave out the page's chrome
+    (navigation, banners, etc.), see `remove_ui_elements()`. The HTML is left whole for
+    now: CAPTCHA and paywall detection need all of it. Its stripped version waits in
+    `main_content_html` until they are done, see `strip_to_main_content()`."""
     from scrapemm.common.scraping_response import ScrapedContent
 
     content = ScrapedContent(html=html)
+    if only_main_content:
+        content.main_content_html = html = await _in_html_thread(remove_ui_elements, html)
     if output_format == "html":
         return content
 
@@ -741,6 +789,13 @@ async def to_scraped_content(
     # After the media: a browser page is closed by then (see `resolve_media()`)
     content.markdown = await _in_html_thread(html2md, html)
     return content
+
+
+def strip_to_main_content(content: "ScrapedContent") -> None:
+    """Swaps in the HTML stripped to its main content, if `to_scraped_content()` held one
+    back. Only for content that passed CAPTCHA and paywall detection."""
+    if content.main_content_html is not None:
+        content.html, content.main_content_html = content.main_content_html, None
 
 
 async def to_multimodal_sequence(

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 from ezmm import MultimodalSequence
@@ -15,6 +15,9 @@ class ScrapedContent:
     html: Optional[str] = None  # The raw HTML code of the scraped page
     markdown: Optional[str] = None  # The scraped text in Markdown format. Media is referenced by hyperlink.
     multimodal: Optional[MultimodalSequence] = None  # The scraped text with the media downloaded and embedded
+    # Server-internal, never sent: the HTML stripped to its main content, held back from
+    # `html` until CAPTCHA and paywall detection, which need the whole page, are done
+    main_content_html: Optional[str] = field(default=None, repr=False, compare=False)
 
     def __bool__(self) -> bool:
         """True iff any content is available."""
