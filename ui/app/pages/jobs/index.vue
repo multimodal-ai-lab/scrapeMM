@@ -426,6 +426,10 @@ async function copy(id: string) {
               <UIcon name="i-fa7-solid-file-lines" class="size-3" />
               {{ job.params.output_format }}
             </span>
+            <span v-if="job.params.strip" class="inline-flex items-center gap-1" title="UI elements stripped">
+              <UIcon name="i-fa7-solid-scissors" class="size-3" />
+              stripped
+            </span>
             <span v-if="job.methods?.length" class="inline-flex items-center gap-1">
               <UIcon name="i-fa7-solid-wrench" class="size-3" />
               {{ job.methods.join(', ') }}

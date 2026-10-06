@@ -46,6 +46,7 @@ RUNS_PATH = CONFIG_DIR / "test_runs.json"
 MAX_RUNS_KEPT = 20
 
 OUTPUT_FORMAT = "multimodal"  # What the retrieval tests check
+STRIP = True  # The suite measures the content without UI elements, see `strip_content()`
 
 # What an entry may expect besides content (the default, when "expect" is absent)
 EXPECTATIONS = (UNAVAILABLE,)
@@ -282,7 +283,7 @@ class TestRun:
 
         urls = [e["url"] for e in self.entries]
         self.job_id = await jobs.astart({"urls": urls, "output_format": OUTPUT_FORMAT,
-                                  "use_cache": False, "test_run": self.id}, len(urls))
+                                  "strip": STRIP, "use_cache": False, "test_run": self.id}, len(urls))
         passed = failed = 0
         tasks: list[asyncio.Task] = []
         try:
@@ -291,7 +292,7 @@ class TestRun:
                     try:
                         return entry, await retrieve_one(entry["url"], session,
                                                          output_format=OUTPUT_FORMAT,
-                                                         use_cache=False)
+                                                         use_cache=False, strip=STRIP)
                     except Exception as e:
                         # One URL must not end the run; it counts as failed, with why
                         logger.warning(f"Test retrieval of {entry['url']} raised.", exc_info=True)
@@ -353,7 +354,8 @@ class TestRun:
         from .jobs import jobs
 
         urls = [r["url"] for r in gated]
-        job_id = await jobs.astart({"urls": urls, "output_format": OUTPUT_FORMAT, "use_cache": True,
+        job_id = await jobs.astart({"urls": urls, "output_format": OUTPUT_FORMAT, "strip": STRIP,
+                             "use_cache": True,
                              "test_run": self.id, "rerun": "captcha"}, len(urls))
         passed = failed = 0
         try:
@@ -362,7 +364,7 @@ class TestRun:
                     try:
                         return entry, await retrieve_one(entry["url"], session,
                                                          output_format=OUTPUT_FORMAT,
-                                                         use_cache=True)
+                                                         use_cache=True, strip=STRIP)
                     except Exception as e:
                         logger.warning(f"Test rerun of {entry['url']} raised.", exc_info=True)
                         return entry, ScrapingResponse(url=entry["url"], content=None,

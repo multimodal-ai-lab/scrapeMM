@@ -319,8 +319,8 @@ function media(record: Record<string, number> | undefined) {
         <h1 class="text-2xl font-semibold">Test</h1>
         <p class="text-sm text-muted mt-1">
           Measures coverage and speed on a suite of {{ suite.length }} known URLs, each
-          with the media it must yield. The cache is bypassed, and the run is a job like
-          any other.
+          with the media it must yield, after stripping UI elements. The cache is
+          bypassed, and the run is a job like any other.
         </p>
       </div>
 
