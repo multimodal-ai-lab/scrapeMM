@@ -283,13 +283,13 @@ function compact(n: number): string {
         <pre class="whitespace-pre-wrap text-xs pt-3 overflow-x-auto">{{ content.html }}</pre>
       </template>
       <template #screenshot>
+        <!-- No link to open it on its own: its address carries the API key, which would
+             then stand in the address bar -->
         <div class="pt-3">
-          <a :href="mediaUrl(screenshotItem)" target="_blank" rel="noopener" title="Open in full size">
-            <img
-              :src="mediaUrl(screenshotItem)" class="max-w-full rounded-lg border border-default"
-              alt="The page as the server's browser showed it" loading="lazy"
-            >
-          </a>
+          <img
+            :src="mediaUrl(screenshotItem)" class="max-w-full rounded-lg border border-default"
+            alt="The page as the server's browser showed it" loading="lazy"
+          >
         </div>
       </template>
     </UTabs>

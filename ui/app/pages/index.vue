@@ -7,7 +7,7 @@ const environment = ref<any>(null)
 const loading = ref(false)
 const error = ref('')
 const busy = ref<string | null>(null)
-const copied = ref<'address' | 'key' | null>(null)
+const copied = ref<'address' | null>(null)
 // Which cards are still waiting for their probe
 const pending = shallowRef<Set<string>>(new Set())
 
@@ -210,18 +210,12 @@ const lanAddresses = computed(() => {
   return env.address.addresses.map((a: string) => `http://${a}:${env.address.port}`)
 })
 
-/**
- * The API key comes from this browser's own session rather than from the server: the UI
- * already holds it to authenticate with, and an endpoint that hands the key back out
- * would be a way to read it that did not exist before.
- */
+// Signed in or not: the live view stops when the key goes. The key itself is shown
+// nowhere -- only once, when it is created (see the API Keys page).
 const apiKey = useToken()
 
-// Fixed-width mask, so the display does not even give away how long the key is.
-const maskedKey = '•'.repeat(16)
-
-async function copy(what: 'address' | 'key') {
-  const value = what === 'address' ? address.value : apiKey.value
+async function copy(what: 'address') {
+  const value = address.value
   if (!value) return
   const ok = await copyText(value)
   // Only claim success when the clipboard really has it
@@ -382,25 +376,6 @@ onUnmounted(() => {
         </button>
         <USkeleton v-else-if="!error" class="h-5 w-48 self-center" />
 
-        <!-- The key is copyable but never legible: what somebody needs from it here is
-             to paste it into a client, not to read it off a screen others can see. -->
-        <button
-          v-if="apiKey && (environment || error)" type="button"
-          class="inline-flex items-center gap-2 font-mono text-base text-muted
-                 hover:text-primary transition-colors"
-          title="API key — click to copy"
-          @click="copy('key')"
-        >
-          <UIcon
-            :name="copied === 'key' ? 'i-fa7-solid-check' : 'i-fa7-regular-copy'"
-            class="size-4" :class="copied === 'key' ? 'text-success' : ''"
-          />
-          <span class="select-none">API key</span>
-          <span class="tracking-tight select-none" aria-label="API key, hidden">
-            {{ copied === 'key' ? 'copied' : maskedKey }}
-          </span>
-        </button>
-        <USkeleton v-else-if="apiKey" class="h-5 w-40 self-center" />
       </div>
 
       <div class="flex items-center gap-3 shrink-0">
