@@ -231,7 +231,11 @@ class JobStore:
     def record(self, job_id: str, payload: ResponsePayload, success: bool) -> None:
         content = None
         if payload.content is not None:
-            content = json.dumps(_truncate(payload.content.to_dict()))
+            stored = _truncate(payload.content.to_dict())
+            if payload.screenshot is not None:
+                # Kept with the content, which is what the job's page shows
+                stored["screenshot"] = payload.screenshot.to_dict()
+            content = json.dumps(stored)
         outcome, kind = classify(success, payload.errors)
         with self._lock:
             self._connection.execute(

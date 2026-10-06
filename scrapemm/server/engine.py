@@ -65,7 +65,8 @@ async def retrieve(
         prioritize: Literal["completeness", "speed"] = "completeness",
         use_cache: bool = True,
         hedging_delay: float | None = None,
-        strip: bool = False
+        strip: bool = False,
+        screenshot: bool = False
 ) -> ScrapingResponse | list[ScrapingResponse]:
     """Main function of this repository. Downloads the contents present at the given URL(s).
     For each URL, returns a ScrapingResponse containing the retrieved content, error, and method.
@@ -116,6 +117,9 @@ async def retrieve(
         included, keeping only the main content. Done by scrapeMM alike for every method,
         on the retrieved page as cached: stripped and unstripped requests share the cache.
         See `ScrapedContent.stripped`.
+    :param screenshot: If True, each successfully retrieved page is also captured in the
+        server's browser, as it looks to a visitor: `ScrapingResponse.screenshot`. Costs
+        a page load in the browser per URL (cached like the results).
     """
     # Ensure URLs are string or list
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
@@ -169,6 +173,8 @@ async def retrieve(
                                            progress_description="Retrieving URLs...")
         if strip:
             results = [await _strip(response) for response in results]
+        if screenshot:
+            results = await asyncio.gather(*(_screenshot(r, use_cache) for r in results))
         _release_media_memory()
 
         # Reconstruct output list
@@ -209,6 +215,7 @@ async def retrieve_one(
         use_cache: bool = True,
         hedging_delay: float | None = None,
         strip: bool = False,
+        screenshot: bool = False,
 ) -> ScrapingResponse:
     """Retrieves a single URL, subject to the server's concurrency limit. This is what
     the API streams over: it needs results one at a time, as they finish, rather than
@@ -253,6 +260,8 @@ async def retrieve_one(
         response = replace(response, from_cache=True)
     if strip:
         response = await _strip(response)
+    if screenshot:
+        response = await _screenshot(response, use_cache)
     # Report under the URL as requested, not as preprocessed (e.g. percent-decoded):
     # the client maps results back onto its request by URL
     return replace(response, url=url)
@@ -264,6 +273,15 @@ async def _strip(response: ScrapingResponse) -> ScrapingResponse:
     if response.content is None:
         return response
     return replace(response, content=await strip_content(response.content, url=response.url))
+
+
+async def _screenshot(response: ScrapingResponse, use_cache: bool) -> ScrapingResponse:
+    """The response with a screenshot of its page. Only of a retrieved page: a failed
+    one is not loaded again (it may be a site never to be scraped, see `challenges`)."""
+    from .screenshot import screenshot
+    if not response.success or response.screenshot is not None:
+        return response
+    return replace(response, screenshot=await screenshot(response.url, use_cache))
 
 
 @dataclass

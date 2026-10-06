@@ -15,6 +15,8 @@ const props = defineProps<{
   queueTime?: number | null
   fromCache?: boolean
   success?: boolean
+  // A screenshot's media descriptor; stored results keep it with their content
+  screenshot?: any | null
   // The server's classification (see useOutcome.ts); derived here when absent
   outcome?: string | null
   outcomeKind?: string | null
@@ -65,11 +67,14 @@ function mediaUrl(item: any) {
   return `${apiBase()}${item.media_url}?token=${encodeURIComponent(token.value || '')}`
 }
 
+const screenshotItem = computed(() => props.screenshot || props.content?.screenshot || null)
+
 const tabs = computed(() => {
   const available = []
   if (props.content?.multimodal) available.push({ label: 'Multimodal', slot: 'multimodal', icon: 'i-fa7-solid-photo-film' })
   if (props.content?.markdown) available.push({ label: 'Markdown', slot: 'markdown', icon: 'i-fa7-solid-align-left' })
   if (props.content?.html) available.push({ label: 'HTML', slot: 'html', icon: 'i-fa7-solid-code' })
+  if (screenshotItem.value) available.push({ label: 'Screenshot', slot: 'screenshot', icon: 'i-fa7-solid-camera' })
   return available
 })
 
@@ -276,6 +281,16 @@ function compact(n: number): string {
       </template>
       <template #html>
         <pre class="whitespace-pre-wrap text-xs pt-3 overflow-x-auto">{{ content.html }}</pre>
+      </template>
+      <template #screenshot>
+        <div class="pt-3">
+          <a :href="mediaUrl(screenshotItem)" target="_blank" rel="noopener" title="Open in full size">
+            <img
+              :src="mediaUrl(screenshotItem)" class="max-w-full rounded-lg border border-default"
+              alt="The page as the server's browser showed it" loading="lazy"
+            >
+          </a>
+        </div>
       </template>
     </UTabs>
 

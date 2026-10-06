@@ -106,6 +106,7 @@ class ResponsePayload:
     retrieval_time: Optional[float] = None
     queue_time: Optional[float] = None
     from_cache: bool = False
+    screenshot: Optional[ItemDescriptor] = None  # An image, delivered like the media
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -117,6 +118,7 @@ class ResponsePayload:
             "retrieval_time": self.retrieval_time,
             "queue_time": self.queue_time,
             "from_cache": self.from_cache,
+            "screenshot": self.screenshot.to_dict() if self.screenshot else None,
         }
 
     @classmethod
@@ -131,12 +133,14 @@ class ResponsePayload:
             retrieval_time=data.get("retrieval_time"),
             queue_time=data.get("queue_time"),
             from_cache=bool(data.get("from_cache")),
+            screenshot=ItemDescriptor.from_dict(data["screenshot"]) if data.get("screenshot") else None,
         )
 
-    def to_response(self, multimodal=None) -> ScrapingResponse:
+    def to_response(self, multimodal=None, screenshot=None) -> ScrapingResponse:
         """Rebuilds the `ScrapingResponse`. `multimodal` is the sequence the client
-        resolved from the item manifest; it is passed in because resolving it needs
-        the filesystem and may need network, neither of which belongs in here."""
+        resolved from the item manifest, `screenshot` the image it resolved; they are
+        passed in because resolving them needs the filesystem and may need network,
+        neither of which belongs in here."""
         content = None
         if self.content is not None:
             content = ScrapedContent(
@@ -156,6 +160,7 @@ class ResponsePayload:
             retrieval_time=self.retrieval_time,
             queue_time=self.queue_time,
             from_cache=self.from_cache,
+            screenshot=screenshot,
         )
 
 

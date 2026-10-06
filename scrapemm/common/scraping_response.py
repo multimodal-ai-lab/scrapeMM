@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-from ezmm import MultimodalSequence
+from ezmm import Image, MultimodalSequence
 
 OutputFormat = Literal["multimodal", "markdown", "html"]
 OUTPUT_FORMATS = ("multimodal", "markdown", "html")
@@ -41,6 +41,7 @@ class ScrapingResponse:
     # Seconds the URL waited before that, for a concurrency or browser slot
     queue_time: Optional[float] = None
     from_cache: bool = False  # Whether this response was served from the cache
+    screenshot: Optional[Image] = None  # The page as the server's browser shows it, if requested
 
     @property
     def success(self) -> bool:

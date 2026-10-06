@@ -62,6 +62,7 @@ class RetrieveRequest(BaseModel):
     use_cache: bool = True
     hedging_delay: Optional[float] = None
     strip: bool = False
+    screenshot: bool = False
 
 
 @router.post("/retrieve")
@@ -108,6 +109,7 @@ async def _stream(request: RetrieveRequest,
                     use_cache=request.use_cache,
                     hedging_delay=request.hedging_delay,
                     strip=request.strip,
+                    screenshot=request.screenshot,
                 )): url for url in urls
             }
             pending = set(tasks)
@@ -192,6 +194,7 @@ def _to_payload(response) -> ResponsePayload:
         retrieval_time=response.retrieval_time,
         queue_time=response.queue_time,
         from_cache=response.from_cache,
+        screenshot=registry.describe(response.screenshot) if response.screenshot else None,
     )
 
 

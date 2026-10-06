@@ -432,6 +432,10 @@ async function copy(id: string) {
               <UIcon name="i-fa7-solid-scissors" class="size-3" />
               stripped
             </span>
+            <span v-if="job.params.screenshot" class="inline-flex items-center gap-1" title="With screenshots">
+              <UIcon name="i-fa7-solid-camera" class="size-3" />
+              screenshot
+            </span>
             <span v-if="job.methods?.length" class="inline-flex items-center gap-1">
               <UIcon name="i-fa7-solid-wrench" class="size-3" />
               {{ job.methods.join(', ') }}
