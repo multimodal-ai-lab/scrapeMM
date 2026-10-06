@@ -448,6 +448,10 @@ function media(record: Record<string, number> | undefined) {
           <span :title="absoluteTime(report.started)">{{ timeAgo(report.started) }}</span>
           <template v-if="report.state !== 'completed'"> · {{ report.state }}</template>
         </span>
+        <!-- Whose run it is: it runs under the API key of whoever started it -->
+        <span v-if="report.started_by" class="inline-flex items-center gap-1" title="Runs under this API key">
+          <UIcon name="i-fa7-solid-key" class="size-3" /> {{ report.started_by.name }}
+        </span>
         <NuxtLink
           v-if="report.job_id" :to="`/jobs/${report.job_id}`"
           class="inline-flex items-center gap-1 hover:text-default"

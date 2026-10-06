@@ -136,7 +136,8 @@ class JobStore:
                     created_at   REAL NOT NULL,
                     provider     TEXT NOT NULL,
                     status       INTEGER NOT NULL,
-                    results      INTEGER
+                    results      INTEGER,
+                    api_key      TEXT
                 );
                 CREATE INDEX IF NOT EXISTS searches_created_idx ON searches(created_at);
                 """
@@ -186,6 +187,9 @@ class JobStore:
             self._connection.execute("ALTER TABLE results ADD COLUMN outcome_kind TEXT")
         if "queue_time" not in columns:  # Only recorded since; older rows have none
             self._connection.execute("ALTER TABLE results ADD COLUMN queue_time REAL")
+        searches = {row["name"] for row in self._connection.execute("PRAGMA table_info(searches)")}
+        if "api_key" not in searches:  # Only recorded since; older rows have none
+            self._connection.execute("ALTER TABLE searches ADD COLUMN api_key TEXT")
         rows = self._connection.execute(
             "SELECT rowid, success, errors FROM results WHERE outcome IS NULL").fetchall()
         for row in rows:
@@ -214,6 +218,10 @@ class JobStore:
         await run_light(self.finish, job_id, succeeded, failed, status)
 
     def start(self, params: dict, url_count: int) -> str:
+        """Opens a job. Every job runs under an API key, the one of whoever asked for it
+        (`params["api_key"]`, its id): there is no run without one."""
+        if not params.get("api_key"):
+            raise ValueError("A job runs under the API key of whoever started it; none was given.")
         # Ten hex characters: short enough to read and quote in full, and still 40 bits
         # of entropy, which is far more than a job history of a few thousand rows needs.
         # The column is a primary key, so the vanishing chance of a clash surfaces as an
@@ -488,12 +496,17 @@ class JobStore:
             f"SELECT CAST(created_at / {SLOT} AS INTEGER) * {SLOT} AS slot, COUNT(*) "
             f"FROM results WHERE created_at >= ? GROUP BY slot ORDER BY slot", (since,))]
 
-    def record_search(self, provider: str, status: int, results: Optional[int]) -> None:
-        """Counts one search request: which provider, its HTTP status, how many results."""
+    def record_search(self, provider: str, status: int, results: Optional[int],
+                      api_key: str) -> None:
+        """Counts one search request: which provider, its HTTP status, how many results,
+        and the API key (its id) it was made with."""
+        if not api_key:
+            raise ValueError("A search runs under the API key of whoever made it; none was given.")
         with self._lock:
             self._connection.execute(
-                "INSERT INTO searches (created_at, provider, status, results) VALUES (?, ?, ?, ?)",
-                (time.time(), provider, status, results))
+                "INSERT INTO searches (created_at, provider, status, results, api_key) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (time.time(), provider, status, results, api_key))
             self._connection.commit()
             self.version += 1
 

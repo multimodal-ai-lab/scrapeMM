@@ -71,8 +71,7 @@ async def retrieve(request: RetrieveRequest,
     return StreamingResponse(_stream(request, principal), media_type="application/x-ndjson")
 
 
-async def _stream(request: RetrieveRequest,
-                  principal: Optional[Principal] = None) -> AsyncIterator[bytes]:
+async def _stream(request: RetrieveRequest, principal: Principal) -> AsyncIterator[bytes]:
     started = time.time()
 
     # Duplicates in the batch are retrieved once; the client maps results back onto its
@@ -80,8 +79,8 @@ async def _stream(request: RetrieveRequest,
     urls = list(dict.fromkeys(request.urls))
     methods = _per_url_methods(urls, request.methods)
 
-    # The key the job was started with, by id: its name may change (see `retrieval_stats`)
-    params = request.model_dump() | ({"api_key": principal.id} if principal else {})
+    # The key the job runs under, by id: its name may change (see `retrieval_stats`)
+    params = request.model_dump() | {"api_key": principal.id}
     job_id = await jobs.astart(params, len(urls))
     yield _line({
         "type": "header",

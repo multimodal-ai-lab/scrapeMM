@@ -134,7 +134,7 @@ const series = computed(() => {
         ? `Other (${s.members?.length || 0})` : s.name,
       color: s.key === '(none)' || s.key === 'Other' ? 'var(--viz-other)'
         : `var(--viz-cat-${Math.min(++slot, 7)})`,
-      hint: s.key === '(none)' ? 'Test runs, and retrievals from before keys were recorded'
+      hint: s.key === '(none)' ? 'Retrievals from before keys were recorded'
         : s.key === 'Other' ? s.members?.join(', ') : undefined,
     }))
   }

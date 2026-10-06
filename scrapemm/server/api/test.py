@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from .. import testsuite
-from ..auth import require_api_key
+from ..auth import Principal, require_api_key
 
 router = APIRouter(prefix="/v1/test", tags=["test"], dependencies=[Depends(require_api_key)])
 
@@ -34,9 +34,10 @@ async def run_status() -> dict:
 
 
 @router.post("/run")
-async def start_run() -> dict:
+async def start_run(principal: Principal = Depends(require_api_key)) -> dict:
+    """Starts a run, under the caller's API key: the run is a job like any other."""
     try:
-        return testsuite.run.start()
+        return testsuite.run.start({"id": principal.id, "name": principal.name})
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -47,10 +48,11 @@ async def cancel_run() -> dict:
 
 
 @router.post("/run/rerun-captchas")
-async def rerun_captchas() -> dict:
-    """Retrieves again the latest run's URLs that ran into a CAPTCHA, cache allowed."""
+async def rerun_captchas(principal: Principal = Depends(require_api_key)) -> dict:
+    """Retrieves again the latest run's URLs that ran into a CAPTCHA, cache allowed, under
+    the caller's API key."""
     try:
-        return testsuite.run.rerun_captchas()
+        return testsuite.run.rerun_captchas({"id": principal.id, "name": principal.name})
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
 

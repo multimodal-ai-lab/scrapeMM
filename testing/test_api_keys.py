@@ -139,9 +139,13 @@ async def test_statistics_group_by_key(client, tmp_path):
     pipeline = (await client.get("/v1/me", headers=bearer(token))).json()["id"]
     store = JobStore(path=tmp_path / "jobs.db")
     for key, url in ((pipeline, "https://a.example"), ("root", "https://b.example"),
-                     (pipeline, "https://c.example"), (None, "https://d.example")):
-        job = store.start({"urls": [url]} | ({"api_key": key} if key else {}), 1)
+                     (pipeline, "https://c.example"), ("root", "https://d.example")):
+        job = store.start({"urls": [url], "api_key": key}, 1)
         store.record(job, ResponsePayload(url=url, method="stub"), False)
+    # A job from before keys were recorded, as such rows are
+    store._connection.execute("UPDATE jobs SET params = json_remove(params, '$.api_key') "
+                              "WHERE params LIKE '%d.example%'")
+    store._connection.commit()
 
     series = {s.get("name"): s["total"] for s in retrieval_stats(store, group="key")["series"]}
     assert series == {"Pipeline": 2, "Root": 1, None: 1}
@@ -149,3 +153,53 @@ async def test_statistics_group_by_key(client, tmp_path):
     # Names are for those who manage the keys
     assert (await client.get("/v1/stats/retrievals?group=key", headers=bearer(token))).status_code == 403
     assert (await client.get("/v1/stats/retrievals?group=key", headers=ROOT)).status_code == 200
+
+
+def test_no_job_without_an_api_key(tmp_path):
+    from scrapemm.server.jobs import JobStore
+    store = JobStore(path=tmp_path / "jobs.db")
+    with pytest.raises(ValueError):
+        store.start({"urls": ["https://a.example"]}, 1)
+    with pytest.raises(ValueError):
+        store.record_search("serper", 200, 10, api_key="")
+
+
+async def test_searches_are_counted_under_the_callers_key(client, tmp_path, monkeypatch):
+    from scrapemm.server.api import search as search_api
+    from scrapemm.server.jobs import JobStore
+    store = JobStore(path=tmp_path / "jobs.db")
+    monkeypatch.setattr(search_api, "jobs", store)
+
+    token = await create(client, "Notebook", "client")
+    key_id = (await client.get("/v1/me", headers=bearer(token))).json()["id"]
+    # Serper is not configured here: the search fails, and is counted all the same
+    await client.post("/v1/search/serper", headers=bearer(token), json={"q": "scrapeMM"})
+    rows = store._connection.execute("SELECT provider, api_key FROM searches").fetchall()
+    assert [tuple(r) for r in rows] == [("serper", key_id)]
+
+
+async def test_test_runs_run_under_the_starters_key(tmp_path, monkeypatch):
+    import asyncio
+    from scrapemm.common import ScrapedContent, ScrapingResponse
+    from scrapemm.server import engine, jobs as jobs_module, testsuite
+    from scrapemm.server.jobs import JobStore
+
+    store = JobStore(path=tmp_path / "jobs.db")
+    monkeypatch.setattr(jobs_module, "jobs", store)
+    monkeypatch.setattr(testsuite, "suite", lambda: [
+        {"url": "https://a.example", "category": "Open web", "expected": {}}])
+    monkeypatch.setattr(testsuite, "RUNS_PATH", tmp_path / "runs.json")
+
+    async def retrieved(url, session, **kwargs):
+        return ScrapingResponse(url=url, content=ScrapedContent(html="<p>Hi</p>"),
+                                method="stub", output_format="multimodal")
+
+    monkeypatch.setattr(engine, "retrieve_one", retrieved)
+    run = testsuite.TestRun()
+    with pytest.raises(ValueError):
+        run.start({})  # No run without a key
+    status = run.start({"id": "abc123", "name": "Pipeline"})
+    assert status["started_by"]["name"] == "Pipeline"
+    await asyncio.wait_for(run._task, 30)
+    job = store._connection.execute("SELECT params FROM jobs").fetchone()
+    assert '"api_key": "abc123"' in job["params"]

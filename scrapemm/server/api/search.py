@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse
 from scrapemm.common import QuotaExceededError, RateLimitError
 from scrapemm.common.exceptions import exception_to_wire
 from scrapemm.common.paths import APP_NAME
-from ..auth import require_api_key
+from ..auth import Principal, require_api_key
 from ..jobs import jobs
 from ..search import (SEARCH_PROVIDERS, ProviderDisabled, ProviderNotConfigured,
                       SearchProvider)
@@ -58,14 +58,15 @@ async def list_providers() -> dict:
 
 
 def _endpoint(provider: SearchProvider):
-    async def run_search(query: provider.query_class) -> Any:
+    async def run_search(query: provider.query_class,
+                         principal: Principal = Depends(require_api_key)) -> Any:
         try:
             response = await provider.search(query)
         except Exception as e:
             failure = _failure(provider, e)
-            await _count(provider, failure.status_code, None)
+            await _count(provider, failure.status_code, None, principal)
             return failure
-        await _count(provider, 200, len(response.urls))
+        await _count(provider, 200, len(response.urls), principal)
         return response.to_dict()
 
     return run_search
@@ -88,9 +89,10 @@ async def unknown_provider(provider: str) -> JSONResponse:
                                   f"{available}."))
 
 
-async def _count(provider: SearchProvider, status: int, results: Optional[int]) -> None:
+async def _count(provider: SearchProvider, status: int, results: Optional[int],
+                 principal: Principal) -> None:
     try:
-        await asyncio.to_thread(jobs.record_search, provider.name, status, results)
+        await asyncio.to_thread(jobs.record_search, provider.name, status, results, principal.id)
     except Exception:  # A search must not fail over its bookkeeping
         logger.warning("Could not record a search request.", exc_info=True)
 

@@ -254,18 +254,24 @@ class TestRun:
         self.state = "idle"  # idle | running | completed | cancelled | failed
         self.entries: list[dict] = []
         self.results: list[dict] = []
+        # The API key the run was started with, its id and name: the run is its job
+        self.started_by: Optional[dict] = None
 
     @property
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
 
-    def start(self) -> dict:
+    def start(self, started_by: dict) -> dict:
+        """Starts a run of the suite under the API key `started_by` ({"id", "name"})."""
         if self.running:
             return self.status()
+        if not (started_by or {}).get("id"):
+            raise ValueError("A test run runs under the API key of whoever starts it.")
         entries = suite()
         if not entries:
             raise ValueError("The suite is empty; add URLs first.")
         self.id = uuid.uuid4().hex[:10]
+        self.started_by = started_by
         self.entries, self.results = entries, []
         self.started, self.finished, self.state = time.time(), None, "running"
         self._task = asyncio.create_task(self._run())
@@ -287,7 +293,8 @@ class TestRun:
 
         urls = [e["url"] for e in self.entries]
         self.job_id = await jobs.astart({"urls": urls, "output_format": OUTPUT_FORMAT,
-                                  "strip": STRIP, "use_cache": False, "test_run": self.id}, len(urls))
+                                         "strip": STRIP, "use_cache": False, "test_run": self.id,
+                                         "api_key": self.started_by["id"]}, len(urls))
         passed = failed = 0
         tasks: list[asyncio.Task] = []
         try:
@@ -327,13 +334,15 @@ class TestRun:
             self.finished = time.time()
             _save_run(self.report())
 
-    def rerun_captchas(self) -> dict:
+    def rerun_captchas(self, started_by: dict) -> dict:
         """Retrieves again the URLs of the latest run that ran into a CAPTCHA, now that
         somebody may have solved it, and puts their new results into that same report.
         The cache is allowed here: solving drains the queued URLs into it (Archive.today
         into its permanent page cache), which is exactly what this is meant to pick up."""
         if self.running:
             raise ValueError("A test run is under way.")
+        if not (started_by or {}).get("id"):
+            raise ValueError("A rerun runs under the API key of whoever starts it.")
         base = self.report() if self.id else _latest_report()
         if base is None:
             raise ValueError("There is no test run to rerun URLs of.")
@@ -348,11 +357,12 @@ class TestRun:
         self.entries = [{"url": r["url"], "category": r["category"], "expected": r["expected"]}
                         for r in base["results"]]
         final_state = base.get("state", "completed")
+        self.started_by = base.get("started_by")  # The run's; the rerun's own key is its job's
         self.state = "running"
-        self._task = asyncio.create_task(self._rerun(gated, final_state))
+        self._task = asyncio.create_task(self._rerun(gated, final_state, started_by))
         return self.status()
 
-    async def _rerun(self, gated: list[dict], final_state: str) -> None:
+    async def _rerun(self, gated: list[dict], final_state: str, started_by: dict) -> None:
         from .api.retrieve import _to_payload
         from .engine import retrieve_one
         from .jobs import jobs
@@ -360,7 +370,8 @@ class TestRun:
         urls = [r["url"] for r in gated]
         job_id = await jobs.astart({"urls": urls, "output_format": OUTPUT_FORMAT, "strip": STRIP,
                              "use_cache": True,
-                             "test_run": self.id, "rerun": "captcha"}, len(urls))
+                             "test_run": self.id, "rerun": "captcha",
+                             "api_key": started_by["id"]}, len(urls))
         passed = failed = 0
         try:
             async with aiohttp.ClientSession() as session:
@@ -397,7 +408,7 @@ class TestRun:
     def report(self) -> dict:
         return {
             "id": self.id, "job_id": self.job_id, "state": self.state,
-            "started": self.started, "finished": self.finished,
+            "started": self.started, "finished": self.finished, "started_by": self.started_by,
             "summary": summarize(self.results, len(self.entries), self.started or time.time(),
                                  self.finished),
             "results": sorted(self.results, key=lambda r: (r["category"], r["url"])),
