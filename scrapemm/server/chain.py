@@ -441,7 +441,6 @@ def resolve(url: str, methods: Literal["auto"] | list[str] = "auto",
     from urllib.parse import urlsplit
     from .integrations import get_integrations_for_url
     from .util import get_domain
-    from .download.util import looks_like_pdf_url
 
     domain = get_domain(url) or ""
     plan = Plan(domain=domain, integrations=get_integrations_for_url(url))
@@ -504,8 +503,6 @@ def resolve(url: str, methods: Literal["auto"] | list[str] = "auto",
                 _add_integration(plan, name)
         elif key == "plain_http" and plan.integrations and methods == "auto":
             plan.skipped.append((key, "not used for platform domains"))
-        elif key == "browser" and looks_like_pdf_url(url):
-            plan.skipped.append((key, "cannot extract a PDF's text"))
         else:
             plan.order.append(key)
     plan.live = [k for k in plan.order if stage_of(k) == LIVE]

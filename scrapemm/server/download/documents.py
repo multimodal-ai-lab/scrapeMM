@@ -1,12 +1,16 @@
 """Documents behind a URL: spreadsheets, PDFs, office files, archives.
 
 A browser that opens such a URL shows no page: it downloads the file (often only after a
-bot check, e.g. a "Verifying your browser..." page, has passed). What is cheap to read is
-turned into text -- spreadsheets into tables, one per sheet. The rest is reported as a
-document type scrapeMM does not extract, never as the bot check that preceded it.
+bot check, e.g. a "Verifying your browser..." page, has passed), or shows a PDF in its
+viewer. What is cheap to read is turned into text -- spreadsheets into tables, one per
+sheet; PDFs into their text, page by page. The rest is reported as a document type
+scrapeMM does not extract, never as the bot check that preceded it.
+
+`to_content()` is the one place that turns a downloaded document into content.
 """
 
 import csv
+import hashlib
 import html
 import logging
 from io import BytesIO
@@ -37,7 +41,11 @@ def document_extension(url_or_name: str) -> Optional[str]:
     """The document extension of a URL's path or a file name, if it has one."""
     path = urlsplit(url_or_name).path if "://" in url_or_name else url_or_name
     suffix = Path(path).suffix.lower()
-    return suffix if suffix in DOCUMENT_EXTENSIONS else None
+    if suffix in DOCUMENT_EXTENSIONS:
+        return suffix
+    if "://" in url_or_name and "pdf" in path.lower().split("/"):
+        return ".pdf"  # E.g. eur-lex.europa.eu/legal-content/EN/TXT/PDF/?uri=...
+    return None
 
 
 def is_document_content_type(content_type: Optional[str]) -> bool:
@@ -45,14 +53,36 @@ def is_document_content_type(content_type: Optional[str]) -> bool:
     return any(content_type.startswith(t) for t in DOCUMENT_CONTENT_TYPES)
 
 
-def to_text(path: Path, name: str) -> Optional[tuple[str, str]]:
-    """(HTML, Markdown) of the document at `path` (named `name`, for its type), or None
+def to_content(data: bytes, name: str, content_type: Optional[str] = None):
+    """The `ScrapedContent` of a downloaded document (`name` gives its type, as does
+    `content_type`), or None if scrapeMM does not read documents of its type. Blocking:
+    call it in a thread."""
+    from ezmm import MultimodalSequence
+    from scrapemm.common.scraping_response import ScrapedContent
+    text = to_text(data, name, content_type)
+    if text is None:
+        return None
+    html_text, markdown = text
+    content = ScrapedContent(html=html_text, markdown=markdown,
+                             multimodal=MultimodalSequence(markdown))
+    if _kind(name, content_type) == ".pdf":
+        # TODO: Once ezMM has a PDF item, make the kept file one and put its reference
+        #  into the multimodal sequence (beside the text), so that results carry the PDF
+        #  like they carry images. `keep_pdf()` already stores it for good.
+        content.pdf_path = keep_pdf(data)
+    return content
+
+
+def to_text(data: bytes, name: str, content_type: Optional[str] = None) -> Optional[tuple[str, str]]:
+    """(HTML, Markdown) of a document (`name` and `content_type` tell its type), or None
     if scrapeMM does not read documents of its type."""
-    extension = document_extension(name) or Path(path).suffix.lower()
+    extension = _kind(name, content_type)
     if extension in SPREADSHEET_EXTENSIONS:
-        tables = _spreadsheet_tables(path)
+        tables = _spreadsheet_tables(data, name)
     elif extension in TEXT_TABLE_EXTENSIONS:
-        tables = _csv_tables(path, name)
+        tables = _csv_tables(data, name)
+    elif extension == ".pdf":
+        return _pdf_text(data, name)
     else:
         return None
     if tables is None:
@@ -60,19 +90,78 @@ def to_text(path: Path, name: str) -> Optional[tuple[str, str]]:
     return _render(name, tables)
 
 
-def _spreadsheet_tables(path: Path) -> Optional[list[tuple[str, list[list[str]], bool]]]:
+def _kind(name: str, content_type: Optional[str]) -> Optional[str]:
+    """The document extension standing for the document's type."""
+    if extension := document_extension(name):
+        return extension
+    content_type = (content_type or "").split(";")[0].strip().lower()
+    return {"application/pdf": ".pdf", "text/csv": ".csv",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+            }.get(content_type)
+
+
+def keep_pdf(data: bytes) -> Optional[Path]:
+    """Stores a PDF for good, named by its content, beside the media in the media
+    registry's directory (`pdf/<sha256>.pdf`), and returns where. Kept so it can become
+    an ezMM item once ezMM supports PDFs, without downloading it again."""
+    try:
+        from ezmm.common.registry import item_registry
+        directory = Path(item_registry.path) / "pdf"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{hashlib.sha256(data).hexdigest()}.pdf"
+        if not path.exists():
+            partial = path.with_suffix(".pdf.part")
+            partial.write_bytes(data)
+            partial.replace(path)
+        return path
+    except OSError:
+        logger.info("Could not keep a downloaded PDF.", exc_info=True)
+        return None
+
+
+# A PDF's text beyond this many pages is left out: a report runs to dozens, a scanned
+# archive to thousands
+MAX_PDF_PAGES = 500
+
+
+def _pdf_text(data: bytes, name: str) -> Optional[tuple[str, str]]:
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        logger.info("pypdf is not installed; PDFs cannot be read.")
+        return None
+    try:
+        reader = PdfReader(BytesIO(data))
+        pages = [(page.extract_text() or "").strip() for page in reader.pages[:MAX_PDF_PAGES]]
+        total = len(reader.pages)
+    except Exception as e:
+        logger.info(f"Could not read the PDF {name}: {type(e).__name__}: {e}")
+        return None
+    if not any(pages):
+        logger.info(f"The PDF {name} has no text layer (a scan?).")
+        return None
+    note = (f"(Only the first {MAX_PDF_PAGES} of {total} pages.)"
+            if total > MAX_PDF_PAGES else "")
+    paragraph, line = "\n\n", "\n"
+    markdown = paragraph.join([f"# {name}"] + [p for p in pages if p] + ([note] if note else []))
+    html_text = (f"<h1>{html.escape(name)}</h1>"
+                 + "".join('<section class="pdf-page"><p>'
+                           + html.escape(p).replace(paragraph, "</p><p>").replace(line, "<br>")
+                           + "</p></section>" for p in pages if p)
+                 + (f"<p>{note}</p>" if note else ""))
+    return html_text, markdown
+
+
+def _spreadsheet_tables(data: bytes, name: str) -> Optional[list[tuple[str, list[list[str]], bool]]]:
     try:
         import openpyxl
     except ImportError:
         logger.info("openpyxl is not installed; spreadsheets cannot be read.")
         return None
     try:
-        # From a file object: a download's file has no extension, which openpyxl, given
-        # a path, takes for an unsupported format
-        workbook = openpyxl.load_workbook(BytesIO(Path(path).read_bytes()), read_only=True,
-                                          data_only=True)
+        workbook = openpyxl.load_workbook(BytesIO(data), read_only=True, data_only=True)
     except Exception as e:
-        logger.info(f"Could not open the spreadsheet {path.name}: {type(e).__name__}: {e}")
+        logger.info(f"Could not open the spreadsheet {name}: {type(e).__name__}: {e}")
         return None
     tables = []
     try:
@@ -89,8 +178,8 @@ def _spreadsheet_tables(path: Path) -> Optional[list[tuple[str, list[list[str]],
     return tables
 
 
-def _csv_tables(path: Path, name: str) -> list[tuple[str, list[list[str]], bool]]:
-    text = path.read_bytes().decode("utf-8-sig", errors="replace")
+def _csv_tables(data: bytes, name: str) -> list[tuple[str, list[list[str]], bool]]:
+    text = data.decode("utf-8-sig", errors="replace")
     try:
         dialect = csv.Sniffer().sniff(text[:4096])
     except csv.Error:

@@ -424,6 +424,7 @@ async def environment() -> dict:
         "queue": _queue(),
         "media": _media_usage(),
         "address": _address(),
+        "proxy": proxy_status(),
         # In a thread: they are queries of the job history
         **(await run_light(_job_figures)),
         "blacklist": {
@@ -435,6 +436,15 @@ async def environment() -> dict:
             "ttl": cache.ttl,
         },
     }
+
+
+def proxy_status() -> dict:
+    """The proxy (see `scrapemm.server.proxy`), and until when YouTube is paused for this
+    server's address, during which YouTube retrievals go through it."""
+    from scrapemm.server import proxy
+    from scrapemm.server.integrations.ytdlp import youtube_gate
+    paused = youtube_gate.blocked_until
+    return {**proxy.status(), "youtube_paused_until": paused if paused > time.time() else None}
 
 
 # The recent counts slide with the clock even when nothing is written, so they are also

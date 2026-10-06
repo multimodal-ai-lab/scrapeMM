@@ -27,6 +27,7 @@ curl_cffi~=0.16.3  # Provides browser binaries for impersonation
 firecrawl-py~=4.32.0
 markdownify~=1.2.3
 openpyxl~=3.1.5  # Reads spreadsheets that URLs serve as files (see download/documents.py)
+pypdf~=6.19.0  # Reads the text of PDFs (pure Python; see download/documents.py)
 pip-system-certs  # For better SSL certificate handling
 platformdirs~=4.11.8
 playwright~=1.62.0

@@ -69,14 +69,19 @@ async def _request_via_curl_cffi(
     `lookup` marks a page fetch or an API lookup rather than a media download: the two
     run in separate thread pools, so that neither can starve the other.
     """
+    from scrapemm.server import proxy
     from scrapemm.server.workers import run_in
     if CurlSession is None:
         logger.debug("curl_cffi not available; cannot bypass bot-gated 403 for %s", url)
         return None
+    # The attempt's proxy, if it goes through one: read here, as the worker thread does
+    # not see the context variable
+    proxies = proxy.curl_proxies()
     if lookup:
         return await run_in(_curl_lookup_executor, "curl lookup",
-                            _request_via_curl_cffi_sync, url, headers)
-    return await run_in(_curl_executor, "curl media", _request_via_curl_cffi_sync, url, headers)
+                            _request_via_curl_cffi_sync, url, headers, proxies)
+    return await run_in(_curl_executor, "curl media", _request_via_curl_cffi_sync, url, headers,
+                        proxies)
 
 
 async def curl_get(url: str, **kwargs):
@@ -92,7 +97,10 @@ async def curl_get(url: str, **kwargs):
     if CurlSession is None:
         raise ImportError("curl_cffi is not installed.")
 
+    from scrapemm.server import proxy
     from scrapemm.server.workers import run_in
+    if "proxies" not in kwargs and (proxies := proxy.curl_proxies()):
+        kwargs["proxies"] = proxies  # The attempt goes through the proxy
 
     def curl_page_get():
         with _thread_session() as session:
@@ -126,7 +134,8 @@ def _log_curl(url: str, impersonate: str, outcome: str, started: float) -> None:
                f"⏱️ curl ({impersonate}) {url[:120]}: {outcome} in {took:.1f} s.")
 
 
-def _request_via_curl_cffi_sync(url: str, headers: Optional[dict]) -> Optional[tuple[int, dict, bytes]]:
+def _request_via_curl_cffi_sync(url: str, headers: Optional[dict],
+                                proxies: Optional[dict] = None) -> Optional[tuple[int, dict, bytes]]:
     for impersonate in _CURL_CFFI_IMPERSONATIONS:
         started = time.monotonic()
         try:
@@ -137,6 +146,7 @@ def _request_via_curl_cffi_sync(url: str, headers: Optional[dict]) -> Optional[t
                     headers=headers or {},
                     allow_redirects=True,
                     timeout=CURL_CFFI_TIMEOUT,
+                    proxies=proxies,
                 )
                 status = response.status_code
                 hdrs = dict(response.headers)
@@ -285,7 +295,9 @@ async def _request_static(url: str,
     # Some hosts (archive.today) serve an nginx decoy to non-browser TLS clients, so their
     # downloads (e.g. a snapshot's rehosted images) go through curl_cffi first; aiohttp is
     # only the fallback if browser impersonation is unavailable or fails.
-    if get_domain(url) in BROWSER_TLS_DOMAINS:
+    from scrapemm.server import proxy
+    if get_domain(url) in BROWSER_TLS_DOMAINS or (
+            proxy.wants_curl() and isinstance(session, aiohttp.ClientSession)):
         content = await _from_curl_cffi()
         if content is not None:
             return content
@@ -313,6 +325,8 @@ async def _request_static(url: str,
             return None
         else:
             # aiohttp
+            if (via := proxy.aiohttp_proxy()) and "proxy" not in kwargs:
+                kwargs["proxy"] = via
             async with session.get(url, timeout=timeout, allow_redirects=True,
                                    raise_for_status=True, ssl=ssl, **kwargs) as response:
                 if get_text:

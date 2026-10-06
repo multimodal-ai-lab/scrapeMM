@@ -338,8 +338,22 @@ const tiles = computed(() => {
           + `${env.jobs.running} job${env.jobs.running === 1 ? '' : 's'} running`
         : 'no URLs queued',
       to: '/jobs' },
+    // The proxy for when this server's address is blocked: only once one is configured
+    ...(env.proxy?.configured ? [proxyTile(env.proxy)] : []),
   ]
 })
+
+function proxyTile(proxy: any) {
+  const test = proxy.last_test
+  const paused = proxy.youtube_paused_until
+  const parts = [`${proxy.requests_today} through it today`]
+  if (test) parts.push(test.ok ? `tested: ${test.ip}${test.country ? ` (${test.country})` : ''}` : 'last test failed')
+  if (paused) parts.push(`YouTube paused until ${new Date(paused * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`)
+  return { label: 'Proxy', icon: 'i-fa7-solid-shuffle',
+    value: proxy.enabled ? 'On' : 'Off',
+    tone: test && !test.ok ? 'warning' as const : proxy.enabled ? 'success' as const : 'neutral' as const,
+    detail: parts.join(' · '), to: '/settings' }
+}
 
 onMounted(() => {
   connectLive()

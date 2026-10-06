@@ -66,6 +66,11 @@ _REPLAY_MISS_JS = """() => {
 }"""
 # How long a frame showing that page gets to turn into the capture before a reload
 REPLAY_MISS_WAIT = 10
+# The same for a record's screenshot view, where the page is never the truth: the
+# screenshot is stored with every record that has one, and its replay showed the page
+# only under load (production suite, 2026-10-06), twice in a row
+SCREENSHOT_MISS_WAIT = 30
+SCREENSHOT_ATTEMPTS = 3
 
 # A retrieval is not tried again after this many seconds, so that the attempts (see
 # `PermaCC._extract_content()`) stay well within the browser's 10-minute limit
@@ -105,7 +110,9 @@ class PermaCC(HeadedBrowser):
             with suppress(PlaywrightError):
                 await page.goto(shot, wait_until="domcontentloaded", timeout=60_000)
         missing = False
-        for attempt in range(2):
+        screenshot_view = "type=image" in page.url
+        attempts = SCREENSHOT_ATTEMPTS if screenshot_view else 2
+        for attempt in range(attempts):
             try:
                 target = await self._extract_capture(page)
             except PlaywrightError as e:
@@ -117,10 +124,11 @@ class PermaCC(HeadedBrowser):
             if renderer_crashed(page):
                 # Nothing on this page answers any more; `_browse()` retries on a new one
                 raise PlaywrightError("Target crashed")
-            missing = target is not None and await _shows_replay_miss(target)
+            missing = target is not None and await _shows_replay_miss(
+                target, SCREENSHOT_MISS_WAIT if screenshot_view else REPLAY_MISS_WAIT)
             if target is not None and not missing and await _shows_content(target):
                 return target
-            if attempt == 0 and loop.time() - start < RETRY_BUDGET:
+            if attempt < attempts - 1 and loop.time() - start < RETRY_BUDGET:
                 if missing:
                     logger.info(f"The replay at {page.url} says its page is not in the "
                                 f"archive; loading the record again.")
@@ -135,6 +143,11 @@ class PermaCC(HeadedBrowser):
         # The replay rendered the capture, twice, and it holds nothing to show
         replayed_empty = target is not None
         shot = _screenshot_url(page.url)
+        if missing and screenshot_view:
+            # Not "missing": the record has its screenshot, the replay failed to show it
+            raise RetrievalFailed(
+                f"The replay of the Perma.cc screenshot at {page.url} kept saying it is "
+                f"not in the archive ({attempts} loads); the replay is failing, not the record.")
         if missing and shot is None:
             raise TargetUnavailableError(
                 f"The replay of the Perma.cc record at {page.url} says the page is not in "
@@ -363,10 +376,10 @@ class PermaCC(HeadedBrowser):
             return 0
 
 
-async def _shows_replay_miss(frame: Frame) -> bool:
+async def _shows_replay_miss(frame: Frame, wait: float = REPLAY_MISS_WAIT) -> bool:
     """Whether the frame shows pywb's "not in this archive" page, and keeps showing it
-    for REPLAY_MISS_WAIT seconds (see `_REPLAY_MISS_JS`)."""
-    deadline = asyncio.get_running_loop().time() + REPLAY_MISS_WAIT
+    for `wait` seconds (see `_REPLAY_MISS_JS`)."""
+    deadline = asyncio.get_running_loop().time() + wait
     while True:
         try:
             if not await frame.evaluate(_REPLAY_MISS_JS):

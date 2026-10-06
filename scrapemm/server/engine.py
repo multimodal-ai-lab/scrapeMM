@@ -22,7 +22,9 @@ from scrapemm.common import (ScrapingResponse, ScrapedContent, OutputFormat, OUT
 from scrapemm.common.exceptions import RetrievalFailed, UnsupportedDomainError, \
     DomainBlacklistedError, DiskFull, TargetUnavailableError, QuotaExceededError, \
     AccessBlockedError, CaptchaEncounteredError, PaywallError, RegionBlockedError
-from scrapemm.server import challenges, reachability, chain, timing
+from scrapemm.server import challenges, reachability, chain, proxy, timing
+from scrapemm.server.download.documents import (document_extension, is_document_content_type,
+                                                to_content as documents_to_content)
 from scrapemm.server import screenshot as screenshot_module
 from scrapemm.server.blacklist import blacklist
 from scrapemm.server.cache import cache, cache_key
@@ -37,6 +39,7 @@ from scrapemm.server.integrations import (retrieve_via_integration, fire, decodo
                                           INTEGRATION_NAMES,
                                           DOMAIN_TO_INTEGRATION)
 from scrapemm.server.integrations.firecrawl.firecrawl import configured_firecrawl_urls
+from scrapemm.server.integrations import proxy_browser
 from scrapemm.server.toggles import is_enabled
 from scrapemm.server.workers import run_light
 from scrapemm.server.util import (run_with_semaphore, get_domain, normalize_video, preprocess_url,
@@ -427,6 +430,8 @@ async def _retrieve(
     # Set once a method found the page withheld from this server's region (HTTP 451):
     # the other methods fetching from here would be too, the others may not
     region_blocked: list[RegionBlockedError] = []
+    # The methods that go through the proxy right away (see `scrapemm.server.proxy`)
+    proxy_first: set[str] = set()
     if domain not in DOMAIN_TO_INTEGRATION:
         timing.work_started()
         verdict, reason = await reachability.check(url)
@@ -438,6 +443,14 @@ async def _retrieve(
             # Only from this server, maybe (e.g. its IP is blocked): services that fetch
             # from elsewhere still get their chance, the local methods are skipped
             local = _local_methods()
+            if proxy.active():
+                # ...unless they can go through the proxy: from its address, the host
+                # may well answer
+                proxy_first = {m for m in methods if m in local and m in proxy.PROXY_METHODS}
+                local = local - proxy_first
+                if proxy_first:
+                    logger.info(f"🔀 {url} is unreachable from this server; trying "
+                                f"{', '.join(sorted(proxy_first))} through the proxy.")
             skipped = [m for m in methods if m in local]
             methods = [m for m in methods if m not in local]
             unreachable = reason
@@ -481,8 +494,10 @@ async def _retrieve(
                 return fire.scrape(url, session=session, output_format=output_format,
                                    actions=actions, max_video_size=max_video_size)
             elif m.lower() == BROWSER:
-                return browser._get(url, output_format=output_format,
-                                    max_video_size=max_video_size)
+                # Through the proxy, in a context of its own, if the attempt goes through it
+                via = proxy_browser.browser if proxy.route() else browser
+                return via._get(url, output_format=output_format,
+                                max_video_size=max_video_size)
             elif m == PLAIN_HTTP:
                 return _plain_http(url, session, output_format, max_video_size)
             elif m.lower() == "decodo":
@@ -506,24 +521,46 @@ async def _retrieve(
     # Try the methods until one succeeds
     logger.debug(f"Trying methods in order: {', '.join(methods)}")
 
-    async def evaluate(method_name: str) -> tuple[str, object]:
-        """Runs one method and classifies its outcome."""
-        if region_blocked and method_name in _local_methods():
-            return "error", RegionBlockedError(f"Skipped: {region_blocked[0]}")
-        logger.debug(f"Now executing {method_name}...")
-        content = await _execute(url, map_method_to_retrieval_routine, method_name, session)
+    # The methods whose (last) attempt went through the proxy, and the errors of their
+    # direct attempts before (see `scrapemm.server.proxy`)
+    proxied: set[str] = set()
+    direct_errors: dict[str, Exception] = {}
 
+    async def run_attempt(method_name: str, via_proxy: bool) -> tuple[tuple[str, object], bool]:
+        """Runs the method once, through the proxy if so, and classifies its outcome.
+        Also returns whether the attempt went through the proxy."""
+        with proxy.attempt(proxy.active() if via_proxy else None) as current:
+            content = await _execute(url, map_method_to_retrieval_routine, method_name, session)
         if isinstance(content, Exception):
-            if isinstance(content, RegionBlockedError) and method_name in _local_methods():
-                region_blocked.append(content)
-                logger.info(f"🌍 {url} is withheld from this server's region; skipping the "
-                            f"other methods that fetch from here.")
-            return "error", content
+            return ("error", content), current.used
         # In a thread: the checks parse the whole page (BeautifulSoup for the paywall
         # check), which for a large page held the event loop -- every request -- for
         # seconds. In a thread, the loop keeps getting its turns.
-        outcome = await run_light(_classify, url, method_name, content, output_format)
-        if isinstance(outcome[1], RegionBlockedError) and method_name in _local_methods():
+        return await run_light(_classify, url, method_name, content, output_format), current.used
+
+    async def evaluate(method_name: str) -> tuple[str, object]:
+        """Runs one method and classifies its outcome. A method that failed because of
+        this server's address is retried once through the proxy, if one is in use."""
+        local = method_name in _local_methods()
+        via_proxy = method_name in proxy_first
+        if region_blocked and local:
+            if not (method_name in proxy.PROXY_METHODS and proxy.active()):
+                return "error", RegionBlockedError(f"Skipped: {region_blocked[0]}")
+            via_proxy = True  # From the proxy's region instead
+        logger.debug(f"Now executing {method_name}{' through the proxy' if via_proxy else ''}...")
+        outcome, used = await run_attempt(method_name, via_proxy)
+        if outcome[0] == "error" and not used and proxy.retry_worthy(method_name, outcome[1]):
+            logger.info(f"🔀 Retrying {method_name} for {url} through the proxy: "
+                        f"{str(outcome[1]).splitlines()[0][:200]}")
+            direct_errors[method_name] = outcome[1]
+            outcome, used = await run_attempt(method_name, True)
+        if used:
+            proxied.add(method_name)
+        elif isinstance(outcome[1], RegionBlockedError) and local:
+            if not region_blocked:
+                logger.info(f"🌍 {url} is withheld from this server's region; skipping the "
+                            f"other methods that fetch from here"
+                            f"{' (or going through the proxy)' if proxy.active() else ''}.")
             region_blocked.append(outcome[1])
         return outcome
 
@@ -560,6 +597,16 @@ async def _retrieve(
                 winner = (BROWSER, content)
         if winner is not None:
             break
+
+    # Which attempts went through the proxy: "<method> (via proxy)" for the winner and
+    # the errors, the direct attempt's error under the method's own name
+    if proxied:
+        for m in proxied:
+            if m in errors:
+                errors[f"{m} (via proxy)"] = errors.pop(m)
+        if winner is not None and winner[0] in proxied:
+            winner = (f"{winner[0]} (via proxy)", winner[1])
+    errors.update(direct_errors)
 
     if unreachable:
         for m in skipped:
@@ -606,6 +653,14 @@ def _classify(url: str, method_name: str, content: Optional[ScrapedContent],
 
     # Ensure the method returned the actual content and not a CAPTCHA challenge
     if captcha := detect_captcha(content):
+        if document_extension(url):
+            # A bot check in front of a file: the browser waits it out and downloads the
+            # file (see `HeadedBrowser._document()`); for any other method it is a wall,
+            # not a CAPTCHA a human could usefully solve for the queue
+            logger.info(f"Method {method_name} got a bot check ({captcha}) in front of the "
+                        f"document {url}.")
+            return "error", RetrievalFailed(f"Method {method_name} got a bot check in front "
+                                            f"of the document, not the file.")
         logger.warning(f"🤖 Method {method_name} encountered a {captcha} at {url}.")
         return "error", CaptchaEncounteredError(f"Method {method_name} encountered a {captcha}.")
 
@@ -1166,23 +1221,54 @@ async def _plain_http(url: str, session: aiohttp.ClientSession, output_format: O
     goes through (archive.premier.gov.ru, which Firecrawl could not load). Its result goes
     through the same checks as any method's, so a bot page or an empty JavaScript shell
     does not count as content."""
-    async with session.get(url, headers=HEADERS, allow_redirects=True,
-                           timeout=aiohttp.ClientTimeout(total=30)) as response:
-        if response.status in (404, 410):
-            raise TargetUnavailableError(f"{url} does not exist on the live site "
-                                         f"(HTTP {response.status}).")
-        if response.status != 200:
-            if response.status == 451:
-                raise RegionBlockedError(f"{url} is blocked in this server's region "
-                                         f"(HTTP 451).")
-            raise RetrievalFailed(f"A plain request got HTTP {response.status}.")
-        content_type = response.headers.get("content-type", "text/html")
-        if "html" not in content_type:
-            raise RetrievalFailed(f"A plain request got {content_type}, not a web page.")
-        html = await response.text(errors="replace")
-        final_url = str(response.url)
+    status, content_type, data, final_url, encoding = await _plain_get(url, session)
+    if status in (404, 410):
+        raise TargetUnavailableError(f"{url} does not exist on the live site "
+                                     f"(HTTP {status}).")
+    if status != 200:
+        if status == 451:
+            raise RegionBlockedError(f"{url} is blocked in this server's region "
+                                     f"(HTTP 451).")
+        raise RetrievalFailed(f"A plain request got HTTP {status}.")
+    if is_document_content_type(content_type):
+        # A PDF, a spreadsheet: read into text (see `download.documents`)
+        name = urlsplit(final_url).path.rstrip("/").rsplit("/", 1)[-1]
+        if content := await asyncio.to_thread(documents_to_content, data, name, content_type):
+            logger.info(f"📄 {url} is a {content_type.split(';')[0]} document; read it into text.")
+            return content
+        raise UnsupportedDomainError(f"{url} is a {content_type.split(';')[0]} document, "
+                                     f"a type scrapeMM does not extract text from.")
+    if "html" not in content_type:
+        raise RetrievalFailed(f"A plain request got {content_type}, not a web page.")
+    html = data.decode(encoding or "utf-8", errors="replace")
     return await to_scraped_content(html, session=session, output_format=output_format,
                                     url=final_url, max_video_size=max_video_size)
+
+
+async def _plain_get(url: str, session: aiohttp.ClientSession
+                     ) -> tuple[int, str, bytes, str, Optional[str]]:
+    """GETs the URL: status, content type, body (only of a 200), final URL and encoding.
+    Through the attempt's proxy, if any: aiohttp for an HTTP proxy, curl_cffi for a SOCKS
+    one, which aiohttp cannot use."""
+    if proxy.wants_curl():
+        from scrapemm.server.download.requests import curl_get
+        response = await curl_get(url, headers=HEADERS, impersonate="chrome124", timeout=30,
+                                  allow_redirects=True)
+        return (response.status_code, response.headers.get("content-type", "text/html"),
+                response.content if response.status_code == 200 else b"", str(response.url),
+                getattr(response, "encoding", None))
+    async with session.get(url, headers=HEADERS, allow_redirects=True,
+                           timeout=aiohttp.ClientTimeout(total=30),
+                           proxy=proxy.aiohttp_proxy()) as response:
+        content_type = response.headers.get("content-type", "text/html")
+        data = await response.read() if response.status == 200 else b""
+        encoding = None
+        if data and "html" in content_type:
+            try:
+                encoding = response.get_encoding()
+            except Exception:  # No charset to tell: decoded as UTF-8
+                pass
+        return response.status, content_type, data, str(response.url), encoding
 
 
 async def _cloudflare_fallback(url: str, domain: str, session: aiohttp.ClientSession,

@@ -5,6 +5,7 @@ import logging
 import os
 import socket
 import sys
+import tempfile
 import urllib.request
 import uuid
 from contextlib import suppress, contextmanager
@@ -667,7 +668,40 @@ _wait_for_first_target_on_create()
 
 
 # Seconds a document URL gets to start its download, a bot check in front included
-DOCUMENT_WAIT = 30
+DOCUMENT_WAIT = 60
+# Seconds after which a page that shows no bot check is taken for what it is
+DOCUMENT_SETTLE = 5
+
+
+async def _shows_bot_check(page: Page) -> bool:
+    """Whether the page shows a CAPTCHA or bot check (see `captcha_detect`)."""
+    from scrapemm.server.captcha_detect import detect_captcha
+    try:
+        return bool(detect_captcha(ScrapedContent(html=await page.content())))
+    except Exception:
+        return True  # Mid-navigation, as a passing check navigates: not settled yet
+
+
+# Statuses of a page's final document that mean the site's server (or its CDN) failed
+# rather than answered. Not 503: bot checks answer with it (insse.ro, older Cloudflare).
+GATEWAY_ERRORS = (502, 504)
+
+
+def _note_served_document(response, page: Page, served: list[str],
+                          statuses: list[int]) -> None:
+    """Notes the status of each document the page's own navigation was answered with,
+    and the content type of a document file (a PDF, a spreadsheet) among them, see
+    `HeadedBrowser._document()`."""
+    try:
+        if not (response.request.is_navigation_request() and response.frame == page.main_frame):
+            return
+        statuses.append(response.status)
+        from scrapemm.server.download.documents import is_document_content_type
+        if (not served and response.ok
+                and is_document_content_type(response.headers.get("content-type"))):
+            served.append(response.headers.get("content-type"))
+    except Exception:
+        pass  # Observing only; never the reason a retrieval fails
 
 # Concurrent retrievals in the shared browser; override with
 # `update_config(max_browser_pages=...)`
@@ -1184,6 +1218,12 @@ class HeadedBrowser(RetrievalIntegration):
             downloading = False
             with suppress(AttributeError):  # A lambda: Playwright cannot wrap a bound builtin
                 page.on("download", lambda download: downloads.append(download))
+            # ...or shows the file in a viewer (PDFs). The page then has no DOM worth the
+            # name, and on Linux its "domcontentloaded" may never come
+            served: list[str] = []  # The document's content type, once it was served
+            statuses: list[int] = []  # Of the page's own document, as it navigated
+            with suppress(AttributeError):
+                page.on("response", lambda r: _note_served_document(r, page, served, statuses))
             try:
                 # Before navigating, so it sees every medium the page loads
                 media = BrowserMedia(page)
@@ -1211,8 +1251,10 @@ class HeadedBrowser(RetrievalIntegration):
                             f"{url} is blocked in this server's region (HTTP 451).")
                     if response is not None and "pdf" in response.headers.get("content-type", ""):
                         # The browser shows a PDF in its viewer, from which there is no
-                        # text to extract. Failing at once lets the next method (e.g.
-                        # Firecrawl, which parses PDFs) take over.
+                        # text to extract: the file is read instead (see `_document()`)
+                        if self.fails_on_not_found:
+                            served[:] = served or [response.headers.get("content-type")]
+                            return await self._document(page, downloads, url, served)
                         raise RetrievalFailed(f"{url} is a PDF, which {self.name} cannot "
                                               f"extract the text of.")
                 except PlaywrightError as e:
@@ -1221,6 +1263,10 @@ class HeadedBrowser(RetrievalIntegration):
                         # change that, but other methods (remote services) still may
                         raise RetrievalFailed(f"{self.name} could not reach {url}: "
                                               f"{str(e).splitlines()[0]}") from e
+                    if (self.fails_on_not_found and (served or downloads)
+                            and isinstance(e, PlaywrightTimeoutError)):
+                        # A document, which the viewer shows without ever finishing a DOM
+                        return await self._document(page, downloads, url, served)
                     if (attempt == 0 and self.retry_on_timeout
                             and isinstance(e, PlaywrightTimeoutError)):
                         # With dozens of heavy pages loading at once, a page that
@@ -1239,12 +1285,16 @@ class HeadedBrowser(RetrievalIntegration):
                         await page.wait_for_load_state("domcontentloaded", timeout=30000)
                     except Exception:
                         pass
-                if self.fails_on_not_found and (downloads or downloading
+                if self.fails_on_not_found and (downloads or downloading or served
                                                 or document_extension(url)):
-                    if (document := await self._document(page, downloads, url)) is not None:
+                    if (document := await self._document(page, downloads, url, served)) is not None:
                         return document
                 await self._pass_cloudflare(page)
                 await self._settle_after_goto(page)
+                if (self.fails_on_not_found and statuses
+                        and statuses[-1] in GATEWAY_ERRORS and not served):
+                    # The site (or its CDN) failed: its error page is no content
+                    raise RetrievalFailed(f"{url} answered HTTP {statuses[-1]}.")
 
                 if target := await self._extract_content(page):
                     shown_url = getattr(page, "url", "") or ""  # What the content came from
@@ -1315,47 +1365,91 @@ class HeadedBrowser(RetrievalIntegration):
 
         raise RetrievalFailed(f"{self.name} integration was unable to extract content from {url}.")
 
-    async def _document(self, page: Page, downloads: list, url: str) -> Optional[ScrapedContent]:
-        """The document `url` serves as a file, read into text (see `download.documents`),
-        or None if it turns out to show a page after all. Waits for the download: a bot
-        check in front of the file ("Verifying your browser...") passes by itself in a
-        few seconds. A file of a type scrapeMM does not read is reported as such -- the
-        check in front of it was no CAPTCHA anybody has to solve."""
+    async def _document(self, page: Page, downloads: list, url: str,
+                        served: list[str]) -> Optional[ScrapedContent]:
+        """The document `url` serves as a file -- a download, or what the browser shows in
+        its viewer (`served` has its content type) -- read into content by
+        `documents.to_content()`, or None if it turns out to show a page after all. Waits
+        for the file: a bot check in front of it ("Verifying your browser...") passes by
+        itself in a few seconds, more under load. A file of a type scrapeMM does not read
+        is reported as such -- the check in front of it was no CAPTCHA anybody has to
+        solve."""
         from scrapemm.server.download import documents
         from scrapemm.common import UnsupportedDomainError
-        deadline = asyncio.get_running_loop().time() + DOCUMENT_WAIT
-        while not downloads and asyncio.get_running_loop().time() < deadline:
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        while not downloads and not served and loop.time() < start + DOCUMENT_WAIT:
             await asyncio.sleep(0.5)
-        if not downloads:
-            # No file came: a page after all, unless the bot check is still up
-            from scrapemm.server.captcha_detect import detect_captcha
-            with suppress(Exception):
-                if detect_captcha(ScrapedContent(html=await page.content())):
-                    raise RetrievalFailed(
-                        f"{url} should deliver a {document_extension(url)} file, but the "
-                        f"bot check in front of it did not let the browser through.")
-            return None
-        download = downloads[0]
-        name = download.suggested_filename or urlparse(url).path.rsplit("/", 1)[-1]
-        try:
-            path = Path(await asyncio.wait_for(download.path(), DOCUMENT_WAIT))
-        except Exception as e:
-            raise RetrievalFailed(f"The download of {url} failed: {type(e).__name__}: {e}") from e
-        text = await asyncio.to_thread(documents.to_text, path, name)
-        with suppress(Exception):
-            await download.delete()
-        if text is None:
-            if (documents.document_extension(name) or "") == ".pdf":
-                raise RetrievalFailed(f"{url} is a PDF, which {self.name} cannot extract "
-                                      f"the text of.")  # Firecrawl, next, parses PDFs
+            if loop.time() - start >= DOCUMENT_SETTLE and not await _shows_bot_check(page):
+                break  # A page and no file: asked for directly, below
+        name = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1] or urlparse(url).netloc
+        if downloads:
+            name = downloads[0].suggested_filename or name
+            data, content_type = await self._document_bytes(page, url, download=downloads[0])
+        elif served:
+            data, content_type = await self._document_bytes(page, url)
+        elif await _shows_bot_check(page):
+            raise RetrievalFailed(f"{url} should deliver a document, but the bot check in "
+                                  f"front of it did not let the browser through.")
+        else:
+            # A page instead of the file. A passed bot check may have moved on to another
+            # page (eur-lex.europa.eu's lands on its home page); asked for again with the
+            # cookies it set, the URL may serve the file after all
+            try:
+                data, content_type = await self._document_bytes(page, url)
+            except RetrievalFailed:
+                return None
+            if not documents.is_document_content_type(content_type):
+                return None
+            logger.info(f"The browser was shown a page for {url}; asked for again, it "
+                        f"served the document.")
+        content_type = (served[0] if served else None) or content_type
+        if not documents.document_extension(name):
+            name = url  # E.g. eur-lex.europa.eu's ".../TXT/PDF/?uri=...": the URL says more
+        content = await asyncio.to_thread(documents.to_content, data, name, content_type)
+        if content is None:
+            kind = documents.document_extension(name) or content_type or "binary"
             raise UnsupportedDomainError(
-                f"{url} is a {documents.document_extension(name) or 'binary'} file "
-                f"({name}), a document type scrapeMM does not extract text from.")
-        html, markdown = text
-        from ezmm import MultimodalSequence
+                f"{url} is a {kind} file ({name}), a document type scrapeMM does not "
+                f"extract text from.")
         logger.info(f"📄 {url} is the document {name}; read it into text.")
-        return ScrapedContent(html=html, markdown=markdown,
-                              multimodal=MultimodalSequence(markdown))
+        return content
+
+    @staticmethod
+    async def _document_bytes(page: Page, url: str, download=None) -> tuple[bytes, Optional[str]]:
+        """The bytes of the document `url`, taken from the browser. A download's file is
+        copied out at once: Playwright removes its temporary file when the connection that
+        saw the download is replaced, which under load happened before the file was read
+        (FileNotFoundError, and the suite's spreadsheet came out unread). Failing that,
+        the file is requested again with the browser's cookies, which got past the bot
+        check by now. Returns (bytes, content type, if known)."""
+        # A PDF shown in the viewer is not taken from `response`: the viewer loads it in
+        # ranges, and the body the browser keeps was cut short. Requested again instead.
+        if download is not None:
+            target = Path(tempfile.mkdtemp(prefix="scrapemm-document-")) / "file"
+            try:
+                await asyncio.wait_for(download.save_as(target), DOCUMENT_WAIT)
+                return await asyncio.to_thread(target.read_bytes), None
+            except Exception as e:
+                logger.info(f"Could not take the download of {url} from the browser "
+                            f"({type(e).__name__}); requesting it again.")
+            finally:
+                with suppress(Exception):
+                    await download.delete()
+                with suppress(OSError):
+                    target.unlink()
+                    target.parent.rmdir()
+        try:
+            # Certificate errors ignored, as the browser itself ignores them (see
+            # `_browser_args()`): insse.ro serves an incomplete chain
+            again = await page.context.request.get(url, timeout=DOCUMENT_WAIT * 1000,
+                                                   ignore_https_errors=True)
+            if again.ok and "html" not in again.headers.get("content-type", ""):
+                return await again.body(), again.headers.get("content-type")
+            status = f"HTTP {again.status}, {again.headers.get('content-type')}"
+        except Exception as e:
+            status = f"{type(e).__name__}: {e}"
+        raise RetrievalFailed(f"The document at {url} could not be downloaded ({status}).")
 
     def _after_renderer_crash(self, url: str) -> str:
         """What to load on the new page after `url` crashed its tab's renderer. The same

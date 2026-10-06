@@ -186,6 +186,7 @@ onBeforeUnmount(() => clearInterval(statsTimer))
     <ExceptionsEditor />
     <ChainPreview />
     <SecretsSection />
+    <ProxySection />
 
     <UCard v-if="retrieval">
       <template #header>
@@ -225,8 +226,8 @@ onBeforeUnmount(() => clearInterval(statsTimer))
             <UInput v-model="retrieval.youtube_min_interval" type="number" min="0" step="1" placeholder="12" />
           </UFormField>
           <UFormField
-            label="YouTube pause after a bot check (s)"
-            description="How long YouTube is left alone once it asked to prove this is no bot. Asking again sooner only extends the block."
+            label="YouTube pause after a refusal (s)"
+            description="How long YouTube is left alone once it refused this server (its bot check, a refused stream). Asking again sooner only extends the block; with a proxy in use, YouTube goes through it meanwhile."
           >
             <UInput v-model="retrieval.youtube_cooldown" type="number" min="0" step="60" placeholder="1800" />
           </UFormField>

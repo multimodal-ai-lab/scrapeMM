@@ -44,13 +44,16 @@ SECRETS = {
     "instagram_cookie": "Instagram cookie string (needed for age-restricted content)",
     "archive_today_cookie": "Archive.today session cookies (established for you when you "
                             "solve the CAPTCHA in the web UI)",
+    "proxy_username": "Proxy username (set under Settings, Proxy)",
+    "proxy_password": "Proxy password (set under Settings, Proxy)",
 }
 
 # Secrets that are (potentially long and) multi-line, so the UI offers a textarea
 MULTILINE_SECRETS = ("facebook_cookie", "instagram_cookie", "archive_today_cookie")
 
-# Secrets the UI does not offer: they are not typed in but written by the server itself
-MANAGED_SECRETS = ("archive_today_cookie",)
+# Secrets the Secrets page does not offer: written by the server itself (the archive.today
+# cookie) or set in a section of their own (the proxy's login, under Settings, Proxy)
+MANAGED_SECRETS = ("archive_today_cookie", "proxy_username", "proxy_password")
 
 _cache: Optional[dict] = None
 

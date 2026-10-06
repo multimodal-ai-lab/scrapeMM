@@ -16,6 +16,7 @@ from yt_dlp.utils import (DownloadError, ExtractorError, GeoRestrictedError,
                           UnsupportedError, UserNotLive, YoutubeDLError)
 
 from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError, AccessBlockedError, RateLimitError
+from scrapemm.server import proxy
 from scrapemm.server.config import get_config_var
 from scrapemm.server.download import download_image
 
@@ -98,6 +99,12 @@ BGUTIL_SERVER_HOME = os.environ.get("BGUTIL_SERVER_HOME",
 # The check is issued per player client, though: when the default clients meet it, the
 # mobile web client ("mweb", with a PO token minted locally) often still gets through.
 # So each group of clients is paused on its own, and YouTube as a whole only when all are.
+# A refused stream (HTTP 403, or fragments answered 404) pauses its group just the same:
+# YouTube does that to an address it distrusts.
+#
+# While YouTube as a whole is paused and a proxy is in use (Settings, Proxy), YouTube
+# retrievals go through the proxy instead, neither paced nor pausing anything: the flag
+# is on this server's address, not the proxy's.
 
 # Player clients, in the order they are tried: yt-dlp's default set, then mweb, whose
 # formats need a PO token (see BGUTIL_SERVER_HOME) and which answers when the default
@@ -106,7 +113,7 @@ YOUTUBE_CLIENT_GROUPS: tuple[tuple[str, ...], ...] = (("default",), ("mweb",))
 
 # Seconds between the starts of two YouTube retrievals, with up to +50% jitter
 DEFAULT_YOUTUBE_MIN_INTERVAL = 12.0
-# Seconds YouTube is not asked again after it demanded the bot check
+# Seconds YouTube is not asked again after it refused this server (bot check, stream)
 DEFAULT_YOUTUBE_COOLDOWN = 30 * 60.0
 
 
@@ -133,9 +140,10 @@ class _YouTubeGate:
         if not groups:
             until = datetime.fromtimestamp(self.blocked_until).strftime("%H:%M")
             raise RateLimitError(
-                f"YouTube demanded its bot check ({self.reason}), so YouTube retrievals are "
+                f"YouTube refused this server ({self.reason}), so YouTube retrievals are "
                 f"paused until {until} to let the flag on this server's address expire. "
-                f"Asking again now would only extend it.")
+                f"Asking again now would only extend it. A proxy (Settings, Proxy) "
+                f"retrieves YouTube videos meanwhile.")
         return groups
 
     def check(self) -> None:
@@ -153,7 +161,7 @@ class _YouTubeGate:
             self._next_start = time.time() + interval * random.uniform(1.0, 1.5)
 
     def trip(self, reason: str, group: Optional[tuple[str, ...]] = None) -> None:
-        """Pauses one client group (all of them if None) after it met the bot check."""
+        """Pauses one client group (all of them if None) after YouTube refused it."""
         cooldown = float(get_config_var("youtube_cooldown", DEFAULT_YOUTUBE_COOLDOWN))
         now = time.time()
         span = f"{cooldown / 60:.0f} min" if cooldown >= 60 else f"{cooldown:.0f} s"
@@ -163,12 +171,13 @@ class _YouTubeGate:
             self._blocked_until[g] = now + cooldown
             self.reason = reason
             if self.blocked_until > now:
-                logger.warning(f"🤖 YouTube demanded its bot check from every player client. "
+                logger.warning(f"🤖 YouTube refused every player client ({reason}). "
                                f"Pausing YouTube retrievals for {span} so the flag on this "
-                               f"address can expire.")
+                               f"address can expire"
+                               f"{'; going through the proxy meanwhile' if proxy.active() else ''}.")
             else:
-                logger.info(f"🤖 YouTube demanded its bot check from the {'/'.join(g)} "
-                            f"client(s); using the others for {span}.")
+                logger.info(f"🤖 YouTube refused the {'/'.join(g)} client(s) ({reason}); "
+                            f"using the others for {span}.")
 
 
 youtube_gate = _YouTubeGate()
@@ -189,6 +198,22 @@ class NotASingleVideo(RetrievalFailed):
     """The URL is a channel, playlist or profile rather than one video."""
 
 
+class YtDlpFailed(RuntimeError):
+    """A yt-dlp failure that is not recognised (see `_classify()`): scrapeMM's to fix."""
+
+
+STREAM_REFUSED = "The platform refused to serve the video's stream to this server"
+
+
+def _stream_refused(error: Exception) -> bool:
+    """Whether the video was found but its stream was refused: HTTP 403, or fragments
+    answered 404 so that the download came out empty. YouTube does both to an address
+    it distrusts (e.g. production, 2026-10, on every HLS fragment of its default client),
+    while the same video downloads fine from elsewhere."""
+    return isinstance(error, AccessBlockedError) and (
+        str(error).startswith(STREAM_REFUSED) or "http error 403" in str(error).lower())
+
+
 # What yt-dlp's error messages mean, checked in order against the lower-cased message.
 # First match wins, so the more specific phrases come first.
 _ERROR_PATTERNS: list[tuple[tuple[str, ...], type[Exception], str]] = [
@@ -196,6 +221,9 @@ _ERROR_PATTERNS: list[tuple[tuple[str, ...], type[Exception], str]] = [
      RetrievalFailed, "yt-dlp is outdated for this site; update it"),
     (("rate-limit", "rate limit", "too many requests", "http error 429"),
      RateLimitError, "Rate limit reached"),
+    # Found, but every fragment answered 404 (or the file came out empty otherwise)
+    (("downloaded file is empty", "fragment not found"),
+     AccessBlockedError, STREAM_REFUSED),
     # Before the bot check: an age gate also says "Sign in to confirm (your age)", and
     # taking it for the bot check paused all of YouTube for half an hour
     (("confirm your age", "age-restricted", "age restricted", "inappropriate for some users"),
@@ -265,7 +293,7 @@ def _classify(error: Exception) -> Exception:
     if isinstance(cause, ExtractorError) and cause.expected:
         # yt-dlp knows this failure and blames the content, not itself
         return RetrievalFailed(message)
-    return RuntimeError(f"Could not download video with yt-dlp: {message}")
+    return YtDlpFailed(f"Could not download video with yt-dlp: {message}")
 
 
 def _run_ytdlp_sync(
@@ -337,6 +365,8 @@ async def download_video_with_ytdlp(
         if _is_youtube(url):
             video, metadata = await _run_youtube(url, temp_path, ydl_opts)
         else:
+            if route := proxy.route():  # The attempt goes through the proxy
+                ydl_opts["proxy"] = route.with_auth
             # Run blocking yt-dlp work in a thread pool to avoid stalling the event loop.
             video, metadata = await asyncio.to_thread(_run_ytdlp_sync, url, temp_path, ydl_opts)
 
@@ -363,7 +393,7 @@ async def download_video_with_ytdlp(
         return video, thumbnail, metadata
 
     except (NotASingleVideo, RateLimitError, AccessBlockedError, RetrievalFailed,
-            TargetUnavailableError):
+            TargetUnavailableError, YtDlpFailed):
         raise  # Already classified (the YouTube path classifies its own errors)
     except YoutubeDLError as e:
         raise _classify(e) from e
@@ -373,15 +403,27 @@ async def download_video_with_ytdlp(
 
 async def _run_youtube(url: str, temp_path: str,
                        ydl_opts: dict[str, Any]) -> tuple[Optional[Video], Optional[dict[str, Any]]]:
-    """Downloads from YouTube with the first group of player clients not paused for the
-    bot check, falling back to the next group when a group meets it. A direct format
-    refused with HTTP 403 is retried once as HLS."""
+    """Downloads from YouTube with the first group of player clients not paused, falling
+    back to the next group when YouTube refuses one (bot check, refused stream). A direct
+    format refused with HTTP 403 is retried once as HLS. Through the proxy if the attempt
+    goes through it, or if YouTube is paused for this server and a proxy is in use."""
     ydl_opts = dict(ydl_opts, format=_youtube_format_selector(),
                     # IPv4 only: YouTube judges an IPv6 address together with its whole
                     # /64, and more harshly
                     source_address="0.0.0.0")
+    route = proxy.route()
+    if route is None and youtube_gate.blocked_until > time.time() and (route := proxy.divert()):
+        logger.info(f"🔀 YouTube is paused for this server's address; retrieving {url} "
+                    f"through the proxy.")
+    if route is not None:
+        # The proxy's address is not the one YouTube flagged: every client group, no
+        # pacing, and a refusal pauses nothing
+        ydl_opts["proxy"] = route.with_auth
+        groups = list(YOUTUBE_CLIENT_GROUPS)
+    else:
+        groups = youtube_gate.open_groups()
     last_error: Optional[Exception] = None
-    for group in youtube_gate.open_groups():
+    for group in groups:
         extractor_args: dict[str, Any] = dict(youtube=dict(player_client=list(group)))
         if os.path.isdir(BGUTIL_SERVER_HOME):
             extractor_args["youtubepot-bgutilscript"] = dict(server_home=[BGUTIL_SERVER_HOME])
@@ -389,18 +431,33 @@ async def _run_youtube(url: str, temp_path: str,
         for hls_only in (False, True):
             if hls_only:
                 opts = dict(opts, format=_YOUTUBE_HLS_ONLY)
-            await youtube_gate.wait_turn()
+            if route is None:
+                await youtube_gate.wait_turn()
             try:
                 return await asyncio.to_thread(_run_ytdlp_sync, url, temp_path, opts)
             except YoutubeDLError as e:
-                last_error = classified = _classify(e)
+                classified = _classify(e)
+                if hls_only and "requested format is not available" in str(classified).lower():
+                    # This client has no HLS formats: its 403 on the direct ones stands
+                    break
+                last_error = classified
                 if _is_bot_wall(classified):
-                    youtube_gate.trip(str(classified).split(":")[0], group)
+                    if route is None:
+                        youtube_gate.trip(str(classified).split(":")[0], group)
                     break  # On to the next client group
                 if not hls_only and "http error 403" in str(classified).lower():
                     logger.info(f"YouTube refused a direct format of {url} (HTTP 403); "
                                 f"retrying with HLS only.")
                     continue
+                if _stream_refused(classified):
+                    # Another client's streams may still be served (the next group mints
+                    # PO tokens); if none is, the refusal is what gets reported
+                    logger.info(f"YouTube refused the stream of {url} to the "
+                                f"{'/'.join(group)} client{' through the proxy' if route else ''}: "
+                                f"{classified}")
+                    if route is None:
+                        youtube_gate.trip("it refused the video's stream", group)
+                    break
                 raise classified from e
     raise last_error or RateLimitError("YouTube retrievals are paused.")
 

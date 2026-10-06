@@ -799,5 +799,10 @@
    "image": 1
   },
   "category": "Open web"
+ },
+ {
+  "url": "https://insse.ro/cms/sites/default/files/com_presa/com_pdf/pib_tr4r2025.pdf",
+  "expected": {},
+  "category": "Open web"
  }
 ]
