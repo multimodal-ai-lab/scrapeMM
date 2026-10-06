@@ -24,7 +24,7 @@ from seleniumbase.undetected.cdp_driver.browser import Browser
 from scrapemm.common import RetrievalFailed
 from scrapemm.common.exceptions import TargetUnavailableError, RegionBlockedError
 from scrapemm.server.download.documents import document_extension
-from scrapemm.server import timing
+from scrapemm.server import screenshot, timing
 from scrapemm.server.config import get_config_var
 from scrapemm.server.download.browser import BrowserMedia, annotate_rendered_media
 from scrapemm.server.paths import BROWSER_PROFILE_PATH
@@ -1251,6 +1251,9 @@ class HeadedBrowser(RetrievalIntegration):
                     await annotate_rendered_media(target)
                     html, source = await self._html_and_source(target, page)
                     if html:
+                        # On request, the page as it is shown, now that it is loaded and
+                        # before resolving the media may close it: no second load
+                        png = await screenshot.capture(page) if screenshot.wanted() else None
                         # Media that need the page are resolved while it is open;
                         # `done_with_page` is called once only the others are left
                         from scrapemm.server.util import to_scraped_content
@@ -1261,6 +1264,7 @@ class HeadedBrowser(RetrievalIntegration):
                             max_video_size=kwargs.get("max_video_size"),
                             on_browser_done=done_with_page,
                         )
+                        screenshot.keep(content, png)
                         if media.stats:
                             logger.debug(f"Media of {url} came from: {dict(media.stats)}")
                         if "type=image" in shown_url and "type=image" not in url:

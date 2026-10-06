@@ -23,6 +23,7 @@ from scrapemm.common.exceptions import RetrievalFailed, UnsupportedDomainError, 
     DomainBlacklistedError, DiskFull, TargetUnavailableError, QuotaExceededError, \
     AccessBlockedError, CaptchaEncounteredError, PaywallError, RegionBlockedError
 from scrapemm.server import challenges, reachability, chain, timing
+from scrapemm.server import screenshot as screenshot_module
 from scrapemm.server.blacklist import blacklist
 from scrapemm.server.cache import cache, cache_key
 from scrapemm.server.captcha_detect import detect_captcha
@@ -117,9 +118,11 @@ async def retrieve(
         included, keeping only the main content. Done by scrapeMM alike for every method,
         on the retrieved page as cached: stripped and unstripped requests share the cache.
         See `ScrapedContent.stripped`.
-    :param screenshot: If True, each successfully retrieved page is also captured in the
-        server's browser, as it looks to a visitor: `ScrapingResponse.screenshot`. Costs
-        a page load in the browser per URL (cached like the results).
+    :param screenshot: If True, each retrieved page is also captured as it looks to a
+        visitor: `ScrapingResponse.screenshot`. Taken in the same session by the method
+        that renders the page (the browser, the archives retrieved in it, Firecrawl), never
+        by loading it again; methods that do not render it (plain HTTP, Decodo, API
+        integrations) yield none. See `scrapemm.server.screenshot`.
     """
     # Ensure URLs are string or list
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
@@ -167,14 +170,12 @@ async def retrieve(
         # Retrieve URLs concurrently
         tasks = [_retrieve_single(url, session, url_to_methods[url], actions,
                                   output_format, max_video_size, prioritize, use_cache,
-                                  hedging_delay) for url in
+                                  hedging_delay, screenshot) for url in
                  urls_unique]
         results = await run_with_semaphore(tasks, limit=40, show_progress=show_progress and len(urls_unique) > 1,
                                            progress_description="Retrieving URLs...")
         if strip:
             results = [await _strip(response) for response in results]
-        if screenshot:
-            results = await asyncio.gather(*(_screenshot(r, use_cache) for r in results))
         _release_media_memory()
 
         # Reconstruct output list
@@ -228,16 +229,16 @@ async def retrieve_one(
     # Identical requests in flight at the same time -- from concurrent jobs, typically --
     # share one retrieval instead of each scraping the same page. The cache only helps
     # once the first of them has finished. Stripping is not part of the key: it is done
-    # per caller, on the shared result.
+    # per caller, on the shared result. A screenshot is: it is taken during the retrieval.
     key = (preprocess_url(url), output_format, json.dumps(methods, default=str),
            json.dumps(actions, sort_keys=True, default=str), max_video_size, prioritize,
-           use_cache, hedging_delay)
+           use_cache, hedging_delay, screenshot)
     shared = _in_flight.get(key)
     joined = shared is not None
     if shared is None:
         shared = _InFlight(asyncio.create_task(_gated_retrieve(
             url, session, methods, actions, output_format, max_video_size, prioritize,
-            use_cache, hedging_delay)))
+            use_cache, hedging_delay, screenshot)))
         _in_flight[key] = shared
         shared.task.add_done_callback(lambda _, k=key, s=shared: _forget(k, s))
     else:
@@ -260,8 +261,6 @@ async def retrieve_one(
         response = replace(response, from_cache=True)
     if strip:
         response = await _strip(response)
-    if screenshot:
-        response = await _screenshot(response, use_cache)
     # Report under the URL as requested, not as preprocessed (e.g. percent-decoded):
     # the client maps results back onto its request by URL
     return replace(response, url=url)
@@ -273,15 +272,6 @@ async def _strip(response: ScrapingResponse) -> ScrapingResponse:
     if response.content is None:
         return response
     return replace(response, content=await strip_content(response.content, url=response.url))
-
-
-async def _screenshot(response: ScrapingResponse, use_cache: bool) -> ScrapingResponse:
-    """The response with a screenshot of its page. Only of a retrieved page: a failed
-    one is not loaded again (it may be a site never to be scraped, see `challenges`)."""
-    from .screenshot import screenshot
-    if not response.success or response.screenshot is not None:
-        return response
-    return replace(response, screenshot=await screenshot(response.url, use_cache))
 
 
 @dataclass
@@ -300,7 +290,7 @@ def _forget(key: tuple, shared: _InFlight) -> None:
 
 
 async def _gated_retrieve(url, session, methods, actions, output_format, max_video_size,
-                          prioritize, use_cache, hedging_delay) -> ScrapingResponse:
+                          prioritize, use_cache, hedging_delay, screenshot) -> ScrapingResponse:
     # Its own HTTP session rather than the first caller's: that one closes when its job
     # ends or its client disconnects, while others may still be waiting on this result
     global _active
@@ -311,7 +301,8 @@ async def _gated_retrieve(url, session, methods, actions, output_format, max_vid
         _active += 1
         try:
             return await _retrieve_single(url, own, methods, actions, output_format,
-                                          max_video_size, prioritize, use_cache, hedging_delay)
+                                          max_video_size, prioritize, use_cache, hedging_delay,
+                                          screenshot)
         finally:
             _active -= 1
             _release_media_memory()
@@ -361,10 +352,13 @@ async def _retrieve(
         max_video_size: int | None = None,
         prioritize: Literal["completeness", "speed"] = "completeness",
         use_cache: bool = True,
-        hedging_delay: float | None = None
+        hedging_delay: float | None = None,
+        screenshot: bool = False
 ) -> ScrapingResponse:
     logger.debug(f"Retrieving {url}")
     start_time = time.time()
+    # The methods that render the page capture it while they have it open
+    screenshot_module.requested(screenshot)
 
     if get_domain(url) in UNSUPPORTED_DOMAINS:
         return _failure(url, output_format, dict(scrapemm=UnsupportedDomainError("Unsupported domain.")),
@@ -403,9 +397,12 @@ async def _retrieve(
                     max_video_size)
     if use_cache:
         cached = cache.get(key)
-        if cached is not None:
+        # Without a screenshot, it cannot answer for one: retrieved again, with one, the
+        # result then serves either kind of request
+        if cached is not None and not (screenshot and cached.screenshot is None):
             logger.info(f"📎 Serving {url} from cache.")
-            return replace(cached, from_cache=True, retrieval_time=time.time() - start_time)
+            return replace(cached, from_cache=True, retrieval_time=time.time() - start_time,
+                           screenshot=cached.screenshot if screenshot else None)
 
     # A domain behind an open CAPTCHA challenge would only gate this URL too: queue it
     # with the challenge, to be retrieved once somebody solves it
@@ -721,9 +718,12 @@ async def _success(url: str, key, method_name: str, content: ScrapedContent,
     logger.info(f"🎉 Successfully retrieved with method: {method_name}")
     if content.multimodal is not None:
         await postprocess_media(content.multimodal)
+    # What the method captured of the page, if asked to (see `screenshot`)
+    png = screenshot_module.take(content)
+    image = await screenshot_module.to_image(png, url) if png and screenshot_module.wanted() else None
     response = ScrapingResponse(url=url, content=content, method=method_name, errors=errors,
                                 output_format=output_format,
-                                retrieval_time=time.time() - start_time)
+                                retrieval_time=time.time() - start_time, screenshot=image)
     cache.put(key, response)
     return response
 

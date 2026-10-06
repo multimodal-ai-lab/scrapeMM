@@ -1,6 +1,7 @@
-"""Screenshots on request: taken in the server's browser after a successful retrieval,
-cached by URL, delivered like a medium."""
+"""Screenshots on request: taken by the method that renders the page, in the same session
+as the retrieval -- never by loading the page again -- and delivered like a medium."""
 
+import base64
 import io
 
 import aiohttp
@@ -12,11 +13,13 @@ from scrapemm.server import chain, challenges, engine, reachability
 from scrapemm.server import screenshot as screenshot_module
 from scrapemm.server.cache import clear_cache
 from scrapemm.server.challenges import ChallengeStore
+from scrapemm.server.integrations.firecrawl.firecrawl import Firecrawl
 from scrapemm.server.util import to_scraped_content
 
 pytestmark = pytest.mark.server
 
 URL = "https://example.com/article"
+PAGE = "<html><body><main><p>The article text.</p></main></body></html>"
 
 
 def _png(width: int, height: int) -> bytes:
@@ -26,20 +29,13 @@ def _png(width: int, height: int) -> bytes:
 
 
 class FakePage:
-    """Enough of a Playwright page for a screenshot, of a page `height` pixels tall."""
+    """Enough of a Playwright page for a screenshot of a page `height` pixels tall."""
+    viewport_size = {"width": 1920, "height": 1080}
+    url = URL
 
     def __init__(self, height: int):
         self.height = height
         self.clip = None
-
-    async def set_viewport_size(self, size):
-        pass
-
-    async def goto(self, url, **kwargs):
-        pass
-
-    async def wait_for_load_state(self, state, **kwargs):
-        pass
 
     async def evaluate(self, script):
         return self.height
@@ -49,38 +45,35 @@ class FakePage:
         return _png(int(clip["width"]), int(clip["height"]))
 
 
-@pytest.fixture
-def fake_browser(monkeypatch):
-    from scrapemm.server.integrations import browser, headed_browser
-    pages = []
-
-    async def new_page(p=None):
-        pages.append(FakePage(height=10_000))
-        return pages[-1], 0
-
-    async def release(page):
-        pass
-
-    monkeypatch.setattr(browser, "_new_page", new_page)
-    monkeypatch.setattr(headed_browser, "release_page", release)
-    monkeypatch.setattr(screenshot_module, "_cached", type(screenshot_module._cached)())
-    return pages
+async def test_capture_is_the_top_of_the_page():
+    page = FakePage(height=10_000)
+    png = await screenshot_module.capture(page)
+    assert page.clip["height"] == 3 * 1080  # Three screens at most
+    image = await screenshot_module.to_image(png, URL)
+    assert max(image.width, image.height) == 2048  # Then kept at 2048 px like any image
 
 
-async def test_screenshot_is_the_top_of_the_page(fake_browser):
-    image = await screenshot_module.screenshot(URL)
-    # Three screens at most, then shrunk to the 2048 px all images are kept at
-    assert fake_browser[0].clip["height"] == 3 * 1080
-    assert max(image.width, image.height) == 2048
-    # Cached: asked again, no page is loaded
-    assert await screenshot_module.screenshot(URL) is image
-    assert len(fake_browser) == 1
-    await screenshot_module.screenshot(URL, use_cache=False)
-    assert len(fake_browser) == 2
+async def test_a_long_full_page_is_cut_to_three_screens():
+    image = await screenshot_module.to_image(_png(1920, 20_000), URL)  # As from Firecrawl
+    assert image.height / image.width == pytest.approx(3 * 1080 / 1920, rel=0.01)
+
+
+def test_firecrawl_screenshot_as_data_url():
+    png = _png(4, 4)
+    data_url = "data:image/png;base64," + base64.b64encode(png).decode()
+    assert screenshot_module.from_data_url(data_url) == png
+    assert screenshot_module.from_data_url("data:text/html;base64,AAAA") is None
+
+
+async def test_firecrawl_reads_its_inline_screenshot():
+    png = _png(4, 4)
+    data_url = "data:image/png;base64," + base64.b64encode(png).decode()
+    assert await Firecrawl._screenshot_bytes(data_url, session=None) == png
 
 
 @pytest.fixture
 def browser_serves(monkeypatch, tmp_path):
+    """The browser returns the page, capturing it as the real one does when asked to."""
     async def reachable(url):
         return "ok", ""
 
@@ -89,41 +82,57 @@ def browser_serves(monkeypatch, tmp_path):
     monkeypatch.setattr(chain, "is_enabled", lambda key: True)
     monkeypatch.setattr(challenges, "store", ChallengeStore(path=tmp_path / "challenges.json"))
     clear_cache()
-    taken = []
+    loads = []
 
-    async def fake_screenshot(url, use_cache=True):
-        taken.append(url)
-        return "a screenshot"
-
-    monkeypatch.setattr(screenshot_module, "screenshot", fake_screenshot)
-
-    def serve(html):
+    def serve(html: str, renders: bool = True):
         async def get(url, output_format="multimodal", **kwargs):
-            return await to_scraped_content(html, session=None, output_format=output_format)
+            loads.append(url)
+            png = _png(1920, 1080) if renders and screenshot_module.wanted() else None
+            content = await to_scraped_content(html, session=None, output_format=output_format)
+            screenshot_module.keep(content, png)
+            return content
         monkeypatch.setattr(engine.browser, "_get", get)
-        return taken
+        return loads
 
     yield serve
     clear_cache()
 
 
-async def test_screenshot_only_when_asked_and_retrieved(browser_serves):
-    taken = browser_serves("<html><body><main><p>The article text.</p></main></body></html>")
-    async with aiohttp.ClientSession() as session:
-        plain = await engine.retrieve_one(URL, session, methods=["browser"], output_format="html")
-        shot = await engine.retrieve_one(URL, session, methods=["browser"], output_format="html",
-                                         screenshot=True)
-    assert plain.screenshot is None
-    assert shot.screenshot == "a screenshot" and shot.from_cache  # Shares the retrieval
-    assert len(taken) == 1
+async def retrieve(session, screenshot: bool):
+    return await engine.retrieve_one(URL, session, methods=["browser"], output_format="html",
+                                     screenshot=screenshot)
 
 
-async def test_no_screenshot_of_a_failed_retrieval(browser_serves):
-    taken = browser_serves("")  # Nothing there
+async def test_screenshot_comes_from_the_retrieving_session(browser_serves):
+    loads = browser_serves(PAGE)
     async with aiohttp.ClientSession() as session:
-        response = await engine.retrieve_one(URL, session, methods=["browser"],
-                                             output_format="html", screenshot=True)
-    assert not response.success and response.screenshot is None and not taken
+        shot = await retrieve(session, screenshot=True)
+    assert shot.success and shot.screenshot is not None
+    assert len(loads) == 1  # The page was loaded once, for both
+    assert not hasattr(shot.content, "_screenshot")  # Taken off the content
+
+
+async def test_cache_answers_screenshot_requests_only_with_one(browser_serves):
+    loads = browser_serves(PAGE)
+    async with aiohttp.ClientSession() as session:
+        plain = await retrieve(session, screenshot=False)
+        assert plain.screenshot is None and len(loads) == 1
+        # The cached result has no screenshot: retrieved again, now with one
+        shot = await retrieve(session, screenshot=True)
+        assert shot.screenshot is not None and not shot.from_cache and len(loads) == 2
+        # Which then serves both kinds of request; the plain one without it
+        again = await retrieve(session, screenshot=True)
+        assert again.from_cache and again.screenshot is not None
+        plain_again = await retrieve(session, screenshot=False)
+        assert plain_again.from_cache and plain_again.screenshot is None
+    assert len(loads) == 2
+
+
+async def test_no_screenshot_from_a_method_that_does_not_render(browser_serves):
+    loads = browser_serves(PAGE, renders=False)  # As plain HTTP, Decodo or an API
+    async with aiohttp.ClientSession() as session:
+        response = await retrieve(session, screenshot=True)
+    assert response.success and response.screenshot is None and len(loads) == 1
 
 
 def test_screenshot_travels_over_the_wire():

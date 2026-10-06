@@ -152,9 +152,11 @@ cookie banners, pass `strip=True`. All output formats are stripped alike, and
 result = asyncio.run(scrapemm.retrieve(url, strip=True))
 ```
 
-To also see the page as a visitor does, pass `screenshot=True`: each retrieved page is
-captured in the server's browser (the top of it, up to three screens high) and returned as
-an ezMM `Image` in `result.screenshot`. It costs the server a page load per URL.
+To also see the page as a visitor does, pass `screenshot=True`: the top of each retrieved
+page, up to three screens high, comes as an ezMM `Image` in `result.screenshot`. It is taken
+in the same session by the method that renders the page (the server's browser, the archives
+retrieved in it, Firecrawl), never by loading the page again; pages retrieved without
+rendering (plain HTTP, Decodo, API integrations) come without one.
 
 Pass a list of URLs to retrieve them concurrently; results come back in the order you
 asked for them, and a progress bar fills in as each one lands:

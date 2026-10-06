@@ -1,84 +1,106 @@
 """Screenshots of retrieved pages, taken on request (`retrieve(..., screenshot=True)`).
 
-Taken in the server's shared browser after the retrieval, in a tab of their own, for
-whatever method retrieved the page: the screenshot shows the page as a visitor sees it,
-also where the content came from an API. The tab counts against the browser's page
-limits like any retrieval.
+Taken by the method that renders the page, in the same session as the retrieval --
+never by loading the page a second time:
+
+* the server's browser (and the archives retrieved in it: Perma.cc, the Wayback Machine,
+  Ghostarchive) captures its open page before closing it, see `capture()`;
+* Firecrawl returns one along with its scrape.
+
+Methods that do not render the page (plain HTTP, Decodo, API integrations, Archive.today's
+own retrieval) yield no screenshot.
+
+The engine asks for one per retrieval with `requested()`; the methods check `wanted()`.
+What a method captured travels with its content (`keep()`) until the engine takes it
+off for the response (`take()`), so it is never part of `ScrapedContent`'s interface.
 
 What is captured is the top of the page, up to three screens high, at desktop width:
-a full page of an endless news site would only be shrunk to an unreadable strip
+the full page of an endless news site would only be shrunk to an unreadable strip
 (images are kept at 2048 px at most).
-
-Screenshots are cached by URL for as long as results are (see `cache`), separately from
-the results: a request with and one without a screenshot share the retrieval.
 """
 
-import asyncio
+import base64
+import io
 import logging
-import time
-from collections import OrderedDict
-from contextlib import suppress
-from typing import Optional
-
-from ezmm import Image
+from contextvars import ContextVar
+from typing import TYPE_CHECKING, Optional
 
 from scrapemm.common.paths import APP_NAME
+
+if TYPE_CHECKING:
+    from ezmm import Image
+    from playwright.async_api import Page
+    from scrapemm.common.scraping_response import ScrapedContent
 
 logger = logging.getLogger(APP_NAME)
 
 WIDTH, HEIGHT = 1920, 1080
 MAX_SCREENS = 3
-TIMEOUT = 90  # Seconds for loading and capturing
-SETTLE_TIMEOUT = 5  # Seconds to wait for the page to stop loading (images, charts)
-MAX_CACHED = 256
 
-_cached: OrderedDict[str, tuple[float, Image]] = OrderedDict()
+# Set per retrieval: each URL is retrieved in a task of its own, which the methods' tasks
+# inherit it from
+_wanted: ContextVar[bool] = ContextVar("scrapemm_screenshot", default=False)
 
 
-async def screenshot(url: str, use_cache: bool = True) -> Optional[Image]:
-    """The page at `url` as the server's browser shows it, or None if it could not be
-    captured. Never raises: a missing screenshot must not fail a retrieval."""
-    from .cache import cache
-    if use_cache and cache.active and (hit := _cached.get(url)):
-        taken_at, image = hit
-        if time.time() - taken_at <= cache.ttl:
-            _cached.move_to_end(url)
-            return image
-        del _cached[url]
+def requested(wanted: bool) -> None:
+    """Whether the retrieval running in this task wants a screenshot."""
+    _wanted.set(wanted)
+
+
+def wanted() -> bool:
+    return _wanted.get()
+
+
+async def capture(page: "Page") -> Optional[bytes]:
+    """The open, loaded page as a PNG: its top, up to `MAX_SCREENS` screens high, at the
+    page's width. None if that failed -- a missing screenshot never fails a retrieval."""
     try:
-        image = await asyncio.wait_for(_take(url), TIMEOUT)
+        size = page.viewport_size or {"width": WIDTH, "height": HEIGHT}
+        height = await page.evaluate("document.documentElement.scrollHeight") or size["height"]
+        return await page.screenshot(type="png", full_page=True, clip={
+            "x": 0, "y": 0, "width": size["width"],
+            "height": min(int(height), size["height"] * MAX_SCREENS)})
     except Exception as e:
-        logger.info(f"📷 No screenshot of {url}: {type(e).__name__}: {e}")
+        logger.info(f"📷 No screenshot of {getattr(page, 'url', 'the page')}: "
+                    f"{type(e).__name__}: {e}")
         return None
-    if image is not None and cache.active:
-        _cached[url] = (time.time(), image)
-        while len(_cached) > MAX_CACHED:
-            _cached.popitem(last=False)
-    return image
 
 
-async def _take(url: str) -> Optional[Image]:
-    from .download.images import decode_image
-    from .integrations import browser
-    from .integrations.headed_browser import _BrowserSlot, release_page
-    from .util import get_domain
+def keep(content: Optional["ScrapedContent"], png: Optional[bytes]) -> None:
+    """Hands what a method captured to the engine, along with the method's content."""
+    if content is not None and png:
+        content._screenshot = png
 
-    slot = _BrowserSlot(get_domain(url) or "")
-    await slot.acquire()
+
+def take(content: Optional["ScrapedContent"]) -> Optional[bytes]:
+    """Takes the screenshot a method kept with its content off it, if there is one."""
+    return content.__dict__.pop("_screenshot", None) if content is not None else None
+
+
+def from_data_url(data_url: str) -> Optional[bytes]:
+    """The image of a `data:image/...;base64,` URL, as Firecrawl returns one self-hosted."""
+    header, _, encoded = data_url.partition(",")
+    if not header.startswith("data:image/") or ";base64" not in header:
+        return None
     try:
-        page, _ = await browser._new_page(None)
-        try:
-            await page.set_viewport_size({"width": WIDTH, "height": HEIGHT})
-            await page.goto(url, timeout=browser.navigation_timeout * 1000,
-                            wait_until="domcontentloaded")
-            # Images and charts load after the DOM: given a moment, not forever
-            with suppress(Exception):
-                await page.wait_for_load_state("networkidle", timeout=SETTLE_TIMEOUT * 1000)
-            height = await page.evaluate("document.documentElement.scrollHeight") or HEIGHT
-            png = await page.screenshot(type="png", full_page=True, clip={
-                "x": 0, "y": 0, "width": WIDTH, "height": min(int(height), HEIGHT * MAX_SCREENS)})
-        finally:
-            await release_page(page)
-    finally:
-        slot.release()
+        return base64.b64decode(encoded)
+    except ValueError:
+        return None
+
+
+async def to_image(png: bytes, url: str) -> Optional["Image"]:
+    """The screenshot as an ezMM Image. Cut to `MAX_SCREENS` screens of its width's
+    proportions first: a full page from Firecrawl may be arbitrarily long."""
+    from PIL import Image as PillowImage
+    from .download.images import decode_image
+    try:
+        with PillowImage.open(io.BytesIO(png)) as picture:
+            max_height = int(picture.width * HEIGHT * MAX_SCREENS / WIDTH)
+            if picture.height > max_height:
+                buffer = io.BytesIO()
+                picture.crop((0, 0, picture.width, max_height)).save(buffer, "PNG")
+                png = buffer.getvalue()
+    except Exception:
+        logger.debug(f"Could not read the screenshot of {url}.", exc_info=True)
+        return None
     return await decode_image(png, url, ignore_small_images=False)
