@@ -452,7 +452,9 @@ function media(record: Record<string, number> | undefined) {
           <template #header>
             <div class="flex items-baseline justify-between gap-2">
               <h2 class="font-medium text-sm">How long retrievals took</h2>
-              <span class="text-xs text-dimmed">URLs per time range</span>
+              <span class="text-xs text-dimmed cursor-help" :title="RETRIEVAL_TIME_MEANING">
+                URLs per time range, from their first request
+              </span>
             </div>
           </template>
           <VizColumnChart :items="timeHistogram" />
@@ -615,7 +617,7 @@ function media(record: Record<string, number> | undefined) {
                 Missing {{ media(r.missing) }}.
               </p>
             </div>
-            <span class="text-xs text-dimmed tabular-nums">{{ r.outcome === 'running' ? '' : secs(r.retrieval_time) }}</span>
+            <span class="text-xs text-dimmed tabular-nums" :title="r.outcome === 'running' ? undefined : retrievalTimeTitle(r.retrieval_time, r.queue_time)">{{ r.outcome === 'running' ? '' : secs(r.retrieval_time) }}</span>
           </div>
         </div>
       </UCard>

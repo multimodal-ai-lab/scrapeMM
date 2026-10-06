@@ -127,20 +127,68 @@ async function toggle(key: string, enabled: boolean) {
 }
 
 /**
- * The tally beside the Integrations heading. Limited, gated and unreachable are all
- * "works, but not fully", so they are counted together rather than spelled out -- the
- * card itself says which kind it is.
+ * The tally beside a group's heading. Limited, gated and unreachable are all "works,
+ * but not fully", so they are counted together rather than spelled out -- the card
+ * itself says which kind it is.
  */
-const summary = computed(() => {
-  const tally = { ready: 0, warnings: 0, unconfigured: 0, disabled: 0 }
-  for (const item of integrations.value) {
+function tally(items: any[]) {
+  const counts = { ready: 0, warnings: 0, unconfigured: 0, disabled: 0 }
+  for (const item of items) {
     if (item.state === 'checking') continue
-    if (item.state === 'ready') tally.ready++
-    else if (item.state === 'unconfigured') tally.unconfigured++
-    else if (item.state === 'disabled') tally.disabled++
-    else if (isWarning(item.state)) tally.warnings++
+    if (item.state === 'ready') counts.ready++
+    else if (item.state === 'unconfigured') counts.unconfigured++
+    else if (item.state === 'disabled') counts.disabled++
+    else if (isWarning(item.state)) counts.warnings++
   }
-  return tally
+  return counts
+}
+
+/** Retrieval integrations and methods, and apart from them the search providers,
+ *  which retrieve nothing (see the server's `status.py`) */
+const groups = computed(() => {
+  const retrieval = integrations.value.filter((i) => i.kind !== 'search')
+  const search = integrations.value.filter((i) => i.kind === 'search')
+  return [
+    { key: 'retrieval', title: 'Retrieval integrations', items: retrieval,
+      summary: tally(retrieval), placeholders: 12 },
+    { key: 'search', title: 'Search integrations', items: search,
+      summary: tally(search), placeholders: 1 },
+  ].filter((g) => g.items.length || !integrations.value.length)
+})
+
+/**
+ * "Today" is the viewer's calendar day. The server counts per 15-minute slot over the
+ * last day (every time zone's offset is a multiple of 15 minutes, so the slots line up
+ * with any local midnight), and the page adds up the slots since its own midnight. The
+ * clock ticks so that the figure starts over at midnight without a reload.
+ */
+const now = ref(Date.now())
+let clockTimer: ReturnType<typeof setInterval> | undefined
+const midnight = computed(() => new Date(now.value).setHours(0, 0, 0, 0) / 1000)
+
+function sinceMidnight(rows: any[] | undefined): any[] {
+  return (rows || []).filter((row) => row[0] >= midnight.value)
+}
+
+const retrievedToday = computed(() => sinceMidnight(environment.value?.throughput?.recent?.counts)
+  .reduce((sum: number, row: any) => sum + row[1], 0))
+
+/** Today's search requests, in total and per provider (by its dashboard label) */
+const searchesToday = computed(() => {
+  const providers = new Map<string, { ok: number, failed: number }>()
+  for (const [, provider, ok, failed] of sinceMidnight(environment.value?.searches?.recent)) {
+    const entry = providers.get(provider) || { ok: 0, failed: 0 }
+    entry.ok += ok
+    entry.failed += failed
+    providers.set(provider, entry)
+  }
+  const label = (key: string) => integrations.value.find((i) => i.key === key)?.name || key
+  const list = [...providers].map(([key, n]) => ({ name: label(key), ...n }))
+  return {
+    total: list.reduce((sum, p) => sum + p.ok + p.failed, 0),
+    failed: list.reduce((sum, p) => sum + p.failed, 0),
+    providers: list,
+  }
 })
 
 /**
@@ -235,8 +283,17 @@ const tiles = computed(() => {
         : 'nothing retrieved yet',
       to: env.throughput.success_rate.outcomes?.error ? '/jobs?outcome=error' : '/jobs' },
     { label: 'Retrieved today', icon: 'i-fa7-solid-gauge-high',
-      value: `${env.throughput.last_24h}`, tone: 'neutral' as const,
-      detail: 'URLs in the past 24 hours', to: '/jobs?since=24h' },
+      value: `${retrievedToday.value}`, tone: 'neutral' as const,
+      detail: 'URLs since midnight', to: '/jobs?since=today' },
+    { label: 'Search requests today', icon: 'i-fa7-solid-magnifying-glass',
+      value: `${searchesToday.value.total}`,
+      tone: searchesToday.value.failed ? 'warning' as const : 'neutral' as const,
+      detail: searchesToday.value.total
+        ? searchesToday.value.providers
+          .map((p) => `${p.name} ${p.ok + p.failed}${p.failed ? ` (${p.failed} failed)` : ''}`)
+          .join(' · ')
+        : `none since midnight · ${env.searches?.total ?? 0} all time`,
+      to: '/playground/search' },
     { label: 'Awaiting CAPTCHA', icon: 'i-fa7-solid-lock',
       value: `${env.captcha.waiting}`,
       tone: env.captcha.waiting ? 'warning' as const : 'neutral' as const,
@@ -290,10 +347,14 @@ const tiles = computed(() => {
   ]
 })
 
-onMounted(() => connectLive())
+onMounted(() => {
+  connectLive()
+  clockTimer = setInterval(() => { now.value = Date.now() }, 30_000)
+})
 onUnmounted(() => {
   unmounted = true
   liveAbort?.abort()
+  clearInterval(clockTimer)
 })
 </script>
 
@@ -370,10 +431,10 @@ onUnmounted(() => {
       <h2 class="text-xs font-semibold uppercase tracking-wider text-dimmed">
         Status
       </h2>
-      <div class="grid gap-2.5 grid-cols-2 lg:grid-cols-4">
+      <div class="grid gap-2.5 grid-cols-2 lg:grid-cols-3">
         <template v-if="!environment">
           <div
-            v-for="n in 8" :key="n"
+            v-for="n in 9" :key="n"
             class="surface-card rounded-xl p-3.5 flex items-center gap-3.5"
           >
             <USkeleton class="size-11 rounded-lg shrink-0" />
@@ -389,27 +450,27 @@ onUnmounted(() => {
       </div>
     </section>
 
-    <!-- Integrations -->
-    <section class="space-y-2.5">
+    <!-- Retrieval integrations, then search integrations -->
+    <section v-for="group in groups" :key="group.key" class="space-y-2.5">
       <div class="flex items-baseline justify-between gap-4 flex-wrap">
         <h2 class="text-xs font-semibold uppercase tracking-wider text-dimmed">
-          Integrations
+          {{ group.title }}
         </h2>
-        <p class="text-sm flex flex-wrap items-center gap-x-2 text-dimmed">
-          <span class="text-success">{{ summary.ready }} ready</span>
-          <span v-if="summary.warnings" class="text-warning">
-            · {{ summary.warnings }} warnings
+        <p v-if="group.items.length" class="text-sm flex flex-wrap items-center gap-x-2 text-dimmed">
+          <span class="text-success">{{ group.summary.ready }} ready</span>
+          <span v-if="group.summary.warnings" class="text-warning">
+            · {{ group.summary.warnings }} warning{{ group.summary.warnings === 1 ? '' : 's' }}
           </span>
-          <span v-if="summary.unconfigured" class="text-error">
-            · {{ summary.unconfigured }} to configure
+          <span v-if="group.summary.unconfigured" class="text-error">
+            · {{ group.summary.unconfigured }} to configure
           </span>
-          <span v-if="summary.disabled">· {{ summary.disabled }} disabled</span>
+          <span v-if="group.summary.disabled">· {{ group.summary.disabled }} disabled</span>
         </p>
       </div>
 
       <div class="grid gap-2.5 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        <template v-if="!integrations.length">
-          <div v-for="n in 12" :key="n" class="surface-card rounded-xl p-3.5">
+        <template v-if="!group.items.length">
+          <div v-for="n in group.placeholders" :key="n" class="surface-card rounded-xl p-3.5">
             <div class="flex items-start gap-3.5">
               <USkeleton class="size-10 rounded-lg shrink-0" />
               <div class="flex-1 space-y-2">
@@ -421,7 +482,7 @@ onUnmounted(() => {
           </div>
         </template>
         <IntegrationCard
-          v-for="item in integrations" :key="item.key" :item="item"
+          v-for="item in group.items" :key="item.key" :item="item"
           :busy="busy === item.key" :checking="pending.has(item.key)"
           @recheck="recheck" @toggle="toggle"
         />

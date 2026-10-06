@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /** Server configuration. Every section keeps a draft; the one save button at the bottom
- *  right saves all changed sections together. The blacklist itself lives on its own page;
- *  only how long its automatic entries last is a setting. */
+ *  right saves all changed sections together -- except Secrets, saved one by one as they
+ *  are entered. The blacklist itself lives on its own page; only how long its automatic
+ *  entries last is a setting. The API keys have their own page too. */
 const api = useApi()
 const sections = provideSettingsSections()
 
@@ -150,55 +151,21 @@ async function clearCache(tier: 'recent' | 'all' = 'recent') {
   }
 }
 
-// --- API key and media --------------------------------------------------------------
+// --- Media -------------------------------------------------------------------------
 
 const media = ref<any>(null)
-// null until known; the key cannot be regenerated here when .env sets it
-const keyFromEnvironment = ref<boolean | null>(null)
-const regenerating = ref(false)
-const newKey = ref('')
-const keyCopied = ref(false)
-
-async function regenerateKey() {
-  if (!confirm('Regenerate the API key? Every client using the current key is rejected '
-    + 'until it is given the new one.')) return
-  regenerating.value = true
-  error.value = ''
-  notice.value = ''
-  try {
-    const { api_key } = await api.post<any>('/v1/api-key/regenerate')
-    // This browser switches over at once; otherwise its next call would be rejected
-    setToken(api_key)
-    newKey.value = api_key
-  } catch (e: any) {
-    error.value = e.message
-  } finally {
-    regenerating.value = false
-  }
-}
-
-async function copyNewKey() {
-  if (!(await copyText(newKey.value))) {
-    error.value = 'Copying to the clipboard failed. Select the key and copy it by hand.'
-    return
-  }
-  keyCopied.value = true
-  setTimeout(() => { keyCopied.value = false }, 1500)
-}
 
 let statsTimer: ReturnType<typeof setInterval> | undefined
 
 onMounted(async () => {
   try {
-    const [cfg, stats, mediaState, key] = await Promise.all([
+    const [cfg, stats, mediaState] = await Promise.all([
       api.get<any>('/v1/config'), api.get<any>('/v1/cache'), api.get<any>('/v1/media'),
-      api.get<any>('/v1/api-key'),
     ])
     retrievalSaved.value = toForm(cfg.config)
     retrieval.value = toForm(cfg.config)
     adoptCache(stats)
     media.value = mediaState
-    keyFromEnvironment.value = key.from_environment
   } catch (e: any) {
     error.value = e.message
   }
@@ -218,6 +185,7 @@ onBeforeUnmount(() => clearInterval(statsTimer))
     <ChainEditor />
     <ExceptionsEditor />
     <ChainPreview />
+    <SecretsSection />
 
     <UCard v-if="retrieval">
       <template #header>
@@ -352,38 +320,6 @@ onBeforeUnmount(() => clearInterval(statsTimer))
           </div>
         </div>
         <p v-if="cacheProblem" class="text-xs text-error">{{ cacheProblem }}</p>
-      </div>
-    </UCard>
-
-    <UCard>
-      <template #header>
-        <div class="flex items-center justify-between">
-          <h2 class="font-medium flex items-center gap-2">
-            <UIcon name="i-fa7-solid-key" class="size-4 text-primary" />
-            API key
-          </h2>
-          <UButton
-            size="xs" variant="ghost" color="error" icon="i-fa7-solid-rotate"
-            label="Regenerate" :loading="regenerating"
-            :disabled="keyFromEnvironment !== false" @click="regenerateKey"
-          />
-        </div>
-      </template>
-      <p v-if="keyFromEnvironment" class="text-sm text-muted">
-        The key is set by <code class="font-mono">SCRAPEMM_API_KEY</code> in the server's
-        <code class="font-mono">.env</code>. Change it there, or empty it to manage the key here.
-      </p>
-      <p v-else class="text-sm text-muted">
-        A new key replaces the current one at once: clients that still use the old key are
-        rejected until they are given the new one. This browser switches over by itself.
-      </p>
-      <div v-if="newKey" class="mt-3 flex items-center gap-2">
-        <UInput :model-value="newKey" readonly class="flex-1 font-mono" />
-        <UButton
-          :icon="keyCopied ? 'i-fa7-solid-check' : 'i-fa7-regular-copy'"
-          color="neutral" variant="subtle" :label="keyCopied ? 'Copied' : 'Copy'"
-          @click="copyNewKey"
-        />
       </div>
     </UCard>
 

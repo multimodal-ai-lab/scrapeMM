@@ -693,6 +693,7 @@ class ArchiveToday(HeadedBrowser):
     # Queues its gated requests itself (see `_RequestBuffer`), with a session that can be
     # reused over plain HTTP; the generic challenge machinery leaves it to that
     handles_captchas = True
+    waits_for_browser_slot = False  # Fetches over plain HTTP first, see `_get()`
     # A replay page answers in a second or two, or, when Archive.today stalls this
     # server, not at all: one short attempt, not two of a minute each
     navigation_timeout = 30

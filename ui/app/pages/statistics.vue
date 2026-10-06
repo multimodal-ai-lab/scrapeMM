@@ -7,11 +7,12 @@
  * on the page answers the same question. It refreshes itself every minute while open.
  */
 const api = useApi()
+const isAdmin = useIsAdmin()
 const route = useRoute()
 const router = useRouter()
 
 type Bucket = 'hour' | 'day' | 'week'
-type Group = 'outcome' | 'kind' | 'method'
+type Group = 'outcome' | 'kind' | 'method' | 'key'
 
 const BUCKETS = [
   { label: 'Hourly', value: 'hour' },
@@ -22,7 +23,9 @@ const GROUPS = [
   { label: 'Outcome', value: 'outcome' },
   { label: 'Outcome, detailed', value: 'kind' },
   { label: 'Method', value: 'method' },
+  { label: 'API key', value: 'key', admin: true }, // Names the keys: for those who manage them
 ]
+const groups = computed(() => GROUPS.filter((g) => !g.admin || isAdmin.value))
 // Each bucket's ranges; the first is the default
 const RANGES: Record<Bucket, { label: string, value: number }[]> = {
   hour: [{ label: 'Last 48 hours', value: 48 }, { label: 'Last 24 hours', value: 24 },
@@ -36,9 +39,15 @@ const RANGES: Record<Bucket, { label: string, value: number }[]> = {
 // In the query string, so a view can be linked to and survives a reload
 const bucket = ref<Bucket>((['hour', 'day', 'week'].includes(route.query.bucket as string)
   ? route.query.bucket : 'hour') as Bucket)
-const group = ref<Group>((['outcome', 'kind', 'method'].includes(route.query.group as string)
+const group = ref<Group>((['outcome', 'kind', 'method', 'key'].includes(route.query.group as string)
   ? route.query.group : 'outcome') as Group)
 const periods = ref<number>(Number(route.query.periods) || RANGES[bucket.value][0]!.value)
+
+// A link to the by-key view, opened with a Client key: the outcome view instead
+const me = useMe()
+watch(me, (value) => {
+  if (value && !isAdmin.value && group.value === 'key') group.value = 'outcome'
+}, { immediate: true })
 
 const data = ref<any>(null)
 const loading = ref(false)
@@ -116,6 +125,19 @@ const KIND_SHADES: Record<string, string> = {
 
 const series = computed(() => {
   const raw: any[] = data.value?.series || []
+  if (group.value === 'key') {
+    // Most retrievals first, as the server sorts them; colours in that order
+    let slot = 0
+    return raw.map((s) => ({
+      ...s,
+      label: s.key === '(none)' ? 'No key' : s.key === 'Other'
+        ? `Other (${s.members?.length || 0})` : s.name,
+      color: s.key === '(none)' || s.key === 'Other' ? 'var(--viz-other)'
+        : `var(--viz-cat-${Math.min(++slot, 7)})`,
+      hint: s.key === '(none)' ? 'Test runs, and retrievals from before keys were recorded'
+        : s.key === 'Other' ? s.members?.join(', ') : undefined,
+    }))
+  }
   if (group.value === 'method') {
     const taken = new Set<number>()
     const colours: Record<string, string> = {}
@@ -184,7 +206,9 @@ const tiles = computed(() => {
       ring: share(s.cached, s.total), tone: 'neutral' as const,
       detail: `${s.cached} of ${s.total} from the cache` },
     { label: 'Median time', icon: 'i-fa7-solid-stopwatch', value: seconds(s.median_time),
-      tone: 'neutral' as const, detail: 'per retrieved URL, cache hits excluded' },
+      tone: 'neutral' as const, title: RETRIEVAL_TIME_MEANING,
+      detail: s.median_queue_time == null ? 'per retrieved URL, from its first request'
+        : `per retrieved URL, from its first request · waited ${seconds(s.median_queue_time)} before` },
   ]
 })
 
@@ -210,7 +234,8 @@ const timeItems = computed(() => {
   return p.median_time.map((m: number | null, i: number) => ({
     label: sparseLabels.value[i], value: m ?? 0,
     tooltip: m == null ? `${titles.value[i]}: no retrievals`
-      : `${titles.value[i]}: median ${seconds(m)}, p90 ${seconds(p.p90_time[i])}`,
+      : `${titles.value[i]}: median ${seconds(m)}, p90 ${seconds(p.p90_time[i])}`
+        + (p.median_queue_time?.[i] != null ? `, after waiting ${seconds(p.median_queue_time[i])} for a slot` : ''),
   }))
 })
 
@@ -251,7 +276,7 @@ function jobsLinkFor(domain: string) {
       <UTabs v-model="bucket" :items="BUCKETS" :content="false" size="sm" />
       <USelect v-model="periods" :items="RANGES[bucket]" class="w-40" aria-label="Time range" />
       <span class="text-xs text-dimmed ml-1">grouped by</span>
-      <UTabs v-model="group" :items="GROUPS" :content="false" size="sm" />
+      <UTabs v-model="group" :items="groups" :content="false" size="sm" />
     </div>
 
     <div v-if="loading && !data" class="space-y-3">
@@ -281,7 +306,7 @@ function jobsLinkFor(domain: string) {
         <template #header>
           <div class="flex items-center justify-between gap-3 flex-wrap">
             <h2 class="font-medium text-sm">
-              Retrievals per {{ bucket }}, by {{ group === 'method' ? 'method' : 'outcome' }}
+              Retrievals per {{ bucket }}, by {{ { method: 'method', key: 'API key' }[group as string] || 'outcome' }}
             </h2>
             <UButton
               size="xs" color="neutral" variant="ghost"

@@ -14,6 +14,7 @@ const UNAVAILABLE_KINDS: Record<string, string> = {
   PaywallError: 'paywall',
   CaptchaEncounteredError: 'captcha',
   AccessBlockedError: 'blocked',
+  RegionBlockedError: 'blocked',
   RateLimitError: 'rate_limit',
   DomainBlacklistedError: 'unsupported',
   UnsupportedDomainError: 'unsupported',

@@ -22,7 +22,9 @@ from seleniumbase import cdp_driver
 from seleniumbase.undetected.cdp_driver.browser import Browser
 
 from scrapemm.common import RetrievalFailed
-from scrapemm.common.exceptions import TargetUnavailableError
+from scrapemm.common.exceptions import TargetUnavailableError, RegionBlockedError
+from scrapemm.server.download.documents import document_extension
+from scrapemm.server import timing
 from scrapemm.server.config import get_config_var
 from scrapemm.server.download.browser import BrowserMedia, annotate_rendered_media
 from scrapemm.server.paths import BROWSER_PROFILE_PATH
@@ -664,6 +666,9 @@ def _wait_for_first_target_on_create() -> None:
 _wait_for_first_target_on_create()
 
 
+# Seconds a document URL gets to start its download, a bot check in front included
+DOCUMENT_WAIT = 30
+
 # Concurrent retrievals in the shared browser; override with
 # `update_config(max_browser_pages=...)`
 DEFAULT_MAX_BROWSER_PAGES = 32
@@ -843,6 +848,7 @@ class HeadedBrowser(RetrievalIntegration):
     # Whether a page answering 404/410 counts as missing rather than as content. Off for
     # the archive integrations: a replay may pass on the archived page's own status.
     fails_on_not_found = False
+    waits_for_browser_slot = True  # Its time starts with a slot, see `_get()`
     # Seconds a page gets to load its document, and whether a page that missed that is
     # tried once more on a new tab (under load, a page that is quick alone can miss it)
     navigation_timeout: ClassVar[float] = 60
@@ -1126,6 +1132,7 @@ class HeadedBrowser(RetrievalIntegration):
         slot = _BrowserSlot(get_domain(url) or "")
         try:
             await slot.acquire()
+            timing.work_started()
             # Not asyncio.wait_for(): that waits for the cancelled retrieval to wind
             # down, and a stuck one may never do so. The slot is freed right away instead.
             task = asyncio.ensure_future(self._browse(url, slot=slot, **kwargs))
@@ -1171,6 +1178,12 @@ class HeadedBrowser(RetrievalIntegration):
             # out its timeout), so extraction steps can ask `renderer_crashed()`
             with suppress(AttributeError):  # Test doubles may lack events
                 page.on("crash", lambda p: setattr(p, "_scrapemm_crashed", True))
+            # A URL that serves a file (a spreadsheet, say) downloads instead of showing
+            # a page -- often only after a bot check passed (see `_document()`)
+            downloads: list = []
+            downloading = False
+            with suppress(AttributeError):  # A lambda: Playwright cannot wrap a bound builtin
+                page.on("download", lambda download: downloads.append(download))
             try:
                 # Before navigating, so it sees every medium the page loads
                 media = BrowserMedia(page)
@@ -1190,6 +1203,12 @@ class HeadedBrowser(RetrievalIntegration):
                         # turns to the archives
                         raise TargetUnavailableError(
                             f"{url} does not exist on the live site (HTTP {response.status}).")
+                    if (self.fails_on_not_found and response is not None
+                            and response.status == 451):
+                        # Withheld from this server's region (e.g. US news sites for
+                        # the EU); the engine then tries methods that fetch from elsewhere
+                        raise RegionBlockedError(
+                            f"{url} is blocked in this server's region (HTTP 451).")
                     if response is not None and "pdf" in response.headers.get("content-type", ""):
                         # The browser shows a PDF in its viewer, from which there is no
                         # text to extract. Failing at once lets the next method (e.g.
@@ -1209,7 +1228,8 @@ class HeadedBrowser(RetrievalIntegration):
                         # matter of load, and worth another try on a fresh page
                         logger.info(f"Loading {url} timed out; retrying once on a new page.")
                         continue
-                    if not self._is_client_redirect_abort(e):
+                    downloading = "download is starting" in str(e).lower()
+                    if not downloading and not self._is_client_redirect_abort(e):
                         raise
                     # The page already redirected itself; give the new document a moment
                     # to settle instead of failing the whole retrieval over a benign race.
@@ -1219,6 +1239,10 @@ class HeadedBrowser(RetrievalIntegration):
                         await page.wait_for_load_state("domcontentloaded", timeout=30000)
                     except Exception:
                         pass
+                if self.fails_on_not_found and (downloads or downloading
+                                                or document_extension(url)):
+                    if (document := await self._document(page, downloads, url)) is not None:
+                        return document
                 await self._pass_cloudflare(page)
                 await self._settle_after_goto(page)
 
@@ -1286,6 +1310,48 @@ class HeadedBrowser(RetrievalIntegration):
                 await close_page()
 
         raise RetrievalFailed(f"{self.name} integration was unable to extract content from {url}.")
+
+    async def _document(self, page: Page, downloads: list, url: str) -> Optional[ScrapedContent]:
+        """The document `url` serves as a file, read into text (see `download.documents`),
+        or None if it turns out to show a page after all. Waits for the download: a bot
+        check in front of the file ("Verifying your browser...") passes by itself in a
+        few seconds. A file of a type scrapeMM does not read is reported as such -- the
+        check in front of it was no CAPTCHA anybody has to solve."""
+        from scrapemm.server.download import documents
+        from scrapemm.common import UnsupportedDomainError
+        deadline = asyncio.get_running_loop().time() + DOCUMENT_WAIT
+        while not downloads and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.5)
+        if not downloads:
+            # No file came: a page after all, unless the bot check is still up
+            from scrapemm.server.captcha_detect import detect_captcha
+            with suppress(Exception):
+                if detect_captcha(ScrapedContent(html=await page.content())):
+                    raise RetrievalFailed(
+                        f"{url} should deliver a {document_extension(url)} file, but the "
+                        f"bot check in front of it did not let the browser through.")
+            return None
+        download = downloads[0]
+        name = download.suggested_filename or urlparse(url).path.rsplit("/", 1)[-1]
+        try:
+            path = Path(await asyncio.wait_for(download.path(), DOCUMENT_WAIT))
+        except Exception as e:
+            raise RetrievalFailed(f"The download of {url} failed: {type(e).__name__}: {e}") from e
+        text = await asyncio.to_thread(documents.to_text, path, name)
+        with suppress(Exception):
+            await download.delete()
+        if text is None:
+            if (documents.document_extension(name) or "") == ".pdf":
+                raise RetrievalFailed(f"{url} is a PDF, which {self.name} cannot extract "
+                                      f"the text of.")  # Firecrawl, next, parses PDFs
+            raise UnsupportedDomainError(
+                f"{url} is a {documents.document_extension(name) or 'binary'} file "
+                f"({name}), a document type scrapeMM does not extract text from.")
+        html, markdown = text
+        from ezmm import MultimodalSequence
+        logger.info(f"📄 {url} is the document {name}; read it into text.")
+        return ScrapedContent(html=html, markdown=markdown,
+                              multimodal=MultimodalSequence(markdown))
 
     def _after_renderer_crash(self, url: str) -> str:
         """What to load on the new page after `url` crashed its tab's renderer. The same

@@ -20,7 +20,7 @@ from urllib.parse import urlsplit
 from scrapemm.common.outcome import ERROR, OK, UNAVAILABLE
 
 Bucket = Literal["hour", "day", "week"]
-Group = Literal["method", "outcome", "kind"]
+Group = Literal["method", "outcome", "kind", "key"]
 
 BUCKET_SECONDS = {"hour": 3600, "day": 86400, "week": 7 * 86400}
 # How many buckets a view spans unless asked otherwise: two days, a month, half a year
@@ -31,6 +31,7 @@ WEEK_ANCHOR = 4 * 86400
 # Methods shown on their own; the rest fold into "Other"
 MAX_METHOD_SERIES = 7
 NO_METHOD = "(none)"  # Failed retrievals: no method delivered anything
+NO_KEY = "(none)"  # Jobs without a key: test runs, and retrievals before keys were recorded
 OTHER = "Other"
 TOP_DOMAINS = 8
 
@@ -55,11 +56,18 @@ def _domain(url: str) -> str:
     return host.removeprefix("www.")
 
 
+def _key_names() -> dict[str, str]:
+    """The current name of every key, by id: a renamed key's retrievals show under its
+    new name, a revoked key's are kept but no longer named."""
+    from .auth import ROOT_PRINCIPAL, key_store
+    return {ROOT_PRINCIPAL.id: ROOT_PRINCIPAL.name} | {k["id"]: k["name"] for k in key_store().list()}
+
+
 def retrieval_stats(store, bucket: Bucket = "day", group: Group = "outcome",
                     periods: Optional[int] = None, tz_offset: int = 0,
                     now: Optional[float] = None) -> dict:
     """The retrievals of the last `periods` buckets (including the current one), counted
-    per bucket and per group (method, outcome class, or kind of outcome), plus what the
+    per bucket and per group (method, outcome class, kind of outcome, or API key), plus what the
     secondary charts need: outcome and cache counts per bucket, retrieval times per
     bucket and per method, the domains that failed most and each method's share."""
     size = BUCKET_SECONDS[bucket]
@@ -75,8 +83,15 @@ def retrieval_stats(store, bucket: Bucket = "day", group: Group = "outcome",
     # Bucket start, computed in SQL: the same arithmetic as _bucket_start()
     bucket_sql = (f"(CAST((created_at + {offset} - {anchor}) / {size} AS INTEGER) * {size}"
                   f" + {anchor} - {offset})")
+    source = "results"
     if group == "method":
         key_sql = f"COALESCE(method, '{NO_METHOD}')"
+    elif group == "key":
+        # A retrieval's key is its job's, recorded among the job's parameters
+        source = ("(SELECT results.created_at AS created_at, "
+                  "json_extract(jobs.params, '$.api_key') AS api_key "
+                  "FROM results LEFT JOIN jobs ON jobs.id = results.job_id)")
+        key_sql = f"COALESCE(api_key, '{NO_KEY}')"
     elif group == "kind":
         key_sql = "CASE WHEN outcome = 'unavailable' THEN 'unavailable:' || " \
                   "COALESCE(outcome_kind, 'missing') ELSE COALESCE(outcome, 'error') END"
@@ -86,7 +101,7 @@ def retrieval_stats(store, bucket: Bucket = "day", group: Group = "outcome",
     # On the read connection: the job history's writes go on meanwhile
     with store._read_lock:
         grouped = store._reader.execute(
-            f"SELECT {bucket_sql} AS b, {key_sql} AS k, COUNT(*) AS n FROM results "
+            f"SELECT {bucket_sql} AS b, {key_sql} AS k, COUNT(*) AS n FROM {source} "
             f"WHERE created_at >= ? GROUP BY b, k", (since,)).fetchall()
         overall = store._reader.execute(
             f"SELECT {bucket_sql} AS b, COUNT(*) AS n, "
@@ -94,9 +109,11 @@ def retrieval_stats(store, bucket: Bucket = "day", group: Group = "outcome",
             f"COALESCE(SUM(outcome = 'unavailable'), 0) AS unavailable, "
             f"COALESCE(SUM(from_cache), 0) AS cached "
             f"FROM results WHERE created_at >= ? GROUP BY b", (since,)).fetchall()
-        # Times of real retrievals only: a cache hit measures the cache
+        # Times of real retrievals only: a cache hit measures the cache. Retrieval
+        # times run from the first request on; the wait before it is `queue_time`,
+        # recorded since October 2026 (see `timing`)
         timed = store._reader.execute(
-            f"SELECT {bucket_sql} AS b, method, retrieval_time FROM results "
+            f"SELECT {bucket_sql} AS b, method, retrieval_time, queue_time FROM results "
             f"WHERE created_at >= ? AND outcome = 'ok' AND from_cache = 0 "
             f"AND retrieval_time IS NOT NULL", (since,)).fetchall()
         failing = store._reader.execute(
@@ -110,14 +127,18 @@ def retrieval_stats(store, bucket: Bucket = "day", group: Group = "outcome",
         if i is not None:
             per_key[row["k"]][i] += row["n"]
     series = [{"key": k, "counts": c, "total": sum(c)} for k, c in per_key.items()]
-    if group == "method":
-        # The most used methods on their own, the rest together; failures last
+    if group in ("method", "key"):
+        # The most used methods (keys) on their own, the rest together; none last
+        if group == "key":
+            names = _key_names()
+            for s in series:
+                s["name"] = names.get(s["key"], "Revoked key") if s["key"] != NO_KEY else None
         methods = sorted((s for s in series if s["key"] != NO_METHOD), key=lambda s: -s["total"])
         shown, rest = methods[:MAX_METHOD_SERIES], methods[MAX_METHOD_SERIES:]
         if rest:
             shown.append({"key": OTHER, "total": sum(s["total"] for s in rest),
                           "counts": [sum(c) for c in zip(*(s["counts"] for s in rest))],
-                          "members": [s["key"] for s in rest]})
+                          "members": [s.get("name") or s["key"] for s in rest]})
         series = shown + [s for s in series if s["key"] == NO_METHOD]
     else:
         order = [OK, UNAVAILABLE, ERROR] if group == "outcome" else \
@@ -140,11 +161,14 @@ def retrieval_stats(store, bucket: Bucket = "day", group: Group = "outcome",
         cached[i] += row["cached"]
 
     times: list[list[float]] = [[] for _ in range(periods)]
+    waits: list[list[float]] = [[] for _ in range(periods)]
     by_method: dict[str, list[float]] = defaultdict(list)
     for row in timed:
         i = index.get(row["b"])
         if i is not None:
             times[i].append(row["retrieval_time"])
+            if row["queue_time"] is not None:
+                waits[i].append(row["queue_time"])
         by_method[row["method"] or NO_METHOD].append(row["retrieval_time"])
 
     domains = Counter(_domain(row["url"]) for row in failing)
@@ -160,12 +184,15 @@ def retrieval_stats(store, bucket: Bucket = "day", group: Group = "outcome",
             "cached": cached,
             "median_time": [statistics.median(v) if v else None for v in times],
             "p90_time": [_percentile(v, 0.9) for v in times],
+            "median_queue_time": [statistics.median(v) if v else None for v in waits],
         },
         "summary": {
             "total": grand, OK: sum(ok), UNAVAILABLE: sum(unavailable),
             ERROR: grand - sum(ok) - sum(unavailable), "cached": sum(cached),
             "median_time": statistics.median(t for v in times for t in v)
             if any(times) else None,
+            "median_queue_time": statistics.median(t for v in waits for t in v)
+            if any(waits) else None,
         },
         "methods": sorted(
             ({"method": m, "count": len(v), "median_time": statistics.median(v),

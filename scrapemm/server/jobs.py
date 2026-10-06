@@ -41,6 +41,7 @@ RESULTS_COLUMNS = """
     method         TEXT,
     errors         TEXT,
     retrieval_time REAL,
+    queue_time     REAL,
     from_cache     INTEGER NOT NULL DEFAULT 0,
     created_at     REAL NOT NULL,
     outcome        TEXT,
@@ -62,6 +63,11 @@ RESULTS_INDEXES = """
 """
 
 WAL_SIZE_LIMIT = 64 * 1024 * 1024  # Bytes the write-ahead log is cut back to
+
+# The dashboard's "today" figures: counted per slot of 15 minutes over the last day and
+# a bit, see `recent_counts()`
+SLOT = 15 * 60
+RECENT_SPAN = 25 * 60 * 60
 
 DEFAULT_RETENTION_DAYS = 90
 DEFAULT_MAX_JOBS = 10_000
@@ -124,6 +130,15 @@ class JobStore:
                     PRIMARY KEY (job_id, url)
                 );
                 CREATE INDEX IF NOT EXISTS jobs_created_idx ON jobs(created_at DESC);
+                -- One row per search request (see `api/search.py`): no query, no
+                -- answer, just enough to count them
+                CREATE TABLE IF NOT EXISTS searches (
+                    created_at   REAL NOT NULL,
+                    provider     TEXT NOT NULL,
+                    status       INTEGER NOT NULL,
+                    results      INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS searches_created_idx ON searches(created_at);
                 """
             )
             self._add_outcome_columns()
@@ -169,6 +184,8 @@ class JobStore:
             self._connection.execute("ALTER TABLE results ADD COLUMN outcome TEXT")
         if "outcome_kind" not in columns:
             self._connection.execute("ALTER TABLE results ADD COLUMN outcome_kind TEXT")
+        if "queue_time" not in columns:  # Only recorded since; older rows have none
+            self._connection.execute("ALTER TABLE results ADD COLUMN queue_time REAL")
         rows = self._connection.execute(
             "SELECT rowid, success, errors FROM results WHERE outcome IS NULL").fetchall()
         for row in rows:
@@ -219,10 +236,10 @@ class JobStore:
         with self._lock:
             self._connection.execute(
                 "INSERT OR REPLACE INTO results (job_id, url, success, method, errors, "
-                "retrieval_time, from_cache, created_at, outcome, outcome_kind) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "retrieval_time, queue_time, from_cache, created_at, outcome, outcome_kind) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (job_id, payload.url, int(success), payload.method,
-                 json.dumps(payload.errors), payload.retrieval_time,
+                 json.dumps(payload.errors), payload.retrieval_time, payload.queue_time,
                  int(payload.from_cache), time.time(), outcome, kind))
             self._connection.execute(
                 "INSERT OR REPLACE INTO result_content (job_id, url, content) VALUES (?, ?, ?)",
@@ -327,7 +344,7 @@ class JobStore:
             by_job: dict[str, list[sqlite3.Row]] = {job_id: [] for job_id in ids}
             if ids:
                 for row in self._reader.execute(
-                        "SELECT job_id, url, success, method, retrieval_time, from_cache, "
+                        "SELECT job_id, url, success, method, retrieval_time, queue_time, from_cache, "
                         "errors, outcome, outcome_kind "
                         f"FROM results WHERE job_id IN ({','.join('?' * len(ids))}) "
                         "ORDER BY created_at", ids):
@@ -400,6 +417,7 @@ class JobStore:
                 "DELETE FROM results WHERE job_id NOT IN (SELECT id FROM jobs)")
             self._connection.execute(
                 "DELETE FROM result_content WHERE job_id NOT IN (SELECT id FROM jobs)")
+            self._connection.execute("DELETE FROM searches WHERE created_at < ?", (deadline,))
             self._connection.commit()
             self.version += 1
         if removed:
@@ -456,10 +474,35 @@ class JobStore:
             "retrieved_rate": (outcomes[OK] / total) if total else None,
         }
 
-    def count_since(self, seconds: float) -> int:
-        """How many URLs were retrieved in the last `seconds`."""
-        return self.query("SELECT COUNT(*) FROM results WHERE created_at >= ?",
-                          (time.time() - seconds,))[0][0]
+    def recent_counts(self, seconds: float = RECENT_SPAN) -> list[list]:
+        """The URLs retrieved in the last `seconds`, as [slot start, count] per slot of
+        `SLOT` seconds that has any. The dashboard sums the slots since the viewer's
+        own midnight: every time zone's offset is a multiple of 15 minutes, so the
+        slots line up with every viewer's day, and one answer serves them all."""
+        since = (time.time() - seconds) // SLOT * SLOT
+        return [list(row) for row in self.query(
+            f"SELECT CAST(created_at / {SLOT} AS INTEGER) * {SLOT} AS slot, COUNT(*) "
+            f"FROM results WHERE created_at >= ? GROUP BY slot ORDER BY slot", (since,))]
+
+    def record_search(self, provider: str, status: int, results: Optional[int]) -> None:
+        """Counts one search request: which provider, its HTTP status, how many results."""
+        with self._lock:
+            self._connection.execute(
+                "INSERT INTO searches (created_at, provider, status, results) VALUES (?, ?, ?, ?)",
+                (time.time(), provider, status, results))
+            self._connection.commit()
+            self.version += 1
+
+    def search_figures(self, seconds: float = RECENT_SPAN) -> dict:
+        """The search requests of the last `seconds` per slot (as `recent_counts`), as
+        [slot start, provider, succeeded, failed], and the all-time total."""
+        since = (time.time() - seconds) // SLOT * SLOT
+        rows = self.query(
+            f"SELECT CAST(created_at / {SLOT} AS INTEGER) * {SLOT} AS slot, provider, "
+            f"SUM(status = 200), SUM(status != 200) FROM searches WHERE created_at >= ? "
+            f"GROUP BY slot, provider ORDER BY slot", (since,))
+        return {"recent": [list(row) for row in rows],
+                "total": self.query("SELECT COUNT(*) FROM searches")[0][0]}
 
     def close(self) -> None:
         with self._read_lock:
@@ -510,6 +553,7 @@ def _summarize(job: dict, results: list[sqlite3.Row]) -> None:
         entry = {"url": url, "state": "ok" if row["success"] else "failed",
                  "outcome": row["outcome"], "outcome_kind": row["outcome_kind"],
                  "method": row["method"], "retrieval_time": row["retrieval_time"],
+                 "queue_time": row["queue_time"],
                  "from_cache": bool(row["from_cache"])}
         if not row["success"]:
             entry["error"] = _main_error(json.loads(row["errors"]) if row["errors"] else {})

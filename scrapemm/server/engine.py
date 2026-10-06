@@ -21,8 +21,8 @@ from scrapemm.common import (ScrapingResponse, ScrapedContent, OutputFormat, OUT
                              RateLimitError)
 from scrapemm.common.exceptions import RetrievalFailed, UnsupportedDomainError, \
     DomainBlacklistedError, DiskFull, TargetUnavailableError, QuotaExceededError, \
-    AccessBlockedError, CaptchaEncounteredError, PaywallError
-from scrapemm.server import challenges, reachability, chain
+    AccessBlockedError, CaptchaEncounteredError, PaywallError, RegionBlockedError
+from scrapemm.server import challenges, reachability, chain, timing
 from scrapemm.server.blacklist import blacklist
 from scrapemm.server.cache import cache, cache_key
 from scrapemm.server.captcha_detect import detect_captcha
@@ -159,7 +159,7 @@ async def retrieve(
 
     urls_unique = set(urls_to_retrieve)
 
-    async with aiohttp.ClientSession(headers=HEADERS) as session:
+    async with aiohttp.ClientSession(headers=HEADERS, trace_configs=[timing.request_trace()]) as session:
         # Retrieve URLs concurrently
         tasks = [_retrieve_single(url, session, url_to_methods[url], actions,
                                   output_format, max_video_size, prioritize, use_cache,
@@ -286,7 +286,10 @@ async def _gated_retrieve(url, session, methods, actions, output_format, max_vid
     # Its own HTTP session rather than the first caller's: that one closes when its job
     # ends or its client disconnects, while others may still be waiting on this result
     global _active
-    async with _concurrency_gate(), aiohttp.ClientSession(headers=HEADERS) as own:
+    clock = timing.start_clock()  # Queue time starts here, see `timing`
+    async with (_concurrency_gate(),
+                aiohttp.ClientSession(headers=HEADERS, trace_configs=[timing.request_trace()]) as own):
+        clock.admit()
         _active += 1
         try:
             return await _retrieve_single(url, own, methods, actions, output_format,
@@ -321,7 +324,17 @@ except OSError:
     _libc = None
 
 
-async def _retrieve_single(
+async def _retrieve_single(url: str, session: aiohttp.ClientSession, *args) -> ScrapingResponse:
+    """Retrieves the URL, its response timed from its first outgoing request on (see
+    `timing`). In a batch of `retrieve()`, the URL counts as admitted when this runs."""
+    clock = timing.current()
+    if clock is None:
+        clock = timing.start_clock()
+    clock.admit()
+    return clock.stamp(await _retrieve(url, session, *args))
+
+
+async def _retrieve(
         url: str,
         session: aiohttp.ClientSession,
         methods: Literal["auto"] | list[str] = "auto",
@@ -388,8 +401,7 @@ async def _retrieve_single(
         if winner := await _run_archives(archives, url, session, errors, output_format,
                                          max_video_size):
             return await _success(url, key, *winner, errors, output_format, start_time)
-        challenge = challenges.store.get(domain)
-        challenges.store.record(domain, url, challenge.captcha if challenge else "CAPTCHA",
+        challenges.store.record(domain, url, challenges.store.captcha_for(domain),
                                 output_format, methods, max_video_size)
         return _failure(url, output_format, errors, start_time)
 
@@ -397,7 +409,11 @@ async def _retrieve_single(
     # all: find out cheaply first. Integrations' domains are up by definition.
     unreachable: Optional[str] = None  # Why the host cannot be reached from here
     skipped: list[str] = []
+    # Set once a method found the page withheld from this server's region (HTTP 451):
+    # the other methods fetching from here would be too, the others may not
+    region_blocked: list[RegionBlockedError] = []
     if domain not in DOMAIN_TO_INTEGRATION:
+        timing.work_started()
         verdict, reason = await reachability.check(url)
         if verdict == "dead":
             errors = dict(scrapemm=TargetUnavailableError(reason))
@@ -430,6 +446,8 @@ async def _retrieve_single(
         # Shortcut to download as medium
         if output_format == "multimodal":
             medium = None
+            if looks_like_image_file_url(url) or looks_like_video_file_url(url) or looks_like_hls_url(url):
+                timing.work_started()
             if looks_like_image_file_url(url):
                 medium = await download_image(url, session=session)
             elif looks_like_video_file_url(url) or looks_like_hls_url(url):
@@ -458,7 +476,9 @@ async def _retrieve_single(
                 return decodo.scrape(url, session, output_format=output_format,
                                      timeout=15 if prioritize == "speed" else 30 if unreachable else 60,
                                      max_retries=1 if prioritize == "speed" or unreachable else 5,
-                                     max_video_size=max_video_size)
+                                     max_video_size=max_video_size,
+                                     # Through a proxy outside the region that blocks
+                                     geo=decodo.UNBLOCKED_GEO if region_blocked else None)
             else:
                 return retrieve_via_integration(url, integration_name=m, session=session,
                                                 max_video_size=max_video_size,
@@ -473,15 +493,24 @@ async def _retrieve_single(
 
     async def evaluate(method_name: str) -> tuple[str, object]:
         """Runs one method and classifies its outcome."""
+        if region_blocked and method_name in _local_methods():
+            return "error", RegionBlockedError(f"Skipped: {region_blocked[0]}")
         logger.debug(f"Now executing {method_name}...")
         content = await _execute(url, map_method_to_retrieval_routine, method_name, session)
 
         if isinstance(content, Exception):
+            if isinstance(content, RegionBlockedError) and method_name in _local_methods():
+                region_blocked.append(content)
+                logger.info(f"🌍 {url} is withheld from this server's region; skipping the "
+                            f"other methods that fetch from here.")
             return "error", content
         # In a thread: the checks parse the whole page (BeautifulSoup for the paywall
         # check), which for a large page held the event loop -- every request -- for
         # seconds. In a thread, the loop keeps getting its turns.
-        return await run_light(_classify, url, method_name, content, output_format)
+        outcome = await run_light(_classify, url, method_name, content, output_format)
+        if isinstance(outcome[1], RegionBlockedError) and method_name in _local_methods():
+            region_blocked.append(outcome[1])
+        return outcome
 
     # The chain in its order: consecutive live methods as one group (hedged if so
     # configured), archive methods one after another, until one gets the page
@@ -553,6 +582,13 @@ def _classify(url: str, method_name: str, content: Optional[ScrapedContent],
 
     _derive_markdown(content)
 
+    # ...nor a notice that the page is withheld from this region (a 451 page). It may
+    # carry a CAPTCHA widget too, and is no CAPTCHA anybody could solve
+    if notice := _region_block_notice(content):
+        logger.info(f"🌍 Method {method_name} got a regional block notice for {url}.")
+        return "error", RegionBlockedError(f"Method {method_name}: the page is blocked in "
+                                            f"this region (\"{notice}\").")
+
     # Ensure the method returned the actual content and not a CAPTCHA challenge
     if captcha := detect_captcha(content):
         logger.warning(f"🤖 Method {method_name} encountered a {captcha} at {url}.")
@@ -588,6 +624,31 @@ def _classify(url: str, method_name: str, content: Optional[ScrapedContent],
     # has no HTML page to offer). Keep it, but continue with the remaining methods.
     logger.info(f"Method {method_name} could not provide the content of {url} as {output_format}.")
     return "partial", content
+
+
+# What sites show visitors from a region they withhold their pages from (HTTP 451),
+# typically US news sites for the EU over the GDPR
+REGION_BLOCK_MARKERS = (
+    "451: unavailable due to legal reasons",
+    "451 unavailable for legal reasons",
+    "unavailable for legal reasons",
+    "unavailable due to legal reasons",
+    "not available in your country",
+    "not available in your region",
+    "is currently unavailable in most european countries",
+    "from a country belonging to the european economic area",
+)
+
+
+def _region_block_notice(content: ScrapedContent) -> Optional[str]:
+    """The marker of a regional block notice, if the content is one: a short page that
+    says so. Articles quoting the phrase are long, and left alone."""
+    text = (content.markdown or (str(content.multimodal) if content.multimodal else "")
+            or _TAGS.sub(" ", content.html or "")).lower()
+    if len(text) > 3000:
+        return None
+    text = " ".join(text.split())
+    return next((m for m in REGION_BLOCK_MARKERS if m in text), None)
 
 
 # What the replayers show for a capture they do not have: pywb (Perma.cc, and archives
@@ -1093,6 +1154,9 @@ async def _plain_http(url: str, session: aiohttp.ClientSession, output_format: O
             raise TargetUnavailableError(f"{url} does not exist on the live site "
                                          f"(HTTP {response.status}).")
         if response.status != 200:
+            if response.status == 451:
+                raise RegionBlockedError(f"{url} is blocked in this server's region "
+                                         f"(HTTP 451).")
             raise RetrievalFailed(f"A plain request got HTTP {response.status}.")
         content_type = response.headers.get("content-type", "text/html")
         if "html" not in content_type:

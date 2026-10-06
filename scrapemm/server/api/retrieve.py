@@ -37,7 +37,7 @@ from scrapemm.common.paths import APP_NAME
 from scrapemm.common.wire import (ContentPayload, PROTOCOL_VERSION, ResponsePayload,
                                   errors_to_wire)
 from .. import registry
-from ..auth import require_api_key
+from ..auth import Principal, require_api_key
 from ..engine import retrieve_one
 from ..jobs import jobs
 from ..version import __version__
@@ -65,11 +65,13 @@ class RetrieveRequest(BaseModel):
 
 
 @router.post("/retrieve")
-async def retrieve(request: RetrieveRequest) -> StreamingResponse:
-    return StreamingResponse(_stream(request), media_type="application/x-ndjson")
+async def retrieve(request: RetrieveRequest,
+                   principal: Principal = Depends(require_api_key)) -> StreamingResponse:
+    return StreamingResponse(_stream(request, principal), media_type="application/x-ndjson")
 
 
-async def _stream(request: RetrieveRequest) -> AsyncIterator[bytes]:
+async def _stream(request: RetrieveRequest,
+                  principal: Optional[Principal] = None) -> AsyncIterator[bytes]:
     started = time.time()
 
     # Duplicates in the batch are retrieved once; the client maps results back onto its
@@ -77,7 +79,9 @@ async def _stream(request: RetrieveRequest) -> AsyncIterator[bytes]:
     urls = list(dict.fromkeys(request.urls))
     methods = _per_url_methods(urls, request.methods)
 
-    job_id = await jobs.astart(request.model_dump(), len(urls))
+    # The key the job was started with, by id: its name may change (see `retrieval_stats`)
+    params = request.model_dump() | ({"api_key": principal.id} if principal else {})
+    job_id = await jobs.astart(params, len(urls))
     yield _line({
         "type": "header",
         "protocol": PROTOCOL_VERSION,
@@ -186,6 +190,7 @@ def _to_payload(response) -> ResponsePayload:
         output_format=response.output_format,
         errors=errors_to_wire(response.errors),
         retrieval_time=response.retrieval_time,
+        queue_time=response.queue_time,
         from_cache=response.from_cache,
     )
 

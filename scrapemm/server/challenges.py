@@ -56,6 +56,11 @@ ARCHIVE_TODAY = "archive.ph"
 # itself. Queueing their URLs for a human only held them until somebody gave up.
 REPLAYING_ARCHIVES = frozenset({"perma.cc", "archive.org", "ghostarchive.org"})
 
+# Sites that put every visitor behind a CAPTCHA, by the CAPTCHA they show. Scraping them
+# only costs each method its timeout before failing the same way, so their URLs go
+# straight into the queue for a human, as if a challenge were always open.
+ALWAYS_GATED = {"researchgate.net": "DataDome"}
+
 
 @dataclass
 class Pending:
@@ -112,10 +117,18 @@ class ChallengeStore:
     def holds(self, domain: str) -> bool:
         """Whether new URLs of this domain should wait instead of being scraped."""
         from .integrations import DOMAIN_TO_INTEGRATION
+        if domain in ALWAYS_GATED:
+            return True
         return domain in self._challenges and domain not in DOMAIN_TO_INTEGRATION
 
     def get(self, domain: str) -> Optional[Challenge]:
         return self._challenges.get(domain)
+
+    def captcha_for(self, domain: str) -> str:
+        """The CAPTCHA a held domain's URLs wait on, for the challenge they are queued with."""
+        if challenge := self._challenges.get(domain):
+            return challenge.captcha
+        return ALWAYS_GATED.get(domain, "CAPTCHA")
 
     def all(self) -> list[Challenge]:
         return sorted(self._challenges.values(), key=lambda c: c.first_seen)

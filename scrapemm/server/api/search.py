@@ -6,7 +6,8 @@ as its body and answers with the provider's response, in the provider's own form
 One search is one short call, so the answer is a plain JSON object, not a stream.
 
 Searches are not recorded as jobs: the job history is about URLs retrieved, and a
-search retrieves none.
+search retrieves none. Each one is counted, though (`JobStore.record_search`: provider,
+status and number of results, nothing of the query), for the dashboard.
 
 Every failure carries a string `detail`, for the UI, and the exception it stands for
 in `error`, from which the client rebuilds it -- a rate limit arrives in the caller's
@@ -16,8 +17,9 @@ code as the RateLimitError it is.
 # No `from __future__ import annotations` here: each provider route is annotated with
 # its query class at runtime, and FastAPI needs the class, not its name as a string.
 
+import asyncio
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
@@ -26,6 +28,7 @@ from scrapemm.common import QuotaExceededError, RateLimitError
 from scrapemm.common.exceptions import exception_to_wire
 from scrapemm.common.paths import APP_NAME
 from ..auth import require_api_key
+from ..jobs import jobs
 from ..search import (SEARCH_PROVIDERS, ProviderDisabled, ProviderNotConfigured,
                       SearchProvider)
 
@@ -59,7 +62,10 @@ def _endpoint(provider: SearchProvider):
         try:
             response = await provider.search(query)
         except Exception as e:
-            return _failure(provider, e)
+            failure = _failure(provider, e)
+            await _count(provider, failure.status_code, None)
+            return failure
+        await _count(provider, 200, len(response.urls))
         return response.to_dict()
 
     return run_search
@@ -80,6 +86,13 @@ async def unknown_provider(provider: str) -> JSONResponse:
     available = ", ".join(p.name for p in SEARCH_PROVIDERS)
     return _error(404, ValueError(f"Unknown search provider '{provider}'. Available: "
                                   f"{available}."))
+
+
+async def _count(provider: SearchProvider, status: int, results: Optional[int]) -> None:
+    try:
+        await asyncio.to_thread(jobs.record_search, provider.name, status, results)
+    except Exception:  # A search must not fail over its bookkeeping
+        logger.warning("Could not record a search request.", exc_info=True)
 
 
 def _failure(provider: SearchProvider, e: Exception) -> JSONResponse:

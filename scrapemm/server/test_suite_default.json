@@ -661,6 +661,13 @@
   "category": "Open web"
  },
  {
+  "url": "https://eur-lex.europa.eu/legal-content/EN/TXT/PDF/?uri=OJ:C_202407215",
+  "expected": {
+   "pdf": 1
+  },
+  "category": "Open web"
+ },
+ {
   "url": "https://www.facebook.com/permalink.php?story_fbid=pfbid02yJMC3foQksvEcJX5ySQMmPZEeRyUSK1EjDEdUcK8SSe6RRmHqeZHf7MNtygMt1fTl&#038;id=61556745955761",
   "expected": {
    "image": 1
@@ -763,6 +770,27 @@
   "url": "https://perma.cc/55YA-N88K",
   "expected": {},
   "category": "Perma.cc",
+  "expect": "unavailable"
+ },
+ {
+  "url": "https://insse.ro/cms/sites/default/files/com_presa/anexa_date/pib_tr4r2025.xlsx",
+  "expected": {},
+  "category": "Open web"
+ },
+ {
+  "url": "https://kentuckytoday.com",
+  "expected": {},
+  "category": "Open web"
+ },
+ {
+  "url": "https://niagara-gazette.com",
+  "expected": {},
+  "category": "Open web"
+ },
+ {
+  "url": "https://naagara-gazette.com",
+  "expected": {},
+  "category": "Open web",
   "expect": "unavailable"
  }
 ]

@@ -13,6 +13,7 @@ up loses lines rather than growing the server's memory.
 import asyncio
 import itertools
 import logging
+import re
 import threading
 import time
 from collections import deque
@@ -45,7 +46,7 @@ class LogBuffer(logging.Handler):
                 message += "\n" + self._traceback_formatter.formatException(record.exc_info)
             entry = {"seq": next(self._sequence), "time": record.created,
                      "level": record.levelname, "logger": record.name or "root",
-                     "message": message}
+                     "message": _redact(message)}
         except Exception:
             return  # Logging must never be the reason something fails
         with self._viewers_lock:
@@ -75,6 +76,21 @@ class LogBuffer(logging.Handler):
         finally:
             with self._viewers_lock:
                 self._viewers.discard(viewer)
+
+
+# API keys that may end up in a log line: in a URL's query (the CAPTCHA panel's
+# WebSocket carries its key there, and uvicorn logs the URL) or as such. The Logs page
+# is for Admins, who must not see the root key or anybody else's that way.
+_KEYS = re.compile(r"(?<=[?&]token=)[^&\s\"']+|\bsmm_[A-Za-z0-9_-]{8,}")
+
+
+def _redact(message: str) -> str:
+    from . import auth
+    message = _KEYS.sub("[redacted]", message)
+    # The key as known, not `api_key()`: generating it logs, which would land back here
+    if (root := auth._api_key) and root in message:
+        message = message.replace(root, "[redacted]")
+    return message
 
 
 def _offer(queue: asyncio.Queue, entry: dict) -> None:

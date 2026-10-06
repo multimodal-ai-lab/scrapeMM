@@ -196,7 +196,7 @@ onBeforeUnmount(stopFollowing)
           <ResultView
             v-if="entry.result" :id="`result-${index}`"
             :url="entry.url" :content="entry.result.content" :method="entry.result.method"
-            :errors="entry.result.errors" :retrieval-time="entry.result.retrieval_time"
+            :errors="entry.result.errors" :retrieval-time="entry.result.retrieval_time" :queue-time="entry.result.queue_time"
             :from-cache="entry.result.from_cache" :success="entry.result.success"
             :outcome="entry.result.outcome" :outcome-kind="entry.result.outcome_kind"
             collapsible :collapsed="entries.length > 1 && entry.url !== focus"

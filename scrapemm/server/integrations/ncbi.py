@@ -33,6 +33,7 @@ class NCBI(HeadedBrowser):
     shared headed browser takes over whenever the fast path is challenged."""
     name = "NCBI"
     domains = ["nih.gov"]
+    waits_for_browser_slot = False  # Tries plain HTTP first
 
     async def _get(self, url: str, **kwargs) -> ScrapedContent:
         output_format = kwargs.get("output_format", "multimodal")

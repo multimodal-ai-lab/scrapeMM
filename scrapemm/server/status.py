@@ -29,7 +29,7 @@ from . import registry
 from .blacklist import blacklist
 from .cache import cache
 from .environment import ffmpeg_available, ffprobe_available
-from .jobs import jobs
+from .jobs import SLOT, jobs
 from .search import SEARCH_PROVIDERS
 from .secrets import is_set
 from .toggles import is_enabled, resolve_alias
@@ -437,7 +437,7 @@ async def environment() -> dict:
     }
 
 
-# The 24-hour count slides with the clock even when nothing is written, so it is also
+# The recent counts slide with the clock even when nothing is written, so they are also
 # refreshed on this interval
 JOB_FIGURES_MAX_AGE = 60.0
 
@@ -455,10 +455,12 @@ def _job_figures() -> dict:
     version = jobs.version
     figures = {
         "throughput": {
-            "last_24h": jobs.count_since(24 * 60 * 60),
+            # Per 15-minute slot, for "today" in the viewer's time zone (see `recent_counts`)
+            "recent": {"slot": SLOT, "counts": jobs.recent_counts()},
             "success_rate": jobs.recent_success_rate(RECENT_WINDOW),
         },
         "jobs": {**jobs.stats(), "running": jobs.count_jobs(status="running")},
+        "searches": jobs.search_figures(),
     }
     _job_figures_cache = (version, time.time(), figures)
     return figures

@@ -12,9 +12,25 @@ export const useToken = () => useState<string | null>('token', () => {
   return null
 })
 
+export type Role = 'root' | 'admin' | 'client'
+
+/** The key this browser signed in with: its name and role. Null until known. */
+export interface Me { id: string, name: string, role: Role }
+
+export const useMe = () => useState<Me | null>('me', () => null)
+
+/** Root and Admin keys see what configures the server: API keys, Settings, Logs. */
+export const useIsAdmin = () => {
+  const me = useMe()
+  return computed(() => me.value?.role === 'root' || me.value?.role === 'admin')
+}
+
+export const ROLE_LABELS: Record<Role, string> = { root: 'Root', admin: 'Admin', client: 'Client' }
+
 export function setToken(value: string | null) {
   const token = useToken()
   token.value = value
+  if (!value) useMe().value = null
   if (import.meta.client) {
     if (value) localStorage.setItem(TOKEN_KEY, value)
     else localStorage.removeItem(TOKEN_KEY)

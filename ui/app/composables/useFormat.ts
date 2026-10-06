@@ -43,6 +43,21 @@ export function seconds(value: number | null | undefined): string {
   return `${minutes}m ${Math.round(value % 60)}s`
 }
 
+/** What a retrieval time measures (see the server's `timing.py`). Results recorded
+ *  before October 2026 may include a wait for a browser slot. */
+export const RETRIEVAL_TIME_MEANING
+  = 'Retrieval time: from the URL’s first outgoing request to its result. '
+  + 'Time spent waiting for a free slot beforehand is not included.'
+
+/** The tooltip of one result's retrieval time, with its wait when known. */
+export function retrievalTimeTitle(retrieval: number | null | undefined,
+                                   queue?: number | null): string {
+  if (retrieval == null) return RETRIEVAL_TIME_MEANING
+  const waited = queue != null && queue >= 0.05
+    ? `\nWaited ${seconds(queue)} for a slot before that.` : ''
+  return `${RETRIEVAL_TIME_MEANING}${waited}`
+}
+
 export function bytes(value: number): string {
   if (!value) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']

@@ -104,6 +104,7 @@ class ResponsePayload:
     output_format: OutputFormat = "multimodal"
     errors: dict[str, dict[str, str]] = field(default_factory=dict)
     retrieval_time: Optional[float] = None
+    queue_time: Optional[float] = None
     from_cache: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -114,6 +115,7 @@ class ResponsePayload:
             "output_format": self.output_format,
             "errors": self.errors,
             "retrieval_time": self.retrieval_time,
+            "queue_time": self.queue_time,
             "from_cache": self.from_cache,
         }
 
@@ -127,6 +129,7 @@ class ResponsePayload:
             output_format=data.get("output_format", "multimodal"),
             errors=data.get("errors") or {},
             retrieval_time=data.get("retrieval_time"),
+            queue_time=data.get("queue_time"),
             from_cache=bool(data.get("from_cache")),
         )
 
@@ -151,6 +154,7 @@ class ResponsePayload:
             output_format=self.output_format,
             errors={k: exception_from_wire(v) for k, v in self.errors.items()} or None,
             retrieval_time=self.retrieval_time,
+            queue_time=self.queue_time,
             from_cache=self.from_cache,
         )
 

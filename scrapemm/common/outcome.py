@@ -47,6 +47,7 @@ UNAVAILABLE_KINDS: dict[str, str] = {
     "PaywallError": "paywall",
     "CaptchaEncounteredError": "captcha",
     "AccessBlockedError": "blocked",
+    "RegionBlockedError": "blocked",
     "RateLimitError": "rate_limit",
     "DomainBlacklistedError": "unsupported",
     "UnsupportedDomainError": "unsupported",

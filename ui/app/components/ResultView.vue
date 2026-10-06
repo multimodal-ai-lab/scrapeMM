@@ -12,6 +12,7 @@ const props = defineProps<{
   method?: string | null
   errors?: Record<string, { type: string, message: string }>
   retrievalTime?: number | null
+  queueTime?: number | null
   fromCache?: boolean
   success?: boolean
   // The server's classification (see useOutcome.ts); derived here when absent
@@ -23,6 +24,7 @@ const props = defineProps<{
 }>()
 
 const token = useToken()
+const timeTitle = computed(() => retrievalTimeTitle(props.retrievalTime, props.queueTime))
 const open = ref(!(props.collapsible && props.collapsed))
 
 function toggle() {
@@ -163,6 +165,7 @@ function compact(n: number): string {
             <span
               v-if="retrievalTime != null"
               class="text-xs text-dimmed inline-flex items-center gap-1"
+              :title="timeTitle"
             >
               <UIcon name="i-fa7-solid-stopwatch" class="size-3" />
               {{ seconds(retrievalTime) }}

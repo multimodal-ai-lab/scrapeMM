@@ -36,7 +36,10 @@ class ScrapingResponse:
     method: Optional[str] = None  # The successful method used to retrieve the content
     output_format: OutputFormat = "multimodal"  # The format that was requested
     errors: dict[str, Optional[Exception]] | None = None  # The exceptions raised during retrieval for each method
-    retrieval_time: Optional[float] = None  # Time in seconds for retrieving this URL
+    # Seconds from the URL's first outgoing request to its result (see server `timing`)
+    retrieval_time: Optional[float] = None
+    # Seconds the URL waited before that, for a concurrency or browser slot
+    queue_time: Optional[float] = None
     from_cache: bool = False  # Whether this response was served from the cache
 
     @property

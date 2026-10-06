@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from scrapemm.common.paths import APP_NAME
 from .. import registry, status as status_module
-from ..auth import api_key_from_environment, regenerate_api_key, require_api_key
+from ..auth import Principal, require_admin, require_api_key
 from ..blacklist import blacklist
 from ..cache import cache, immutable, KINDS
 from ..config import SETTINGS, get_config, update_config
@@ -29,6 +29,7 @@ from ..version import __version__
 logger = logging.getLogger(APP_NAME)
 
 router = APIRouter(prefix="/v1", tags=["admin"], dependencies=[Depends(require_api_key)])
+ADMIN = [Depends(require_admin)]  # For what configures the server or reveals its credentials
 
 
 # --- Version and status -----------------------------------------------------------
@@ -99,7 +100,7 @@ class EnabledFlag(BaseModel):
     enabled: bool
 
 
-@router.put("/integrations/{name}/enabled")
+@router.put("/integrations/{name}/enabled", dependencies=ADMIN)
 async def set_integration_enabled(name: str, body: EnabledFlag) -> dict:
     """Switches a retrieval method on or off. A disabled one is dropped from the method
     list before retrieval, so it costs nothing rather than failing its way down it."""
@@ -127,7 +128,7 @@ async def live() -> StreamingResponse:
                                       "X-Accel-Buffering": "no"})
 
 
-@router.get("/logs/stream")
+@router.get("/logs/stream", dependencies=ADMIN)
 async def logs_stream() -> StreamingResponse:
     """The server's log as NDJSON: the recent backlog first, then every new record as
     it is logged, and a ping every few seconds of silence. See `logbuffer.py`."""
@@ -148,12 +149,12 @@ class SecretValue(BaseModel):
     value: str
 
 
-@router.get("/secrets")
+@router.get("/secrets", dependencies=ADMIN)
 async def list_secrets() -> dict:
     return {"secrets": describe_secrets()}
 
 
-@router.put("/secrets/{name}")
+@router.put("/secrets/{name}", dependencies=ADMIN)
 async def put_secret(name: str, body: SecretValue) -> dict:
     if name not in SECRETS:
         raise HTTPException(status_code=404, detail=f"Unknown secret '{name}'.")
@@ -170,7 +171,7 @@ async def put_secret(name: str, body: SecretValue) -> dict:
     return {"name": name, "is_set": True}
 
 
-@router.delete("/secrets/{name}")
+@router.delete("/secrets/{name}", dependencies=ADMIN)
 async def delete_secret(name: str) -> dict:
     if name not in SECRETS:
         raise HTTPException(status_code=404, detail=f"Unknown secret '{name}'.")
@@ -188,7 +189,7 @@ def _refresh_dashboard(secret_name: str) -> None:
         status_module.invalidate(*affected)
 
 
-@router.post("/secrets/rotate-key")
+@router.post("/secrets/rotate-key", dependencies=ADMIN)
 async def rotate_secrets_key() -> dict:
     try:
         rotate_key()
@@ -197,32 +198,15 @@ async def rotate_secrets_key() -> dict:
     return {"rotated": True}
 
 
-# --- API key ----------------------------------------------------------------------
-
-@router.get("/api-key")
-async def describe_api_key() -> dict:
-    """Never the key itself: only whether the UI may regenerate it."""
-    return {"from_environment": api_key_from_environment()}
-
-
-@router.post("/api-key/regenerate")
-async def regenerate_key() -> dict:
-    """Returns the new key once, so the caller can switch over to it."""
-    try:
-        return {"api_key": regenerate_api_key()}
-    except RuntimeError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-
-
 # --- Configuration ----------------------------------------------------------------
 
-@router.get("/config")
+@router.get("/config", dependencies=ADMIN)
 async def read_config() -> dict:
     return {"config": get_config(),
             "settings": {name: kind.__name__ for name, kind in SETTINGS.items()}}
 
 
-@router.patch("/config")
+@router.patch("/config", dependencies=ADMIN)
 async def patch_config(body: dict[str, Any]) -> dict:
     unknown = [name for name in body if name not in SETTINGS]
     if unknown:
@@ -274,7 +258,7 @@ async def remove_from_blacklist(domain: str) -> dict:
 
 # --- Cache ------------------------------------------------------------------------
 
-@router.get("/cache")
+@router.get("/cache", dependencies=ADMIN)
 async def read_cache() -> dict:
     """Live figures and the settings: entries, size_mb, enabled, ttl, max_entries, max_mb."""
     return cache.stats()
@@ -288,7 +272,7 @@ class CacheConfig(BaseModel):
     immutable_max_mb: Optional[float] = None  # The permanent tier on disk, in MB
 
 
-@router.put("/cache/config")
+@router.put("/cache/config", dependencies=ADMIN)
 async def configure_cache(body: CacheConfig) -> dict:
     """Changes the cache's settings; they apply at once, with no restart."""
     if body.ttl is not None and body.ttl < 0:
@@ -309,7 +293,7 @@ async def configure_cache(body: CacheConfig) -> dict:
     return cache.stats()
 
 
-@router.post("/cache/clear")
+@router.post("/cache/clear", dependencies=ADMIN)
 async def clear_the_cache(tier: str = Query(default="recent", pattern="^(recent|all)$")) -> dict:
     """Empties the recent tier; with `tier=all`, the permanent one too -- which holds
     Archive.today pages that cannot be retrieved again without solving its CAPTCHA."""
@@ -395,7 +379,8 @@ async def delete_job(job_id: str) -> dict:
 @router.get("/stats/retrievals")
 async def retrieval_statistics(
         bucket: str = Query(default="day", description="hour, day or week"),
-        group: str = Query(default="outcome", description="method, outcome or kind"),
+        group: str = Query(default="outcome",
+                           description="method, outcome, kind or key (API key; Admin and Root only)"),
         periods: Optional[int] = Query(
             default=None, ge=1, le=400,
             description="How many buckets, up to the current one (default: 48 hours, "
@@ -404,13 +389,17 @@ async def retrieval_statistics(
             default=0, ge=-14 * 60, le=14 * 60,
             description="The viewer's offset from UTC in minutes (east positive), so "
                         "that days and weeks start at local midnight"),
+        principal: Principal = Depends(require_api_key),
 ) -> dict:
-    """Past retrievals over time, per method or outcome, for the Statistics view."""
+    """Past retrievals over time, per method, outcome or API key, for the Statistics view."""
     from ..retrieval_stats import BUCKET_SECONDS, retrieval_stats
     if bucket not in BUCKET_SECONDS:
         raise HTTPException(status_code=400, detail="bucket must be hour, day or week.")
-    if group not in ("method", "outcome", "kind"):
-        raise HTTPException(status_code=400, detail="group must be method, outcome or kind.")
+    if group not in ("method", "outcome", "kind", "key"):
+        raise HTTPException(status_code=400, detail="group must be method, outcome, kind or key.")
+    if group == "key" and not principal.is_admin:
+        # The names of the keys are for those who manage them
+        raise HTTPException(status_code=403, detail="Grouping by API key needs an Admin or Root API key.")
     # A query over a large range reads many rows: off the event loop
     return await asyncio.to_thread(retrieval_stats, jobs, bucket, group, periods, tz_offset)
 
@@ -431,6 +420,6 @@ async def media(kind: str, identifier: int) -> FileResponse:
     return FileResponse(path, filename=path.name)
 
 
-@router.get("/media")
+@router.get("/media", dependencies=ADMIN)
 async def media_usage() -> dict:
     return registry.usage()

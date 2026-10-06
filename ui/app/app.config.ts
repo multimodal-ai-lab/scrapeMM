@@ -20,5 +20,33 @@ export default defineAppConfig({
         variant: 'soft',
       },
     },
+    // Disabled buttons are gray, not a faded accent: blue says "you can click this".
+    // Important (`!`) so they win over the theme's own `disabled:bg-primary`.
+    button: {
+      compoundVariants: [
+        {
+          color: 'primary',
+          variant: 'solid',
+          class: 'disabled:bg-accented! aria-disabled:bg-accented! disabled:text-muted! aria-disabled:text-muted!',
+        },
+        ...(['outline', 'subtle'] as const).map((variant) => ({
+          color: 'primary' as const,
+          variant,
+          class: 'disabled:bg-transparent! aria-disabled:bg-transparent! disabled:text-dimmed! aria-disabled:text-dimmed! disabled:ring-accented! aria-disabled:ring-accented!',
+        })),
+        ...(['soft', 'ghost', 'link'] as const).map((variant) => ({
+          color: 'primary' as const,
+          variant,
+          class: 'disabled:bg-transparent! aria-disabled:bg-transparent! disabled:text-dimmed! aria-disabled:text-dimmed!',
+        })),
+      ],
+    },
+    // The active tab's label sits beside the accent pill, not inside it: white by name
+    // (see the white-on-accent rule in assets/css/main.css)
+    tabs: {
+      compoundVariants: [
+        { color: 'primary', variant: 'pill', class: { trigger: 'data-[state=active]:text-white!' } },
+      ],
+    },
   },
 })

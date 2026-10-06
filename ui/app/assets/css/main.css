@@ -1,22 +1,36 @@
 @import "tailwindcss";
 @import "@nuxt/ui";
 
-/* The accent colour, taken from the logo (res/logo.png): its core blue is step 500 --
-   the primary in light mode -- and its darker end step 600. The other steps continue
-   in the same hue (OKLCH 258°) with lightness falling evenly, so step 400, the primary
-   on the dark background, is the same blue made lighter rather than a different one. */
+/* The accent colour: #036de6, step 500. The lighter steps mix it with white, the darker
+   ones with black, so every step is the same blue. It is the primary in light and dark
+   mode alike (Nuxt UI would take step 400 on the dark background). */
 @theme static {
-  --color-brand-50: #f1f6fe;
-  --color-brand-100: #ddeafe;
-  --color-brand-200: #bfd9ff;
-  --color-brand-300: #95c0ff;
-  --color-brand-400: #5097ff;
-  --color-brand-500: #0068e0;
-  --color-brand-600: #0058c0;
-  --color-brand-700: #0149a1;
-  --color-brand-800: #003d8a;
-  --color-brand-900: #05326f;
-  --color-brand-950: #04224b;
+  --color-brand-50: #f2f8fe;
+  --color-brand-100: #e1edfc;
+  --color-brand-200: #c0daf9;
+  --color-brand-300: #95c2f4;
+  --color-brand-400: #4f99ee;
+  --color-brand-500: #036de6;
+  --color-brand-600: #035ec6;
+  --color-brand-700: #024ea6;
+  --color-brand-800: #02418a;
+  --color-brand-900: #01346e;
+  --color-brand-950: #01234a;
+}
+
+:root,
+:root.dark,
+:root.light {
+  --ui-primary: var(--ui-color-primary-500);
+}
+
+/* Text and symbols on the accent are white, in dark mode too, where Nuxt UI's "inverted"
+   text is otherwise near-black. Set on whatever has the accent as its background (a
+   solid button, a checked checkbox, a solid badge) and so inherited by its icons. Both
+   variables: Tailwind's resolves the other once, at the root. */
+.dark [class*="bg-primary"] {
+  --ui-text-inverted: #fff;
+  --text-color-inverted: #fff;
 }
 
 /* ---------------------------------------------------------------------------------

@@ -13,13 +13,14 @@ from pydantic import BaseModel
 
 from scrapemm.common.paths import APP_NAME
 from .. import chain, status as status_module
-from ..auth import require_api_key
+from ..auth import require_admin
 from ..config import get_config_var, update_config
 from ..toggles import is_enabled
 
 logger = logging.getLogger(APP_NAME)
 
-router = APIRouter(prefix="/v1", tags=["chain"], dependencies=[Depends(require_api_key)])
+# Part of Settings: Admin and Root only
+router = APIRouter(prefix="/v1", tags=["chain"], dependencies=[Depends(require_admin)])
 
 # How long the chain page waits for a method's probe before showing it as still checking
 STATUS_WAIT = 4.0

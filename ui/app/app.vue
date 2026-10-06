@@ -1,5 +1,8 @@
 <script setup lang="ts">
 const token = useToken()
+const me = useMe()
+const isAdmin = useIsAdmin()
+const api = useApi()
 const entered = ref('')
 const checking = ref(false)
 const error = ref('')
@@ -22,6 +25,8 @@ interface NavLink {
   icon: string
   to: string
   children?: NavLink[]
+  /** Root and Admin only: what configures the server or reveals its credentials */
+  admin?: boolean
 }
 
 const links: NavLink[] = [
@@ -40,12 +45,26 @@ const links: NavLink[] = [
   { label: 'Test', icon: 'i-fa7-solid-flask', to: '/test' },
   { label: 'CAPTCHA', icon: 'i-fa7-solid-shield-halved', to: '/captcha' },
   { label: 'Blacklist', icon: 'i-fa7-solid-ban', to: '/blacklist' },
-  { label: 'Logs', icon: 'i-fa7-solid-terminal', to: '/logs' },
-  { label: 'Secrets', icon: 'i-fa7-solid-key', to: '/secrets' },
-  { label: 'Settings', icon: 'i-fa7-solid-gear', to: '/settings' },
+  { label: 'Logs', icon: 'i-fa7-solid-terminal', to: '/logs', admin: true },
+  { label: 'API Keys', icon: 'i-fa7-solid-key', to: '/api-keys', admin: true },
+  { label: 'Settings', icon: 'i-fa7-solid-gear', to: '/settings', admin: true },
 ]
 
+const visibleLinks = computed(() => links.filter((link) => !link.admin || isAdmin.value))
+
 const route = useRoute()
+
+/** An Admin page opened with a Client key (a bookmark, a typed URL): said so plainly
+ *  rather than left to fail call by call. Undecided until the key's role is known. */
+const adminPage = computed(() => links.some((l) => l.admin && route.path.startsWith(l.to)))
+
+// Who this browser is signed in as, whenever the key changes (sign-in, regeneration)
+watch(token, async (value) => {
+  if (!value) return
+  try {
+    me.value = await api.get<any>('/v1/me')
+  } catch { /* A rejected key signs out by itself (see useApi) */ }
+}, { immediate: true })
 
 /** A group is current while one of its pages is; it is set apart from the page itself,
  *  which alone gets the highlighted row. */
@@ -58,13 +77,13 @@ async function signIn() {
   checking.value = true
   try {
     // Verify before storing, so a typo does not leave the UI in a broken state
-    await $fetch(`${apiBase()}/v1/version`, {
+    await $fetch(`${apiBase()}/v1/me`, {
       headers: { Authorization: `Bearer ${entered.value.trim()}` },
     })
     setToken(entered.value.trim())
   } catch {
-    error.value = 'That key was rejected. It is printed in the server log on first start, '
-      + 'or set as SCRAPEMM_API_KEY in your .env.'
+    error.value = 'That key was rejected. Ask an admin of this server for one. The root key '
+      + 'is printed in the server log on start, or set as SCRAPEMM_API_KEY in your .env.'
   } finally {
     checking.value = false
   }
@@ -80,7 +99,7 @@ async function signIn() {
             <img src="/logo.webp" alt="" class="size-10 shrink-0">
             <div>
               <h1 class="text-lg font-semibold">scrapeMM</h1>
-              <p class="text-sm text-muted">Enter the server's API key to continue.</p>
+              <p class="text-sm text-muted">Enter your API key to continue.</p>
             </div>
           </div>
         </template>
@@ -136,7 +155,7 @@ async function signIn() {
         </div>
 
         <nav class="flex flex-col gap-1">
-          <template v-for="link in links" :key="link.to">
+          <template v-for="link in visibleLinks" :key="link.to">
             <UTooltip :text="link.label" :disabled="!collapsed" :content="{ side: 'right' }">
               <NuxtLink
                 :to="link.children ? link.children[0]!.to : link.to"
@@ -185,7 +204,14 @@ async function signIn() {
           </template>
         </nav>
 
-        <div class="mt-auto">
+        <div class="mt-auto space-y-1">
+          <!-- Which key this browser uses: with several keys about, worth knowing -->
+          <div
+            v-if="me && !collapsed" class="px-2.5 text-xs text-dimmed truncate"
+            :title="`Signed in with the ${ROLE_LABELS[me.role]} key '${me.name}'`"
+          >
+            {{ me.name }} · {{ ROLE_LABELS[me.role] }}
+          </div>
           <UTooltip text="Log out" :disabled="!collapsed" :content="{ side: 'right' }">
             <UButton
               class="w-full justify-start transition-colors"
@@ -206,7 +232,14 @@ async function signIn() {
         <!-- The jobs overview is kept alive: coming back from a job shows it exactly as
              it was left -- filters, sorting, everything loaded and the scroll position,
              which the router restores once the page is there again -->
-        <NuxtPage :keepalive="{ include: ['JobsOverview'] }" />
+        <template v-if="adminPage && !isAdmin">
+          <UAlert
+            v-if="me" color="neutral" variant="subtle" icon="i-fa7-solid-lock" class="max-w-xl"
+            title="Admins only"
+            description="This page needs an Admin or Root API key. Ask an admin of this server for one, or sign in with one."
+          />
+        </template>
+        <NuxtPage v-else :keepalive="{ include: ['JobsOverview'] }" />
       </main>
     </div>
   </UApp>

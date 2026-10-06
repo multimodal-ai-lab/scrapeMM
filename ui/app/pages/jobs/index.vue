@@ -59,6 +59,7 @@ const OUTCOME_OPTIONS = OUTCOMES.flat().filter((o: any) => o.value) as
 const PERIODS = [
   { label: 'Any time', value: ANY },
   { label: 'Last hour', value: '1h' },
+  { label: 'Today', value: 'today' },
   { label: 'Last 24 hours', value: '24h' },
   { label: 'Last 7 days', value: '7d' },
   { label: 'Last 30 days', value: '30d' },
@@ -126,6 +127,7 @@ function sinceTimestamp(period: string): number | null {
   const spans: Record<string, number> = {
     '1h': 3600, '24h': 86400, '7d': 604800, '30d': 2592000,
   }
+  if (period === 'today') return Math.floor(new Date().setHours(0, 0, 0, 0) / 1000)
   const span = spans[period]
   return span ? Math.floor(Date.now() / 1000 - span) : null
 }
@@ -492,7 +494,7 @@ async function copy(id: string) {
                 <UIcon name="i-fa7-solid-bolt" class="size-3" />
               </span>
               <span>{{ entry.method }}</span>
-              <span v-if="entry.retrieval_time">{{ seconds(entry.retrieval_time) }}</span>
+              <span v-if="entry.retrieval_time" :title="retrievalTimeTitle(entry.retrieval_time, entry.queue_time)">{{ seconds(entry.retrieval_time) }}</span>
             </span>
           </NuxtLink>
           <NuxtLink

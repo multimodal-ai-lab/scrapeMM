@@ -67,13 +67,23 @@ Copy the `.env.example` file to `.env` and edit it to suit your needs. Then, run
 docker compose up -d
 ```
 to start the server's docker containers. The web UI is then at `http://localhost:[SCRAPEMM_PORT]`. It asks
-for the API key: set `SCRAPEMM_API_KEY` in `.env`, or leave it empty and the server
-generates one on first start and prints it to the log (`docker compose logs scrapemm`).
+for an API key. The first is the root key: set `SCRAPEMM_API_KEY` in `.env`, or leave it
+empty and the server generates one on first start and prints it to the log
+(`docker compose logs scrapemm`).
+
+Give everyone else a key of their own under **API Keys**, named after who or what uses it
+and with a role:
+
+| Role | May |
+|---|---|
+| **Root** | Everything. The one key from `SCRAPEMM_API_KEY`; regenerated, never revoked. |
+| **Admin** | Everything, including Settings (with the Secrets), Logs and the API keys. Manages the Client keys. |
+| **Client** | Retrieve and search, and see the views around that (Dashboard, Jobs, Statistics, CAPTCHA, …). Nothing that configures the server or reveals its credentials. |
 
 That one command also starts a self-hosted Firecrawl. Further instances can be added in
 the UI under **Settings**.
 
-Then configure the integrations in the UI under **Secrets** — the dashboard tells you
+Then configure the integrations in the UI under **Settings › Secrets** — the dashboard tells you
 which ones are missing what.
 
 ### ⚙️ What is in `.env`
@@ -81,7 +91,7 @@ which ones are missing what.
 | Variable | Meaning                                                                                                                                           |
 |---|---------------------------------------------------------------------------------------------------------------------------------------------------|
 | `SCRAPEMM_PORT` | Port for the web UI and the API                                                                                                                   |
-| `SCRAPEMM_API_KEY` | The bearer token for both; generated if empty                                                                                                     |
+| `SCRAPEMM_API_KEY` | The root API key (see the roles above); generated if empty                                                                                                   |
 | `SCRAPEMM_CONFIG_DIR` | Where the server keeps secrets, caches, job history, browser profile                                                                              |
 | `SCRAPEMM_MEDIA_DIR` | The ezMM media directory downloaded media goes to; Must be an **absolute, Docker-mountable path** on the host system |
 | `SCRAPEMM_BEHIND_TLS` | Set to `1` when a reverse proxy terminates HTTPS                                                                                                  |
@@ -191,7 +201,7 @@ yourself when you decide to, and expect older sequences to lose their media when
 
 scrapeMM can also *find* pages. Search APIs differ in their parameters and results, so each
 provider has its own query and response classes that mirror its API; the query you build picks
-the provider. Set the provider's key under **Secrets** in the web UI (Serper: `serper_api_key`).
+the provider. Set the provider's key under **Settings › Secrets** in the web UI (Serper: `serper_api_key`).
 
 ```python
 import asyncio, scrapemm
@@ -238,8 +248,9 @@ it its route and dashboard card), its key in `SECRETS`, and for the UI a compone
 | **Playground › Search** | Search the web or for images through a search provider, and send any result on to Retrieval. |
 | **Jobs** | Every retrieval this server has run, with per-URL outcomes and the content it produced. |
 | **CAPTCHA** | One challenge per gated site with its waiting URLs: solve it in the server's browser, or discard it. |
-| **Secrets** | Set the API credentials. Write-only: the server never gives a value back. |
-| **Settings** | Firecrawl endpoints, hedging, cache and blacklist lifetimes, the domain blacklist. Regenerating the API key (unless `SCRAPEMM_API_KEY` sets it). |
+| **Statistics** | Past retrievals over time, by outcome, method or (for Admins) API key. |
+| **API Keys** | Create, rename and revoke keys (Admin and Root). A new key is shown once; the server keeps only its hash. |
+| **Settings** | The retrieval chain, the Secrets (write-only: the server never gives a value back), Firecrawl endpoints, cache and blacklist lifetimes. Admin and Root only. |
 
 Every card on the dashboard carries its own status colour and names the missing secrets
 as chips you can go and fill in. The Browser, Firecrawl and Decodo get cards too, even though

@@ -115,7 +115,7 @@ function succeeded(payload: any) {
       <ResultView
         v-for="payload in results" :key="payload.url"
         :url="payload.url" :content="payload.content" :method="payload.method"
-        :errors="payload.errors" :retrieval-time="payload.retrieval_time"
+        :errors="payload.errors" :retrieval-time="payload.retrieval_time" :queue-time="payload.queue_time"
         :from-cache="payload.from_cache" :success="succeeded(payload)"
       />
     </div>

@@ -10,6 +10,7 @@ import type { Component } from 'vue'
 import SerperSearch from '~/components/search/SerperSearch.vue'
 
 const api = useApi()
+const isAdmin = useIsAdmin()
 
 // One component per provider, keyed by the provider's name in the API
 const PROVIDERS: Record<string, Component> = {
@@ -69,8 +70,10 @@ onMounted(load)
       <UAlert
         v-else-if="!current.configured" color="warning" variant="subtle" icon="i-fa7-solid-key"
         :title="`${current.label} is not set up yet`"
-        :description="`Set ${current.missing_secrets.join(', ')} on the Secrets page to search with ${current.label}.`"
-        :actions="[{ label: 'Open Secrets', to: '/secrets', color: 'warning', variant: 'outline' }]"
+        :description="isAdmin
+          ? `Set ${current.missing_secrets.join(', ')} under Secrets in the Settings to search with ${current.label}.`
+          : `An admin of this server has to set ${current.missing_secrets.join(', ')} before you can search with ${current.label}.`"
+        :actions="isAdmin ? [{ label: 'Open Secrets', to: '/settings#secrets', color: 'warning', variant: 'outline' }] : []"
       />
       <component :is="PROVIDERS[current.name]" v-if="PROVIDERS[current.name]" :provider="current" />
       <UCard v-else>
