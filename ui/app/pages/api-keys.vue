@@ -9,8 +9,8 @@ import type { Role } from '~/composables/useApi'
  * configuration or credentials. A key manages only keys below its own role, so an Admin
  * creates, renames and revokes Clients, and Root everything else.
  *
- * The server keeps a hash of each key, never the key: a new key is shown once, here,
- * right after creating it.
+ * The server keeps a hash of each key, never the key: a new key is shown once, in the
+ * dialog that created it, and is gone when that closes.
  */
 const api = useApi()
 const me = useMe()
@@ -29,17 +29,32 @@ const keys = ref<any[]>([])
 const loading = ref(true)
 const error = ref('')
 
-// Creating
+// Creating, in a dialog: first the name and role, then the new key
+const dialogOpen = ref(false)
 const name = ref('')
 const role = ref<Role>('client')
 const creating = ref(false)
+const dialogError = ref('')
 const roles = computed(() => (['client', 'admin'] as Role[])
   .filter((r) => me.value && RANK[me.value.role] > RANK[r])
   .map((r) => ({ label: ROLE_LABELS[r], value: r })))
 
-// The key just made (or regenerated), shown once
+// The key just made (or regenerated), shown once: only while the dialog is open
 const revealed = ref<{ name: string, token: string } | null>(null)
 const copied = ref(false)
+
+function openDialog() {
+  dialogOpen.value = true
+}
+
+/** Once the dialog has closed: nothing of the key is kept on the page */
+function resetDialog() {
+  revealed.value = null
+  name.value = ''
+  role.value = 'client'
+  dialogError.value = ''
+  copied.value = false
+}
 
 // Renaming
 const editing = ref<string | null>(null)
@@ -61,15 +76,15 @@ async function load() {
 }
 
 async function create() {
+  if (!name.value.trim()) return
   creating.value = true
-  error.value = ''
+  dialogError.value = ''
   try {
     const { key, token } = await api.post<any>('/v1/api-keys', { name: name.value.trim(), role: role.value })
     revealed.value = { name: key.name, token }
-    name.value = ''
     await load()
   } catch (e: any) {
-    error.value = e.message
+    dialogError.value = e.message
   } finally {
     creating.value = false
   }
@@ -123,6 +138,7 @@ async function regenerateRoot() {
     const { token } = await api.post<any>('/v1/api-keys/root/regenerate')
     setToken(token) // Otherwise this browser's next call would be rejected
     revealed.value = { name: 'Root', token }
+    dialogOpen.value = true
   } catch (e: any) {
     error.value = e.message
   } finally {
@@ -132,7 +148,7 @@ async function regenerateRoot() {
 
 async function copy() {
   if (!revealed.value || !(await copyText(revealed.value.token))) {
-    error.value = 'Copying to the clipboard failed. Select the key and copy it by hand.'
+    dialogError.value = 'Copying to the clipboard failed. Select the key and copy it by hand.'
     return
   }
   copied.value = true
@@ -144,46 +160,67 @@ onMounted(load)
 
 <template>
   <div class="space-y-5 max-w-3xl">
-    <div>
-      <h1 class="text-2xl font-semibold">API Keys</h1>
-      <p class="text-sm text-muted mt-1">
-        Who may use this server. Admins see and change everything; Clients retrieve and
-        search, without access to Settings, Secrets, Logs or these keys.
-        <template v-if="me?.role === 'admin'">As an Admin, you manage the Client keys.</template>
-      </p>
+    <div class="flex items-start justify-between gap-4">
+      <div>
+        <h1 class="text-2xl font-semibold">API Keys</h1>
+        <p class="text-sm text-muted mt-1">
+          Who may use this server. Admins see and change everything; Clients retrieve and
+          search, without access to Settings, Secrets, Logs or these keys.
+          <template v-if="me?.role === 'admin'">As an Admin, you manage the Client keys.</template>
+        </p>
+      </div>
+      <UButton
+        v-if="roles.length" icon="i-fa7-solid-plus" label="New key" class="shrink-0"
+        @click="openDialog"
+      />
     </div>
 
     <UAlert v-if="error" color="error" variant="subtle" :description="error" />
 
-    <!-- The new key, once: the server keeps only its hash -->
-    <UAlert
-      v-if="revealed" color="success" variant="subtle" icon="i-fa7-solid-key"
-      :title="`The key for ${revealed.name}`"
-      close @update:open="revealed = null"
+    <!-- Creating a key: its name and role, then the key itself, once. Closing the dialog
+         is what puts the key out of sight for good. -->
+    <UModal
+      v-model:open="dialogOpen"
+      :title="revealed ? `The key for ${revealed.name}` : 'New API key'"
+      :description="revealed ? 'Copy it now: it cannot be shown again.' : 'Name it after who or what uses it.'"
+      @after:leave="resetDialog"
     >
-      <template #description>
-        <p class="mb-2">Copy it now: it cannot be shown again.</p>
-        <div class="flex items-center gap-2">
-          <UInput :model-value="revealed.token" readonly class="flex-1 font-mono" @focus="($event.target as HTMLInputElement).select()" />
-          <UButton
-            :icon="copied ? 'i-fa7-solid-check' : 'i-fa7-regular-copy'"
-            color="neutral" variant="subtle" :label="copied ? 'Copied' : 'Copy'" @click="copy"
-          />
+      <template #body>
+        <div class="space-y-4">
+          <div v-if="revealed" class="flex items-center gap-2">
+            <UInput
+              :model-value="revealed.token" readonly class="flex-1 font-mono"
+              @focus="($event.target as HTMLInputElement).select()"
+            />
+            <UButton
+              :icon="copied ? 'i-fa7-solid-check' : 'i-fa7-regular-copy'"
+              color="neutral" variant="subtle" :label="copied ? 'Copied' : 'Copy'" @click="copy"
+            />
+          </div>
+          <form v-else id="new-key" class="space-y-4" @submit.prevent="create">
+            <UFormField label="Name">
+              <UInput v-model="name" placeholder="e.g. Fact-checking pipeline" :maxlength="64" class="w-full" autofocus />
+            </UFormField>
+            <UFormField label="Role" :description="ROLE_HINTS[role]">
+              <USelect v-model="role" :items="roles" class="w-40" />
+            </UFormField>
+          </form>
+          <UAlert v-if="dialogError" color="error" variant="subtle" :description="dialogError" />
         </div>
       </template>
-    </UAlert>
-
-    <UCard v-if="roles.length">
-      <form class="flex flex-wrap items-end gap-2" @submit.prevent="create">
-        <UFormField label="New key" class="flex-1 min-w-48" description="Name it after who or what uses it.">
-          <UInput v-model="name" placeholder="e.g. Fact-checking pipeline" :maxlength="64" class="w-full" />
-        </UFormField>
-        <UFormField label="Role">
-          <USelect v-model="role" :items="roles" class="w-32" />
-        </UFormField>
-        <UButton type="submit" icon="i-fa7-solid-plus" label="Create" :loading="creating" :disabled="!name.trim()" />
-      </form>
-    </UCard>
+      <template #footer="{ close }">
+        <div class="flex justify-end gap-2 w-full">
+          <UButton v-if="revealed" label="Done" @click="close" />
+          <template v-else>
+            <UButton color="neutral" variant="ghost" label="Cancel" @click="close" />
+            <UButton
+              type="submit" form="new-key" icon="i-fa7-solid-plus" label="Create"
+              :loading="creating" :disabled="!name.trim()"
+            />
+          </template>
+        </div>
+      </template>
+    </UModal>
 
     <div v-if="loading" class="space-y-1.5">
       <div v-for="n in 3" :key="n" class="surface-card rounded-lg px-3 py-3">
@@ -206,10 +243,14 @@ onMounted(load)
               <UButton size="xs" color="neutral" variant="ghost" label="Cancel" @click="editing = null" />
             </form>
             <template v-else>
-              <p class="text-sm truncate">
-                <span class="font-medium">{{ key.name }}</span>
-                <span v-if="key.id === me?.id" class="text-xs text-dimmed"> · this browser</span>
-              </p>
+              <div class="flex items-center gap-2 min-w-0">
+                <span class="text-sm font-medium truncate">{{ key.name }}</span>
+                <UBadge
+                  :color="ROLE_COLORS[key.role as Role]" variant="subtle" size="sm" class="shrink-0"
+                  :label="ROLE_LABELS[key.role as Role]" :title="ROLE_HINTS[key.role as Role]"
+                />
+                <span v-if="key.id === me?.id" class="text-xs text-dimmed shrink-0">this browser</span>
+              </div>
               <p class="text-xs text-dimmed truncate">
                 <template v-if="key.role === 'root'">
                   {{ key.from_environment ? 'Set by SCRAPEMM_API_KEY in the .env' : 'Generated by the server' }}
@@ -225,11 +266,6 @@ onMounted(load)
               </p>
             </template>
           </div>
-
-          <UBadge
-            :color="ROLE_COLORS[key.role as Role]" variant="subtle" size="sm"
-            :label="ROLE_LABELS[key.role as Role]" :title="ROLE_HINTS[key.role as Role]"
-          />
 
           <!-- Actions on hover, as on the Secrets rows -->
           <div
