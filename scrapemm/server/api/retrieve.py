@@ -61,6 +61,7 @@ class RetrieveRequest(BaseModel):
     prioritize: Literal["completeness", "speed"] = "completeness"
     use_cache: bool = True
     hedging_delay: Optional[float] = None
+    strip: bool = False
 
 
 @router.post("/retrieve")
@@ -102,6 +103,7 @@ async def _stream(request: RetrieveRequest) -> AsyncIterator[bytes]:
                     prioritize=request.prioritize,
                     use_cache=request.use_cache,
                     hedging_delay=request.hedging_delay,
+                    strip=request.strip,
                 )): url for url in urls
             }
             pending = set(tasks)
@@ -175,6 +177,7 @@ def _to_payload(response) -> ResponsePayload:
             markdown=response.content.markdown,
             multimodal=str(multimodal) if multimodal is not None else None,
             items=registry.describe_sequence(multimodal) if multimodal is not None else [],
+            stripped=response.content.stripped,
         )
     return ResponsePayload(
         url=response.url,

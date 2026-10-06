@@ -72,6 +72,7 @@ class ContentPayload:
     markdown: Optional[str] = None
     multimodal: Optional[str] = None  # Rendered sequence, media by reference
     items: list[ItemDescriptor] = field(default_factory=list)
+    stripped: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +80,7 @@ class ContentPayload:
             "markdown": self.markdown,
             "multimodal": self.multimodal,
             "items": [item.to_dict() for item in self.items],
+            "stripped": self.stripped,
         }
 
     @classmethod
@@ -88,6 +90,7 @@ class ContentPayload:
             markdown=data.get("markdown"),
             multimodal=data.get("multimodal"),
             items=[ItemDescriptor.from_dict(d) for d in data.get("items") or []],
+            stripped=bool(data.get("stripped")),
         )
 
 
@@ -137,6 +140,7 @@ class ResponsePayload:
                 html=self.content.html,
                 markdown=self.content.markdown,
                 multimodal=multimodal,
+                stripped=self.content.stripped,
             )
             if not content:
                 content = None

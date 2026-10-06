@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import suppress
+from dataclasses import replace
 import base64
 import binascii
 import inspect
@@ -12,7 +13,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Awaitable, Callable, Iterable, Union, TYPE_CHECKING
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse, urlsplit
 
 import aiohttp
 import tqdm
@@ -153,6 +154,58 @@ def preprocess_html(html: str) -> str:
             except (binascii.Error, UnicodeDecodeError):
                 continue
     return html
+
+
+# Elements that hold page chrome rather than content. This is Firecrawl's list for its
+# `onlyMainContent` option.
+UI_SELECTORS = ", ".join((
+    "header", "footer", "nav", "aside", ".header", ".top", ".navbar", "#header",
+    ".footer", ".bottom", "#footer", ".sidebar", ".side", ".aside", "#sidebar",
+    ".modal", ".popup", "#modal", ".overlay", ".ad", ".ads", ".advert", "#ad",
+    ".lang-selector", ".language", "#language-selector", ".social", ".social-media",
+    ".social-links", "#social", ".menu", ".navigation", "#nav", ".breadcrumbs",
+    "#breadcrumbs", ".share", "#share", ".widget", "#widget", ".cookie", "#cookie"))
+# The page's main content, which is never removed along with the chrome around it.
+# Not <article>: related-article sidebars are full of <article> teaser cards.
+MAIN_CONTENT_SELECTORS = "#main, main, [role=main]"
+
+
+def remove_ui_elements(html: str) -> str:
+    """Strips navigation, headers, footers, sidebars, banners and the like from the
+    HTML, keeping the page's content. Returns the HTML unchanged if nothing is left.
+    The result is re-serialized by BeautifulSoup (entities decoded, void tags closed),
+    not the page's bytes as scraped."""
+    return _remove_ui_elements(html)[0]
+
+
+def _remove_ui_elements(html: str) -> tuple[str, list[str]]:
+    """`remove_ui_elements()`, along with the media URIs (as found, not resolved) of the
+    elements removed."""
+    soup = BeautifulSoup(html, "html.parser")
+    has_body = soup.body is not None
+    # The main content and everything wrapping it, never removed as chrome
+    keep = {id(node) for main in soup.select(MAIN_CONTENT_SELECTORS)
+            for node in (main, *main.parents)}
+    removed_media: list[str] = []
+    removed_any = False
+    for element in soup.select(UI_SELECTORS):
+        if element.decomposed:
+            continue  # Gone with an ancestor already
+        if id(element) in keep:
+            continue  # Is or wraps the main content
+        if element.name == "header" and element.find_parent("article"):
+            continue  # An article's own header: its headline and byline
+        removed_media += [str(m["src"]) for m in _extract_media_elements(element) if m.get("src")]
+        element.decompose()
+        removed_any = True
+    if not removed_any:
+        return html, []  # As is, rather than re-serialized: tells the caller there is nothing to redo
+    # The body's content only: the <title> is none. Media count as content, as they
+    # do for `engine._is_empty()`: a photo page's text may all sit in the chrome
+    body = soup.body if has_body else soup
+    if body is None or not (body.get_text(strip=True) or body.find(["img", "video", "iframe"])):
+        return html, []  # The heuristic misfired (e.g. <body class="side">)
+    return str(soup), removed_media
 
 
 def postprocess_markdown(text: str) -> str:
@@ -493,6 +546,7 @@ async def resolve_media(
         media: Optional[BrowserMedia] = None,
         max_video_size: Optional[int] = None,
         on_browser_done: Optional[Callable[[], Awaitable]] = None,
+        known_media: Optional["KnownMedia"] = None,
         **kwargs
 ) -> MultimodalSequence:
     """Downloads all media that are contained in the provided HTML.
@@ -503,7 +557,10 @@ async def resolve_media(
     from and `media` the page's `BrowserMedia`: media are then taken from the browser,
     see there. `on_browser_done` is awaited as soon as the only downloads left are
     those that need no page (embedded players, via yt-dlp), so the caller can close the
-    page meanwhile. Awaited only if there are media at all."""
+    page meanwhile. Awaited only if there are media at all.
+
+    With `known_media`, nothing is downloaded or decoded: the media are taken from there,
+    and those not found there are left out (see `strip_content()`)."""
     if source_element is not None and media is None:
         page = source_element if isinstance(source_element, Page) else source_element.page
         media = BrowserMedia(page)  # Sees no past responses, but still fetches via the browser
@@ -532,9 +589,13 @@ async def resolve_media(
     media_uris: list[Optional[str]] = [str(element.get("src")) if element.get("src") else None
                                        for element in media_elements]
 
-    # 2. Resolve base64 media
-    resolved_media: list[Optional[Item]] = await _in_html_thread(
-        _resolve_base64_media, list(zip(media_elements, media_uris)), source_url=url)
+    # 2. Resolve base64 media. Not when rebuilding from media resolved before: decoded
+    # again, they would be registered anew (see `strip_content()`)
+    if known_media is None:
+        resolved_media: list[Optional[Item]] = await _in_html_thread(
+            _resolve_base64_media, list(zip(media_elements, media_uris)), source_url=url)
+    else:
+        resolved_media = [None] * len(media_elements)
 
     # 3. Normalize URLs and prepare tasks for remaining elements
     tasks = []
@@ -551,6 +612,8 @@ async def resolve_media(
 
     # Create retrieval tasks for URL elements
     for element, uri in zip(media_elements, media_uris):
+        if known_media is not None:
+            break  # Nothing to retrieve
         stashed = bool(uri) and uri.startswith(BLOB_SCHEME)
         if uri and (is_url(uri) or stashed and media) and uri not in unique_urls:
             # The URL the browser rendered the medium from, if it differs
@@ -623,6 +686,8 @@ async def resolve_media(
                 task.close()
 
     # 5. Add downloaded media to resolved_media
+    if known_media is not None:
+        url_to_medium = known_media
     for i, uri in enumerate(media_uris):
         if medium := url_to_medium.get(uri):
             resolved_media[i] = medium
@@ -741,6 +806,62 @@ async def to_scraped_content(
     # After the media: a browser page is closed by then (see `resolve_media()`)
     content.markdown = await _in_html_thread(html2md, html)
     return content
+
+
+class KnownMedia:
+    """Media resolved before, by the URL they were retrieved from. Matches by path too:
+    the page's relative references may have resolved against a different document URL
+    (e.g. after a redirect) than they do now."""
+
+    def __init__(self, items: list[Item]):
+        self.by_url: dict[str, Item] = {}
+        self.by_path: dict[str, Item] = {}
+        for item in items:
+            if source := getattr(item, "source_url", None):
+                self.by_url.setdefault(source, item)
+                self.by_path.setdefault(_path_of(source), item)
+
+    def get(self, uri: Optional[str]) -> Optional[Item]:
+        if not uri:
+            return None
+        return self.by_url.get(uri) or self.by_path.get(_path_of(uri))
+
+
+def _path_of(url: str) -> str:
+    parts = urlsplit(url)
+    return f"{parts.path}?{parts.query}" if parts.query else parts.path
+
+
+async def strip_content(content: "ScrapedContent", url: Optional[str] = None) -> "ScrapedContent":
+    """The content without the page's UI elements (see `remove_ui_elements()`), in the
+    formats given. The content passed, as cached, stays untouched. Nothing is fetched:
+    the media are those of the content's multimodal sequence. Content without HTML, as
+    from API integrations, has no UI to strip and is returned as is.
+
+    The multimodal sequence is rebuilt from the stripped HTML, its media put in place by
+    the URL they were retrieved from. A medium is left out only if it was found in a
+    removed element. Those that cannot be placed -- base64-encoded ones, those the browser
+    held as Blobs, videos collected from the page beyond its HTML -- are kept, after the
+    text."""
+    if content.stripped or content.html is None:
+        return content
+    html, removed_uris = await _in_html_thread(_remove_ui_elements, content.html)
+    if html is content.html:  # Nothing recognizable to strip
+        return replace(content, stripped=True)
+    stripped = replace(content, html=html, stripped=True)
+    if content.multimodal is not None:
+        items = list({e.reference: e for e in content.multimodal if not isinstance(e, str)}.values())
+        known = KnownMedia(items)
+        sequence = await to_multimodal_sequence(html, session=None, url=url, known_media=known)
+        domain_root = get_domain_root(url) if url else None
+        removed = {m.reference for uri in removed_uris
+                   if (m := known.get(_resolve_media_url(uri, page_url=url, domain_root=domain_root)))}
+        accounted = removed | {e.reference for e in sequence if not isinstance(e, str)}
+        unplaced = [i for i in items if i.reference not in accounted]
+        stripped.multimodal = MultimodalSequence([*sequence, *unplaced]) if unplaced else sequence
+    if content.markdown is not None:
+        stripped.markdown = await _in_html_thread(html2md, html)
+    return stripped
 
 
 async def to_multimodal_sequence(

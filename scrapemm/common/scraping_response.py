@@ -15,6 +15,7 @@ class ScrapedContent:
     html: Optional[str] = None  # The raw HTML code of the scraped page
     markdown: Optional[str] = None  # The scraped text in Markdown format. Media is referenced by hyperlink.
     multimodal: Optional[MultimodalSequence] = None  # The scraped text with the media downloaded and embedded
+    stripped: bool = False  # Whether UI elements (navigation, footers, banners, etc.) were removed from all formats
 
     def __bool__(self) -> bool:
         """True iff any content is available."""

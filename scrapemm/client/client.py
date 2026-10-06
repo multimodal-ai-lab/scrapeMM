@@ -43,6 +43,7 @@ async def retrieve(  # type: ignore[overload-overlap]  # str is a Collection[str
         prioritize: Literal["completeness", "speed"] = "completeness",
         use_cache: bool = True,
         hedging_delay: float | None = None,
+        strip: bool = False,
         config: Optional[Settings] = None,
 ) -> ScrapingResponse: ...
 
@@ -59,6 +60,7 @@ async def retrieve(
         prioritize: Literal["completeness", "speed"] = "completeness",
         use_cache: bool = True,
         hedging_delay: float | None = None,
+        strip: bool = False,
         config: Optional[Settings] = None,
 ) -> list[ScrapingResponse]: ...
 
@@ -74,6 +76,7 @@ async def retrieve(
         prioritize: Literal["completeness", "speed"] = "completeness",
         use_cache: bool = True,
         hedging_delay: float | None = None,
+        strip: bool = False,
         config: Optional[Settings] = None,
 ) -> ScrapingResponse | list[ScrapingResponse]:
     """Retrieves the contents present at the given URL(s) through a scrapeMM server.
@@ -109,6 +112,9 @@ async def retrieve(
         instead of scraping it again.
     :param hedging_delay: Seconds of head start each retrieval method gets before the
         next one is launched alongside it. None uses the server's configured default.
+    :param strip: Whether to remove the page's UI elements (navigation, headers, footers,
+        sidebars, cookie banners, etc.) from every output format, the HTML included,
+        keeping only the main content. See `ScrapedContent.stripped`.
     :param config: Connection settings to use instead of the global ones.
     """
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
@@ -137,6 +143,7 @@ async def retrieve(
         "prioritize": prioritize,
         "use_cache": use_cache,
         "hedging_delay": hedging_delay,
+        "strip": strip,
     }
 
     by_url: dict[str, ScrapingResponse] = {}

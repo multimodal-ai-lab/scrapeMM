@@ -39,7 +39,7 @@ from scrapemm.server.integrations.firecrawl.firecrawl import configured_firecraw
 from scrapemm.server.toggles import is_enabled
 from scrapemm.server.workers import run_light
 from scrapemm.server.util import (run_with_semaphore, get_domain, normalize_video, preprocess_url,
-                                  to_scraped_content)
+                                  strip_content, to_scraped_content)
 
 logger = logging.getLogger("scrapeMM")
 
@@ -64,7 +64,8 @@ async def retrieve(
         max_video_size: int | None = None,
         prioritize: Literal["completeness", "speed"] = "completeness",
         use_cache: bool = True,
-        hedging_delay: float | None = None
+        hedging_delay: float | None = None,
+        strip: bool = False
 ) -> ScrapingResponse | list[ScrapingResponse]:
     """Main function of this repository. Downloads the contents present at the given URL(s).
     For each URL, returns a ScrapingResponse containing the retrieved content, error, and method.
@@ -110,6 +111,11 @@ async def retrieve(
         work (and, for paid methods, duplicated requests), hence disabled by default.
         Pass a number to enable it for this call, or set it process-wide via
         `update_config(hedging_delay=5)`. None or 0 runs the methods one after another.
+    :param strip: If True, the page's UI elements (navigation, headers, footers,
+        sidebars, cookie banners, etc.) are removed from every output format, the HTML
+        included, keeping only the main content. Done by scrapeMM alike for every method,
+        on the retrieved page as cached: stripped and unstripped requests share the cache.
+        See `ScrapedContent.stripped`.
     """
     # Ensure URLs are string or list
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
@@ -161,6 +167,8 @@ async def retrieve(
                  urls_unique]
         results = await run_with_semaphore(tasks, limit=40, show_progress=show_progress and len(urls_unique) > 1,
                                            progress_description="Retrieving URLs...")
+        if strip:
+            results = [await _strip(response) for response in results]
         _release_media_memory()
 
         # Reconstruct output list
@@ -200,6 +208,7 @@ async def retrieve_one(
         prioritize: Literal["completeness", "speed"] = "completeness",
         use_cache: bool = True,
         hedging_delay: float | None = None,
+        strip: bool = False,
 ) -> ScrapingResponse:
     """Retrieves a single URL, subject to the server's concurrency limit. This is what
     the API streams over: it needs results one at a time, as they finish, rather than
@@ -211,7 +220,8 @@ async def retrieve_one(
 
     # Identical requests in flight at the same time -- from concurrent jobs, typically --
     # share one retrieval instead of each scraping the same page. The cache only helps
-    # once the first of them has finished.
+    # once the first of them has finished. Stripping is not part of the key: it is done
+    # per caller, on the shared result.
     key = (preprocess_url(url), output_format, json.dumps(methods, default=str),
            json.dumps(actions, sort_keys=True, default=str), max_video_size, prioritize,
            use_cache, hedging_delay)
@@ -241,9 +251,19 @@ async def retrieve_one(
     if joined and response.success:
         # Answered without a scrape of its own, which is what a cache hit means
         response = replace(response, from_cache=True)
+    if strip:
+        response = await _strip(response)
     # Report under the URL as requested, not as preprocessed (e.g. percent-decoded):
     # the client maps results back onto its request by URL
     return replace(response, url=url)
+
+
+async def _strip(response: ScrapingResponse) -> ScrapingResponse:
+    """The response with its content stripped of UI elements. Never alters the given
+    response's content, which may be the one held in the cache."""
+    if response.content is None:
+        return response
+    return replace(response, content=await strip_content(response.content, url=response.url))
 
 
 @dataclass
