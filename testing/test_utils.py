@@ -60,3 +60,23 @@ async def do_unshorten(short_url):
 async def test_unshorten(short_url: str, long_url: str):
     extended = await do_unshorten(short_url)
     assert extended == long_url
+
+
+CHART_SVG = (b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="800" height="400">'
+             b'<rect width="800" height="400" fill="#1F5A63"/></svg>')
+ICON_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" stroke-width="900"/>'
+HUGE_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40000 20000"/>'
+
+
+def test_svg_charts_are_rasterized():
+    from scrapemm.server.download.images import image_from_binary, image_size
+    assert image_size(image_from_binary(CHART_SVG, "https://example.com/chart.svg")) == (800, 400)
+    # Icons are not even rendered; a huge canvas is rendered at the limit straight away
+    assert image_from_binary(ICON_SVG, "https://example.com/icon.svg") is None
+    assert image_size(image_from_binary(HUGE_SVG, "https://example.com/huge.svg")) == (2048, 1024)
+
+
+def test_svg_img_extracted_unless_shown_small():
+    soup = BeautifulSoup('<img src="/chart.svg"><img src="/logo.svg" width="120">'
+                         '<img src="/figure.eps">', "html.parser")
+    assert [e["src"] for e in _extract_media_elements(soup)] == ["/chart.svg"]

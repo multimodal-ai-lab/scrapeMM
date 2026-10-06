@@ -330,6 +330,16 @@ def _is_placeholder_src(src: str) -> bool:
     return any(hint in lowered for hint in _PLACEHOLDER_HINTS)
 
 
+def _shown_small(element: Tag) -> bool:
+    """Whether the page sizes the image as an icon: a width or height attribute of at
+    most 256 pixels (the size below which images are dropped anyway)."""
+    for attribute in ("width", "height"):
+        value = str(element.get(attribute) or "").strip().removesuffix("px")
+        if value.isdigit() and int(value) <= 256:
+            return True
+    return False
+
+
 def _best_image_src(element: Tag) -> Optional[str]:
     """Returns the best available source URL of an <img>.
 
@@ -445,8 +455,10 @@ def _extract_media_elements(soup: BeautifulSoup) -> list[Tag]:
             _add(element)
             continue
         src = _best_image_src(element)
-        # Skip vector graphics
-        if src and looks_like_vector_file_url(src):
+        # Vector graphics: SVGs are rasterized (charts, diagrams), unless the page shows
+        # them small, as it does icons and logos; nothing else is
+        if src and looks_like_vector_file_url(src) and (
+                not urlparse(src).path.lower().endswith(".svg") or _shown_small(element)):
             continue
         if src:
             # Wire the resolved URI through the existing src-based resolve_media path

@@ -792,5 +792,12 @@
   "expected": {},
   "category": "Open web",
   "expect": "unavailable"
+ },
+ {
+  "url": "https://www.dcceew.gov.au/energy/security/australias-fuel-security/minimum-stockholding-obligation/statistics",
+  "expected": {
+   "image": 1
+  },
+  "category": "Open web"
  }
 ]
