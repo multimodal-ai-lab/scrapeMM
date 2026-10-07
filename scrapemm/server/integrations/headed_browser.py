@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import atexit
 import json
 import logging
@@ -70,6 +71,8 @@ def _browser_args() -> list[str]:
         "--disable-infobars",
         "--no-first-run",
         "--no-default-browser-check",
+        # The HTTP cache, bounded: archive replays and media pages fill it fast
+        f"--disk-cache-size={DISK_CACHE_BYTES}",
         *_fill_screen_args(),
     ]
 
@@ -191,6 +194,179 @@ def _forget_open_tabs(path: Path) -> None:
     import shutil
     with suppress(OSError):
         shutil.rmtree(path / "Default" / "Sessions")
+
+
+# --- Bounded storage of archive replays --------------------------------------------------
+# ReplayWeb.page (Perma.cc's rejouer.perma.cc, Ghostarchive) keeps every archive it
+# replays in its origin's IndexedDB and never lets go of it: on the production server,
+# rejouer.perma.cc's had grown to 50 GB of a 52 GB profile. A replay fetches its archive
+# again when the store is gone, and the scrapeMM cache keeps finished results for good,
+# so emptying it costs one slower first retrieval per capture.
+DISK_CACHE_BYTES = 1024 ** 3
+REPLAY_ORIGINS = ("https://rejouer.perma.cc", "https://ghostarchive.org", "https://replayweb.page")
+# An origin storing more than this in IndexedDB is emptied too, replay or not
+ORIGIN_STORAGE_CAP = 2 * 1024 ** 3
+# How often the running browser's replay storage is looked at, see `_watch_replay_storage()`
+STORAGE_CHECK_INTERVAL = 45 * 60
+# The pages through which each replay origin is used (its frames sit inside them)
+_REPLAY_PAGE_HOSTS = {"https://rejouer.perma.cc": ("perma.cc", "rejouer.perma.cc"),
+                      "https://ghostarchive.org": ("ghostarchive.org",),
+                      "https://replayweb.page": ("replayweb.page",)}
+
+
+def _indexeddb_entries(profile: Path, origin: str) -> list[Path]:
+    """The exact IndexedDB paths of an origin in a profile: Chromium names them after
+    the origin ("https_rejouer.perma.cc_0", with ".indexeddb.leveldb" and
+    ".indexeddb.blob" in older layouts)."""
+    scheme, host = origin.split("://", 1)
+    base = profile / "Default" / "IndexedDB" / f"{scheme}_{host}_0"
+    return [base, base.with_name(base.name + ".indexeddb.leveldb"),
+            base.with_name(base.name + ".indexeddb.blob")]
+
+
+def _size(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            with suppress(OSError):
+                total += os.path.getsize(os.path.join(root, name))
+    return total
+
+
+def _gb(size: int) -> str:
+    return f"{size / 1024 ** 3:.1f} GB" if size >= 1024 ** 3 else f"{size / 1024 ** 2:.0f} MB"
+
+
+def _forget_replay_storage(profile: Path) -> None:
+    """Deletes, before the browser opens the profile, the IndexedDB of the replay origins
+    and of any origin above `ORIGIN_STORAGE_CAP`. Exactly those directories: cookies,
+    logins and every other origin's storage stay."""
+    import shutil
+    directory = profile / "Default" / "IndexedDB"
+    if not directory.is_dir():
+        return
+    doomed = [entry for origin in REPLAY_ORIGINS for entry in _indexeddb_entries(profile, origin)
+              if entry.exists()]
+    with suppress(OSError):
+        for entry in directory.iterdir():
+            if entry not in doomed and entry.is_dir() and _size(entry) > ORIGIN_STORAGE_CAP:
+                doomed.append(entry)
+    freed = 0
+    for entry in doomed:
+        size = _size(entry)
+        try:
+            shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
+            freed += size
+        except OSError:
+            logger.warning(f"Could not delete the browser storage {entry}.", exc_info=True)
+    if freed:
+        logger.info(f"Freed {_gb(freed)} of archive replay storage in the "
+                    f"browser profile ({', '.join(e.name for e in doomed)}).")
+
+
+async def _clear_origin_storage(browser: Browser, origin: str) -> None:
+    """Empties an origin's IndexedDB, CacheStorage and service workers in the running
+    browser (CDP Storage.clearDataForOrigin), so it never finds files deleted under it.
+    The browser target has no storage partition to clear (it answers "Internal error"),
+    so the call goes through a blank tab opened for it."""
+    port = urlparse(browser.get_endpoint_url()).port
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"http://127.0.0.1:{port}/json/version",
+                               timeout=aiohttp.ClientTimeout(total=5)) as response:
+            ws_url = (await response.json(content_type=None))["webSocketDebuggerUrl"]
+        async with session.ws_connect(ws_url, max_msg_size=0) as ws:
+            ids = iter(range(1, 1000))
+
+            async def call(method: str, params: dict, session_id: str = None) -> dict:
+                message_id = next(ids)
+                await ws.send_json({"id": message_id, "method": method, "params": params,
+                                    **({"sessionId": session_id} if session_id else {})})
+                async for message in ws:
+                    data = message.json()
+                    if data.get("id") == message_id:
+                        if "error" in data:
+                            raise RuntimeError(f"{method}: {data['error'].get('message')}")
+                        return data.get("result", {})
+                raise ConnectionError("The browser closed the DevTools connection.")
+
+            async with asyncio.timeout(60):
+                target = (await call("Target.createTarget",
+                                     {"url": "about:blank", "background": True}))["targetId"]
+                try:
+                    attached = await call("Target.attachToTarget",
+                                          {"targetId": target, "flatten": True})
+                    await call("Storage.clearDataForOrigin", {
+                        "origin": origin,
+                        "storageTypes": "indexeddb,cache_storage,service_workers",
+                    }, attached["sessionId"])
+                finally:
+                    with suppress(Exception):
+                        await call("Target.closeTarget", {"targetId": target})
+
+
+async def _origin_in_use(browser: Browser, origin: str) -> bool:
+    """Whether a tab shows a page through which the origin is used (a replay running)."""
+    port = urlparse(browser.get_endpoint_url()).port
+    hosts = _REPLAY_PAGE_HOSTS.get(origin, (urlparse(origin).hostname,))
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"http://127.0.0.1:{port}/json/list",
+                               timeout=aiohttp.ClientTimeout(total=5)) as response:
+            targets = await response.json(content_type=None)
+    # Pages only: the origin's service worker is a target of its own, and stays listed
+    # long after the last replay closed
+    return any(t.get("type") == "page"
+               and (urlparse(t.get("url", "")).hostname or "").removeprefix("www.") in hosts
+               for t in targets)
+
+
+async def _watch_replay_storage() -> None:
+    """While the server runs: every `STORAGE_CHECK_INTERVAL`, empties the storage of each
+    replay origin above `ORIGIN_STORAGE_CAP`, once no tab uses it."""
+    while True:
+        await asyncio.sleep(STORAGE_CHECK_INTERVAL)
+        with suppress(Exception):
+            await check_replay_storage()
+
+
+async def check_replay_storage() -> dict[str, int]:
+    """One round of `_watch_replay_storage()`. Returns the bytes freed per origin."""
+    browser, profile = HeadedBrowser._browser, _resolve_profile_dir()
+    freed: dict[str, int] = {}
+    if browser is None or browser.stopped or not profile:
+        return freed
+    for origin in REPLAY_ORIGINS:
+        entries = _indexeddb_entries(Path(profile), origin)
+        size = sum(await asyncio.gather(*(asyncio.to_thread(_size, e) for e in entries
+                                          if e.exists())))
+        if size <= ORIGIN_STORAGE_CAP:
+            continue
+        try:
+            if await _origin_in_use(browser, origin):
+                logger.info(f"{origin} stores {_gb(size)} in the browser; a "
+                            f"replay is open, so it is emptied at the next check.")
+                continue
+            await _clear_origin_storage(browser, origin)
+        except Exception as e:
+            logger.warning(f"Could not empty the browser storage of {origin}: "
+                           f"{type(e).__name__}: {e}")
+            continue
+        after = sum(await asyncio.gather(*(asyncio.to_thread(_size, e) for e in entries
+                                           if e.exists())))
+        freed[origin] = size - after
+        logger.info(f"Emptied the browser storage of {origin}: {_gb(size)}, "
+                    f"{_gb(size - after)} freed.")
+    return freed
+
+
+_storage_watch: Optional[asyncio.Task] = None
+
+
+def _start_storage_watch() -> None:
+    global _storage_watch
+    if _storage_watch is None or _storage_watch.done():
+        _storage_watch = asyncio.ensure_future(_watch_replay_storage())
 
 
 def _process_alive(pid: int) -> bool:
@@ -675,6 +851,55 @@ DOCUMENT_SETTLE = 5
 DOWNLOAD_AFTER_RESPONSE_WAIT = 15
 
 
+async def _fetch_in_browser(page: Page, url: str) -> tuple[Optional[bytes], Optional[str], str]:
+    """`url` fetched through the browser's network stack (Network.loadNetworkResource),
+    from a frame on its site, see `HeadedBrowser._document_bytes()`. Returns (bytes or
+    None, content type, what happened)."""
+    site = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+    try:
+        if not page.url.startswith(site + "/"):
+            with suppress(PlaywrightError):
+                await page.goto(site + "/", wait_until="domcontentloaded",
+                                timeout=DOCUMENT_WAIT * 1000)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + DOCUMENT_WAIT
+            while await _shows_bot_check(page) and loop.time() < deadline:
+                await asyncio.sleep(1)  # Its check passes by the same JavaScript
+        session = await page.context.new_cdp_session(page)
+    except Exception as e:
+        return None, None, f"{type(e).__name__}: {str(e).splitlines()[0][:100]}"
+    stream = None
+    try:
+        frame_id = (await session.send("Page.getFrameTree"))["frameTree"]["frame"]["id"]
+        resource = (await asyncio.wait_for(session.send("Network.loadNetworkResource", {
+            "frameId": frame_id, "url": url,
+            "options": {"disableCache": False, "includeCredentials": True}}),
+            timeout=DOCUMENT_WAIT))["resource"]
+        stream = resource.get("stream")
+        if not resource.get("success") or not stream:
+            reason = f"HTTP {resource.get('httpStatusCode')} {resource.get('netErrorName', '')}"
+            return None, None, reason.strip()
+        headers = {k.lower(): v for k, v in (resource.get("headers") or {}).items()}
+        chunks = []
+        while True:
+            chunk = await asyncio.wait_for(
+                session.send("IO.read", {"handle": stream, "size": 1 << 20}), timeout=60)
+            piece = chunk.get("data", "")
+            chunks.append(base64.b64decode(piece) if chunk.get("base64Encoded")
+                          else piece.encode("latin-1"))
+            if chunk.get("eof"):
+                break
+        return b"".join(chunks), headers.get("content-type"), "read"
+    except Exception as e:
+        return None, None, f"{type(e).__name__}: {str(e).splitlines()[0][:100]}"
+    finally:
+        if stream:
+            with suppress(Exception):
+                await session.send("IO.close", {"handle": stream})
+        with suppress(Exception):
+            await session.detach()
+
+
 class _BotCheckAgain(RetrievalFailed):
     """A document, asked for again outside the page, was answered with its bot check."""
 
@@ -994,6 +1219,7 @@ class HeadedBrowser(RetrievalIntegration):
                     self._cleanup_resources()
                 await self._start_browser_locked(playwright)
                 HeadedBrowser._generation += 1
+                _start_storage_watch()
             return HeadedBrowser._browser, HeadedBrowser._generation
 
     async def _start_browser_locked(self, playwright: Optional[Playwright] = None):
@@ -1024,6 +1250,7 @@ class HeadedBrowser(RetrievalIntegration):
         persistent = _resolve_profile_dir()
         if persistent:
             _forget_open_tabs(Path(persistent))
+            _forget_replay_storage(Path(persistent))
         attempts = [persistent, persistent, None] if persistent else [None, None]
         for i, profile in enumerate(attempts):
             existing = _chromium_pids()
@@ -1471,6 +1698,12 @@ class HeadedBrowser(RetrievalIntegration):
           the connection that saw the download is replaced, which under load happened
           before the file was read;
         * what the viewer was served, whole unless the viewer cut it short to load ranges;
+        * the file fetched by the browser's own network stack, from a frame on the file's
+          site: the page itself if it shows the site, else the site's home page, loaded
+          for it (from about:blank, where a download leaves the page, the site's cookies
+          are not sent). The browser's TLS fingerprint and its clearance get through where
+          Playwright's request context meets the check again (insse.ro: HTTP 503 every
+          time, while the browser got the file);
         * the file asked for again with the browser's cookies and user agent.
 
         Under load, any of them turned out to hold the bot check's page instead of the
@@ -1510,7 +1743,12 @@ class HeadedBrowser(RetrievalIntegration):
                                                                       "the viewer"):
                     return data, content_type
             except Exception as e:
-                failures.append(f"the viewer: {type(e).__name__}")
+                failures.append(f"the viewer: {type(e).__name__}: {str(e).splitlines()[0][:100]}")
+        data, content_type, outcome = await _fetch_in_browser(page, url)
+        if data is not None and usable(data, content_type, "the browser's network"):
+            return data, content_type
+        if data is None:
+            failures.append(f"the browser's network: {outcome}")
         try:
             # Certificate errors ignored, as the browser itself ignores them (see
             # `_browser_args()`): insse.ro serves an incomplete chain. With the browser's

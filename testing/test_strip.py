@@ -13,7 +13,7 @@ from scrapemm.server import chain, challenges, engine, reachability
 from scrapemm.server.cache import cache, clear_cache
 from scrapemm.server.challenges import ChallengeStore
 from scrapemm.server.engine import retrieve_one
-from scrapemm.server.util import remove_ui_elements, strip_content, to_scraped_content
+from scrapemm.server.util import _remove_ui_elements, remove_ui_elements, strip_content, to_scraped_content
 
 pytestmark = pytest.mark.server
 
@@ -58,6 +58,47 @@ def test_remove_ui_elements_keeps_main_content(main: str):
     html = remove_ui_elements(f"<html><body><nav>Menu</nav>{main}</body></html>")
     assert "Menu" not in html
     assert "Content" in html
+
+
+# Reduced from https://www.borkenerzeitung.de/welt/in-ausland/politik-inland/Demonstranten-fordern-Ende-des-Hungers-in-Gaza-653442.html
+# (Cookiebot, user-reported), plus banners of other platforms and of none
+CONSENT_BANNERS = [
+    '<div aria-labelledby="CybotCookiebotDialogBodyContentTitle" class="CybotMultilevel '
+    'CybotCookiebotDialogActive" id="CybotCookiebotDialog" role="region">'
+    '<div id="CybotCookiebotDialogHeader"><img src="https://consent.cookiebot.com/logo.png"></div>'
+    '<h2 id="CybotCookiebotDialogBodyContentTitle">Verantwortungsvoller Umgang mit Ihren Daten</h2>'
+    '<div id="CybotCookiebotDialogBodyContentText">Wir verwenden Cookies, um Inhalte und Anzeigen '
+    'zu personalisieren. Sie können Ihre Einwilligung jederzeit ändern.</div>'
+    '<button id="CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll">Zustimmen</button></div>',
+    '<div id="onetrust-consent-sdk"><div id="onetrust-banner-sdk">We value your privacy. '
+    '<button>Accept All Cookies</button></div></div>',
+    '<div id="usercentrics-root"></div><div id="sp_message_container_1234">'
+    '<iframe src="https://cmp.example.com/index.html"></iframe></div>',
+    '<div class="site-consent-layer"><p>Nous utilisons des traceurs. Votre consentement ?</p>'
+    '<button>Tout accepter</button></div>',
+]
+
+
+@pytest.mark.parametrize("banner", CONSENT_BANNERS)
+def test_remove_ui_elements_removes_consent_banners(banner: str):
+    page = (f'<html><body>{banner}<div id="page"><h1>Gewalt bei Palästina-Demo</h1>'
+            '<p>Police break up a pro-Palestinian demonstration at Checkpoint Charlie.</p>'
+            '<img src="https://example.com/photo.jpg"></div></body></html>')
+    html, removed_media = _remove_ui_elements(page)
+    for consent in ("Cookies", "Einwilligung", "Zustimmen", "privacy", "consentement",
+                    "cmp.example.com", "cookiebot.com"):
+        assert consent not in html
+    for content in ("Gewalt bei Palästina-Demo", "Checkpoint Charlie", "photo.jpg"):
+        assert content in html
+    assert "https://example.com/photo.jpg" not in removed_media
+
+
+def test_remove_ui_elements_keeps_content_about_cookies():
+    """Neither a page wrapper that records the consent in its class nor an article
+    on cookies is a banner."""
+    page = ('<html><body><div class="cookies-accepted"><h1>Cookie law</h1>'
+            '<p>The new consent rules for cookies explained.</p></div></body></html>')
+    assert "The new consent rules for cookies explained." in remove_ui_elements(page)
 
 
 def test_remove_ui_elements_keeps_page_it_would_empty():

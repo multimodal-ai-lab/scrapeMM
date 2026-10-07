@@ -156,23 +156,63 @@ def preprocess_html(html: str) -> str:
     return html
 
 
-# Elements that hold page chrome rather than content. This is Firecrawl's list for its
-# `onlyMainContent` option.
-UI_SELECTORS = ", ".join((
-    "header", "footer", "nav", "aside", ".header", ".top", ".navbar", "#header",
-    ".footer", ".bottom", "#footer", ".sidebar", ".side", ".aside", "#sidebar",
-    ".modal", ".popup", "#modal", ".overlay", ".ad", ".ads", ".advert", "#ad",
-    ".lang-selector", ".language", "#language-selector", ".social", ".social-media",
-    ".social-links", "#social", ".menu", ".navigation", "#nav", ".breadcrumbs",
-    "#breadcrumbs", ".share", "#share", ".widget", "#widget", ".cookie", "#cookie"))
-# The page's main content, which is never removed along with the chrome around it.
-# Not <article>: related-article sidebars are full of <article> teaser cards.
-MAIN_CONTENT_SELECTORS = "#main, main, [role=main]"
+# Elements that hold page chrome rather than content, by tag, class and id. This is
+# Firecrawl's list for its `onlyMainContent` option ("header", ".header", "#header", ...).
+# Looked up in one pass over the page (see `_remove_ui_elements()`): as CSS selectors,
+# soupsieve takes seconds on a large page.
+UI_TAGS = frozenset(("header", "footer", "nav", "aside"))
+UI_CLASSES = frozenset((
+    "header", "top", "navbar", "footer", "bottom", "sidebar", "side", "aside", "modal",
+    "popup", "overlay", "ad", "ads", "advert", "lang-selector", "language", "social",
+    "social-media", "social-links", "menu", "navigation", "breadcrumbs", "share", "widget",
+    "cookie"))
+UI_IDS = frozenset((
+    "header", "footer", "sidebar", "modal", "ad", "language-selector", "social", "nav",
+    "breadcrumbs", "share", "widget", "cookie"))
+# The root elements of the common consent management platforms (cookie banners), by id
+# and class. Their names are no plain "cookie", so the UI lists above miss them.
+CONSENT_PLATFORM_IDS = frozenset((
+    "CybotCookiebotDialog", "CybotCookiebotDialogBodyUnderlay", "CookiebotWidget",  # Cookiebot
+    "onetrust-consent-sdk", "onetrust-banner-sdk", "ot-sdk-btn-floating",  # OneTrust
+    "usercentrics-root", "usercentrics-cmp-ui", "uc-banner",  # Usercentrics
+    "cmpbox", "cmpbox2", "cmpwrapper",  # consentmanager
+    "qc-cmp2-container",  # Quantcast
+    "didomi-host", "didomi-notice", "didomi-popup",  # Didomi
+    "truste-consent-track", "consent_blackbar",  # TrustArc
+    "BorlabsCookieBox", "BorlabsCookieWidget",  # Borlabs
+    "cmplz-cookiebanner-container",  # Complianz
+    "iubenda-cs-banner", "klaro",  # iubenda, Klaro
+    "cookie-law-info-bar", "cookie-notice", "gdpr-cookie-message",  # WordPress plugins
+))
+CONSENT_PLATFORM_ID_PREFIXES = ("sp_message_container",)  # Sourcepoint
+CONSENT_PLATFORM_CLASSES = frozenset((
+    "sp_veil", "cmpboxBG", "qc-cmp2-container", "truste_overlay", "truste_box_overlay",
+    "cmplz-cookiebanner", "cky-consent-container", "cky-modal", "cky-overlay",
+    "osano-cm-window", "osano-cm-dialog", "cc-window", "cc-banner", "klaro",
+    "cookiefirst-root",
+))
+# Beyond the known platforms: an element named after cookies or consent (id or class)...
+CONSENT_NAME_REGEX = re.compile(r"cookie|consent|gdpr|dsgvo|rgpd|privacy-?(?:banner|notice|popup)",
+                                re.IGNORECASE)
+# ...that also talks about them, in any of the common languages
+CONSENT_TEXT_REGEX = re.compile(
+    r"cookie|consent|einwillig|zustimm|datenschutzeinstellung|privacy settings|"
+    r"consentement|traceurs|toestemming|consenso|consentimiento|zgod|gdpr|dsgvo|rgpd",
+    re.IGNORECASE)
+# The page's main content (#main, main, [role=main]), which is never removed along with
+# the chrome around it. Not <article>: related-article sidebars are full of <article>
+# teaser cards.
+def _is_main_content(element: Tag) -> bool:
+    return element.name == "main" or element.get("id") == "main" or element.get("role") == "main"
+
+
+def _holds_content(element: Tag) -> bool:
+    return element.name in ("article", "h1") or _is_main_content(element)
 
 
 def remove_ui_elements(html: str) -> str:
-    """Strips navigation, headers, footers, sidebars, banners and the like from the
-    HTML, keeping the page's content. Returns the HTML unchanged if nothing is left.
+    """Strips navigation, headers, footers, sidebars, cookie banners and the like from
+    the HTML, keeping the page's content. Returns the HTML unchanged if nothing is left.
     The result is re-serialized by BeautifulSoup (entities decoded, void tags closed),
     not the page's bytes as scraped."""
     return _remove_ui_elements(html)[0]
@@ -183,14 +223,20 @@ def _remove_ui_elements(html: str) -> tuple[str, list[str]]:
     elements removed."""
     soup = BeautifulSoup(html, "html.parser")
     has_body = soup.body is not None
+    elements = soup.find_all(True)  # In document order: ancestors before descendants
     # The main content and everything wrapping it, never removed as chrome
-    keep = {id(node) for main in soup.select(MAIN_CONTENT_SELECTORS)
+    keep = {id(node) for main in filter(_is_main_content, elements)
             for node in (main, *main.parents)}
+    # Cookie banners are looked for in the body only
+    in_body = {id(e) for e in soup.body.find_all(True)} if has_body else None
     removed_media: list[str] = []
     removed_any = False
-    for element in soup.select(UI_SELECTORS):
+    for element in elements:
         if element.decomposed:
             continue  # Gone with an ancestor already
+        if not (_is_ui_element(element) or (
+                (in_body is None or id(element) in in_body) and _is_consent_banner(element))):
+            continue
         if id(element) in keep:
             continue  # Is or wraps the main content
         if element.name == "header" and element.find_parent("article"):
@@ -206,6 +252,28 @@ def _remove_ui_elements(html: str) -> tuple[str, list[str]]:
     if body is None or not (body.get_text(strip=True) or body.find(["img", "video", "iframe"])):
         return html, []  # The heuristic misfired (e.g. <body class="side">)
     return str(soup), removed_media
+
+
+def _is_ui_element(element: Tag) -> bool:
+    return (element.name in UI_TAGS or element.get("id") in UI_IDS
+            or not UI_CLASSES.isdisjoint(element.get("class") or ()))
+
+
+def _is_consent_banner(element: Tag) -> bool:
+    """Whether the element is a cookie banner: one of a known platform, or else one
+    whose id or class names cookies or consent and whose text speaks of them. The
+    latter never holds an article, a headline or the main content: that is a page
+    wrapper telling its styles the consent was given (class="cookies-accepted")."""
+    if element.name in ("html", "body", "head"):
+        return False
+    element_id = str(element.get("id") or "")
+    classes = element.get("class") or []
+    if (element_id in CONSENT_PLATFORM_IDS or element_id.startswith(CONSENT_PLATFORM_ID_PREFIXES)
+            or not CONSENT_PLATFORM_CLASSES.isdisjoint(classes)):
+        return True  # Known for sure, even when empty (a shadow root's host)
+    return (CONSENT_NAME_REGEX.search(" ".join([element_id, *classes])) is not None
+            and element.find(_holds_content) is None
+            and CONSENT_TEXT_REGEX.search(element.get_text(" ", strip=True)) is not None)
 
 
 def postprocess_markdown(text: str) -> str:
