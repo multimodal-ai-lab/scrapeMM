@@ -386,8 +386,11 @@ class JobStore:
                 "SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if row is None:
                 return None
+            # Not the content itself, which runs to megabytes for a test run (see
+            # `get_content()`), only the figures a result's header shows, computed by
+            # SQLite where the content is
             results = self._reader.execute(
-                "SELECT results.*, result_content.content FROM results "
+                f"SELECT results.*, {_CONTENT_STATS} FROM results "
                 "LEFT JOIN result_content USING (job_id, url) "
                 "WHERE results.job_id = ? ORDER BY results.created_at", (job_id,)).fetchall()
         job = _job_row(row)
@@ -402,6 +405,14 @@ class JobStore:
         requested = list(dict.fromkeys(job["params"].get("urls") or [])) or list(done)
         job["pending"] = [url for url in requested if url not in done]
         return job
+
+    def get_content(self, job_id: str, url: str) -> Optional[dict]:
+        """The stored content of one result of a job, None if there is none."""
+        with self._read_lock:
+            row = self._reader.execute(
+                "SELECT content FROM result_content WHERE job_id = ? AND url = ?",
+                (job_id, url)).fetchone()
+        return json.loads(row["content"]) if row and row["content"] else None
 
     def delete_job(self, job_id: str) -> bool:
         with self._lock:
@@ -618,10 +629,40 @@ def _job_row(row: sqlite3.Row) -> dict:
     return job
 
 
+# What a result's header shows of its content, without the content: how much text, HTML
+# and media came back. The text is the Markdown, or else the multimodal rendering.
+_CONTENT_STATS = """
+    result_content.content IS NOT NULL AS has_content,
+    LENGTH(COALESCE(json_extract(result_content.content, '$.markdown'),
+                    json_extract(result_content.content, '$.multimodal'), '')) AS stat_characters,
+    LENGTH(CAST(COALESCE(json_extract(result_content.content, '$.html'), '') AS BLOB)) AS stat_html_bytes,
+    (SELECT json_group_object(kind, n) FROM (
+        SELECT json_extract(value, '$.kind') AS kind, COUNT(*) AS n
+        FROM json_each(result_content.content, '$.items') GROUP BY kind)) AS stat_kinds,
+    (SELECT COALESCE(SUM(json_extract(value, '$.size')), 0)
+        FROM json_each(result_content.content, '$.items')) AS stat_bytes,
+    (SELECT COUNT(*) FROM json_each(result_content.content, '$.items')
+        WHERE json_extract(value, '$.size') IS NULL) AS stat_unsized
+"""
+
+
 def _result_row(row: sqlite3.Row) -> dict:
     result = dict(row)
     result["errors"] = json.loads(result["errors"]) if result["errors"] else {}
-    result["content"] = json.loads(result["content"]) if result["content"] else None
+    if "content" in result:
+        result["content"] = json.loads(result["content"]) if result["content"] else None
+    if "has_content" in result:
+        # Only the figures; the content itself comes with `get_content()`
+        kinds = json.loads(result.pop("stat_kinds") or "{}")
+        result["has_content"] = bool(result["has_content"])
+        result["stats"] = {
+            "kinds": kinds, "media": sum(kinds.values()),
+            "bytes": result.pop("stat_bytes") or 0, "unsized": result.pop("stat_unsized") or 0,
+            "characters": result.pop("stat_characters") or 0,
+            "html_bytes": result.pop("stat_html_bytes") or 0,
+        } if result["has_content"] else None
+        for key in ("stat_kinds", "stat_bytes", "stat_unsized", "stat_characters", "stat_html_bytes"):
+            result.pop(key, None)
     result["success"] = bool(result["success"])
     result["from_cache"] = bool(result["from_cache"])
     return result

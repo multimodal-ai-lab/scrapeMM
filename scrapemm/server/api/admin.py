@@ -369,6 +369,16 @@ async def get_job(job_id: str) -> dict:
     return job
 
 
+@router.get("/jobs/{job_id}/content")
+async def get_result_content(job_id: str, url: str = Query(...)) -> dict:
+    """One result's stored content: the job itself comes without, being megabytes for a
+    run of many URLs, and the UI fetches a result's content when it is opened."""
+    content = await asyncio.to_thread(jobs.get_content, job_id, url)
+    if content is None:
+        raise HTTPException(status_code=404, detail=f"No stored content for {url} in job '{job_id}'.")
+    return {"url": url, "content": content}
+
+
 @router.delete("/jobs/{job_id}")
 async def delete_job(job_id: str) -> dict:
     return {"job_id": job_id, "deleted": jobs.delete_job(job_id)}
