@@ -58,12 +58,26 @@ async def lifespan(app: FastAPI):
     # is no reason for the first person to open the dashboard to be the one who pays it.
     warmup = asyncio.create_task(_warm_caches())
     lag_watch = asyncio.create_task(looplag.watch())
+    pruning = asyncio.create_task(_prune_regularly())
     yield
     warmup.cancel()
     lag_watch.cancel()
+    pruning.cancel()
     await close_search_sessions()
     jobs.close()
     logger.info("scrapeMM server stopped.")
+
+
+async def _prune_regularly() -> None:
+    """Keeps the job history within its limits while the server runs, not only at
+    startup: a busy server otherwise grew well past them between restarts."""
+    from .jobs import PRUNE_INTERVAL
+    while True:
+        await asyncio.sleep(PRUNE_INTERVAL)
+        try:
+            await asyncio.to_thread(jobs.prune)
+        except Exception:
+            logger.warning("Could not prune the job history.", exc_info=True)
 
 
 async def _warm_caches() -> None:

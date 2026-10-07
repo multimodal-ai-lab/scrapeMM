@@ -229,6 +229,8 @@ async def patch_config(body: dict[str, Any]) -> dict:
                 detail=f"'{name}' expects {expected.__name__}, got {value!r}.")
 
     update_config(**coerced)
+    if {"job_retention_days", "max_jobs"} & coerced.keys():
+        await asyncio.to_thread(jobs.prune)  # A lower limit applies at once
     return {"config": get_config()}
 
 

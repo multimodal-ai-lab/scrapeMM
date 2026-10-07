@@ -20,12 +20,15 @@ interface RetrievalForm {
   youtube_min_interval: string
   youtube_cooldown: string
   blacklist_ttl: string
+  max_jobs: string
+  job_retention_days: string
   archive_today_interactive_solve: boolean
   archive_today_screenshot_fallback: boolean
 }
 
 const NUMBERS = ['max_concurrency', 'max_browser_pages', 'max_search_concurrency',
-  'youtube_min_interval', 'youtube_cooldown', 'blacklist_ttl'] as const
+  'youtube_min_interval', 'youtube_cooldown', 'blacklist_ttl', 'max_jobs',
+  'job_retention_days'] as const
 
 const retrievalSaved = ref<RetrievalForm | null>(null)
 const retrieval = ref<RetrievalForm | null>(null)
@@ -40,6 +43,8 @@ function toForm(config: Record<string, any>): RetrievalForm {
     youtube_min_interval: text(config.youtube_min_interval),
     youtube_cooldown: text(config.youtube_cooldown),
     blacklist_ttl: text(config.blacklist_ttl),
+    max_jobs: text(config.max_jobs),
+    job_retention_days: text(config.job_retention_days),
     archive_today_interactive_solve: !!config.archive_today_interactive_solve,
     archive_today_screenshot_fallback: !!config.archive_today_screenshot_fallback,
   }
@@ -238,6 +243,25 @@ onBeforeUnmount(() => clearInterval(statsTimer))
           >
             <UInput v-model="retrieval.blacklist_ttl" type="number" min="0" />
           </UFormField>
+        </div>
+        <!-- How much history the Jobs and Statistics views reach back. The Dashboard's
+             totals count everything ever run, whatever is pruned. -->
+        <div class="border-t border-default pt-4 space-y-3">
+          <h3 class="text-sm font-medium">Job history</h3>
+          <div class="grid sm:grid-cols-2 gap-4">
+            <UFormField
+              label="Jobs kept at most"
+              description="The oldest go first. Each keeps its content, about 110 KB per URL. 0 keeps all."
+            >
+              <UInput v-model="retrieval.max_jobs" type="number" min="0" step="1000" placeholder="10000 (default)" />
+            </UFormField>
+            <UFormField
+              label="Kept for (days)"
+              description="Older jobs and search records are removed. 0 keeps them for ever."
+            >
+              <UInput v-model="retrieval.job_retention_days" type="number" min="0" placeholder="90 (default)" />
+            </UFormField>
+          </div>
         </div>
         <div class="space-y-2">
           <UCheckbox
