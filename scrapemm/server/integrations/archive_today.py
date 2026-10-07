@@ -87,6 +87,27 @@ VERIFICATION_SNAPSHOT = "Ubqsd"
 GATE_MARKERS = ("security check", "captcha", "just a moment",
                 "performing security verification", "recaptcha")
 
+# Archive.today's own "not found" answers: "Not Found (yet?)" for a capture it does not
+# have, and a bare "Not Found (3)" (HTTP 404, ungated) for a path that is no capture at all,
+# e.g. two snapshot URLs run together (https://archive.ph/iUOsyhttps://archive.ph/eNsx3)
+_NOT_FOUND_PAGE = re.compile(r"^\s*not found\b", re.IGNORECASE)
+_TAGS = re.compile(r"<[^>]+>")
+
+
+def _is_not_found(body: str, status: Optional[int] = None) -> bool:
+    """Whether the page is Archive.today saying there is no such capture."""
+    if "not found (yet?)" in body.lower():
+        return True
+    # Only a short page that says nothing else: a capture's own text may well start so
+    return (status in (None, 404) and len(body) < 2000
+            and bool(_NOT_FOUND_PAGE.match(_TAGS.sub(" ", body))))
+
+
+# How many rounds a buffered URL may fail for no recognized reason (neither content, nor
+# the gate, nor "not found") before it is dropped, so that nothing stays in the buffer for
+# good. Rounds cut short by the gate do not count.
+MAX_DRAIN_FAILURES = 3
+
 # Snapshot ids are five alphanumeric characters, e.g. https://archive.ph/uTVE4
 SHORT_ID_REGEX = re.compile(r"^/([A-Za-z0-9]{5})(?:/.*)?$")
 
@@ -525,6 +546,7 @@ class _RequestBuffer:
 
 _pages = _PageCache()
 _buffer = _RequestBuffer()
+_drain_failures: dict[str, int] = {}  # Buffered URL -> rounds it failed in, see `_drain_buffer()`
 
 
 async def _fetch_text(url: str, session: Optional[aiohttp.ClientSession] = None) -> Optional[str]:
@@ -920,7 +942,7 @@ class ArchiveToday(HeadedBrowser):
             body_text = (await page.locator("body").inner_text()).lower()
         except Exception:
             body_text = ""
-        if "not found (yet?)" in body_text:
+        if _is_not_found(body_text):
             raise TargetUnavailableError("Archive.today has no capture at this URL.")
         if _looks_like_gate(body_text):
             raise CaptchaEncounteredError(GATE_HINT)
@@ -1029,6 +1051,19 @@ class ArchiveToday(HeadedBrowser):
                     _pages.put(url, content.html)
                     done.add(url)
 
+        # What failed for no recognized reason, in a round the gate did not cut short:
+        # given up on after a few such rounds rather than retried for ever
+        if not gated_again:
+            for url in urls:
+                if url in done:
+                    _drain_failures.pop(url, None)
+                    continue
+                _drain_failures[url] = _drain_failures.get(url, 0) + 1
+                if _drain_failures[url] >= MAX_DRAIN_FAILURES:
+                    logger.warning(f"Dropping {url} from the Archive.today buffer: it could "
+                                   f"not be retrieved in {MAX_DRAIN_FAILURES} rounds.")
+                    _drain_failures.pop(url)
+                    done.add(url)
         _buffer.discard_many(done)
 
         if gated_again:
@@ -1056,7 +1091,7 @@ class ArchiveToday(HeadedBrowser):
         # Parsing a snapshot page is CPU-bound; in a thread, the event loop keeps going
         if content := await run_light(_extract_content_html, body):
             return content, CONTENT
-        if "not found (yet?)" in body.lower():
+        if _is_not_found(body, status):
             return None, NOT_FOUND
         if status == 429 or _looks_like_gate(body):
             return None, GATE
