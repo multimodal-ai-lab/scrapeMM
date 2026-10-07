@@ -671,6 +671,24 @@ _wait_for_first_target_on_create()
 DOCUMENT_WAIT = 60
 # Seconds after which a page that shows no bot check is taken for what it is
 DOCUMENT_SETTLE = 5
+# Seconds a file the browser was served (a spreadsheet) gets to turn into its download
+DOWNLOAD_AFTER_RESPONSE_WAIT = 15
+
+
+class _BotCheckAgain(RetrievalFailed):
+    """A document, asked for again outside the page, was answered with its bot check."""
+
+
+def _complete_file(data: Optional[bytes], headers: dict) -> bool:
+    """Whether `data` is the whole file the headers announce (a PDF ends with %%EOF)."""
+    if not data:
+        return False
+    length = headers.get("content-length", "")
+    if length.isdigit():
+        return len(data) == int(length)
+    if "pdf" in headers.get("content-type", ""):
+        return data.rstrip().endswith(b"%%EOF")
+    return False
 
 
 async def _shows_bot_check(page: Page) -> bool:
@@ -700,6 +718,7 @@ def _note_served_document(response, page: Page, served: list[str],
         if (not served and response.ok
                 and is_document_content_type(response.headers.get("content-type"))):
             served.append(response.headers.get("content-type"))
+            page._scrapemm_served_response = response  # Its body may hold the whole file
     except Exception:
         pass  # Observing only; never the reason a retrieval fails
 
@@ -1377,17 +1396,45 @@ class HeadedBrowser(RetrievalIntegration):
         from scrapemm.server.download import documents
         from scrapemm.common import UnsupportedDomainError
         loop = asyncio.get_running_loop()
-        start = loop.time()
-        while not downloads and not served and loop.time() < start + DOCUMENT_WAIT:
-            await asyncio.sleep(0.5)
-            if loop.time() - start >= DOCUMENT_SETTLE and not await _shows_bot_check(page):
-                break  # A page and no file: asked for directly, below
         name = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1] or urlparse(url).netloc
-        if downloads:
-            name = downloads[0].suggested_filename or name
-            data, content_type = await self._document_bytes(page, url, download=downloads[0])
-        elif served:
-            data, content_type = await self._document_bytes(page, url)
+        for attempt in range(2):
+            start = loop.time()
+            while not downloads and not served and loop.time() < start + DOCUMENT_WAIT:
+                await asyncio.sleep(0.5)
+                if loop.time() - start >= DOCUMENT_SETTLE and not await _shows_bot_check(page):
+                    break  # A page and no file: asked for directly, below
+            # A file the browser does not show (a spreadsheet) arrives as a download just
+            # after its response: under load, seconds after. Its download beats asking again.
+            if served and not downloads and "pdf" not in served[0]:
+                settle = loop.time() + DOWNLOAD_AFTER_RESPONSE_WAIT
+                while not downloads and loop.time() < settle:
+                    await asyncio.sleep(0.5)
+            if not downloads and not served:
+                break
+            try:
+                download = downloads[0] if downloads else None
+                if download is not None:
+                    name = download.suggested_filename or name
+                data, content_type = await self._document_bytes(page, url, download=download)
+                break
+            except _BotCheckAgain as e:
+                if attempt:
+                    raise RetrievalFailed(f"The document at {url} could not be downloaded: "
+                                          f"the bot check in front of it answered again "
+                                          f"({e}).") from e
+                # Asked for outside the page, the file met the bot check once more. In the
+                # browser the check passes (by its JavaScript): loaded once more, the file
+                # arrives as a download or in the viewer
+                logger.info(f"Asked for again, {url} answered with its bot check ({e}); "
+                            f"loading it in the browser once more.")
+                downloads.clear()
+                served.clear()
+                with suppress(AttributeError):
+                    del page._scrapemm_served_response
+                with suppress(PlaywrightError):
+                    await page.goto(url, wait_until="commit", timeout=DOCUMENT_WAIT * 1000)
+        if downloads or served:
+            pass  # Read above
         elif await _shows_bot_check(page):
             raise RetrievalFailed(f"{url} should deliver a document, but the bot check in "
                                   f"front of it did not let the browser through.")
@@ -1417,38 +1464,76 @@ class HeadedBrowser(RetrievalIntegration):
 
     @staticmethod
     async def _document_bytes(page: Page, url: str, download=None) -> tuple[bytes, Optional[str]]:
-        """The bytes of the document `url`, taken from the browser. A download's file is
-        copied out at once: Playwright removes its temporary file when the connection that
-        saw the download is replaced, which under load happened before the file was read
-        (FileNotFoundError, and the suite's spreadsheet came out unread). Failing that,
-        the file is requested again with the browser's cookies, which got past the bot
-        check by now. Returns (bytes, content type, if known)."""
-        # A PDF shown in the viewer is not taken from `response`: the viewer loads it in
-        # ranges, and the body the browser keeps was cut short. Requested again instead.
+        """The bytes of the document `url`, taken from the browser, from the first source
+        that holds the actual file (see `documents.is_file_of_type()`):
+
+        * the download, copied out at once -- Playwright removes its temporary file when
+          the connection that saw the download is replaced, which under load happened
+          before the file was read;
+        * what the viewer was served, whole unless the viewer cut it short to load ranges;
+        * the file asked for again with the browser's cookies and user agent.
+
+        Under load, any of them turned out to hold the bot check's page instead of the
+        file ("File is not a zip file"). If none holds the file but one met the bot check,
+        `_BotCheckAgain` lets the caller load the URL in the browser once more. Returns
+        (bytes, content type, if known)."""
+        from scrapemm.server.download import documents
+        kind = documents.document_extension(url)
+        failures = []
+
+        def usable(data, content_type, source) -> bool:
+            if data and documents.is_file_of_type(data, kind, content_type):
+                return True
+            failures.append(f"{source}: {documents.describe(data, content_type)}")
+            return False
+
         if download is not None:
             target = Path(tempfile.mkdtemp(prefix="scrapemm-document-")) / "file"
             try:
                 await asyncio.wait_for(download.save_as(target), DOCUMENT_WAIT)
-                return await asyncio.to_thread(target.read_bytes), None
+                data = await asyncio.to_thread(target.read_bytes)
+                if usable(data, None, "the download"):
+                    return data, None
             except Exception as e:
-                logger.info(f"Could not take the download of {url} from the browser "
-                            f"({type(e).__name__}); requesting it again.")
+                failures.append(f"the download: {type(e).__name__}")
             finally:
                 with suppress(Exception):
                     await download.delete()
                 with suppress(OSError):
                     target.unlink()
                     target.parent.rmdir()
+        if response := getattr(page, "_scrapemm_served_response", None):
+            content_type = response.headers.get("content-type")
+            try:
+                data = await asyncio.wait_for(response.body(), DOCUMENT_WAIT)
+                if _complete_file(data, response.headers) and usable(data, content_type,
+                                                                      "the viewer"):
+                    return data, content_type
+            except Exception as e:
+                failures.append(f"the viewer: {type(e).__name__}")
         try:
             # Certificate errors ignored, as the browser itself ignores them (see
-            # `_browser_args()`): insse.ro serves an incomplete chain
+            # `_browser_args()`): insse.ro serves an incomplete chain. With the browser's
+            # own user agent: a bot check's clearance may hold only for the agent that
+            # earned it.
+            headers = {}
+            with suppress(Exception):
+                headers["User-Agent"] = await page.evaluate("navigator.userAgent")
             again = await page.context.request.get(url, timeout=DOCUMENT_WAIT * 1000,
-                                                   ignore_https_errors=True)
-            if again.ok and "html" not in again.headers.get("content-type", ""):
-                return await again.body(), again.headers.get("content-type")
-            status = f"HTTP {again.status}, {again.headers.get('content-type')}"
+                                                   ignore_https_errors=True, headers=headers)
+            content_type = again.headers.get("content-type", "")
+            data = await again.body() if again.ok else b""
+            if again.ok and usable(data, content_type, "asked for again"):
+                return data, content_type
+            if not again.ok:
+                failures.append(f"asked for again: HTTP {again.status}, {content_type}")
         except Exception as e:
-            status = f"{type(e).__name__}: {e}"
+            failures.append(f"asked for again: {type(e).__name__}: {e}")
+        status = "; ".join(failures)
+        logger.info(f"No source held the document {url}: {status}.")
+        if any("html" in f or "HTTP 403" in f or "HTTP 429" in f or "HTTP 503" in f
+               for f in failures):
+            raise _BotCheckAgain(status)
         raise RetrievalFailed(f"The document at {url} could not be downloaded ({status}).")
 
     def _after_renderer_crash(self, url: str) -> str:

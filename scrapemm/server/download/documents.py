@@ -53,6 +53,33 @@ def is_document_content_type(content_type: Optional[str]) -> bool:
     return any(content_type.startswith(t) for t in DOCUMENT_CONTENT_TYPES)
 
 
+# How the files of each type begin. xlsx, docx and their kin are zip files.
+_SIGNATURES = {".xlsx": (b"PK",), ".xlsm": (b"PK",), ".docx": (b"PK",), ".pptx": (b"PK",),
+               ".odt": (b"PK",), ".ods": (b"PK",), ".odp": (b"PK",), ".zip": (b"PK",),
+               ".pdf": (b"%PDF",), ".xls": (bytes.fromhex("d0cf11e0"),),
+               ".doc": (bytes.fromhex("d0cf11e0"),), ".ppt": (bytes.fromhex("d0cf11e0"),),
+               ".gz": (bytes.fromhex("1f8b"),), ".7z": (b"7z",), ".rar": (b"Rar!",)}
+
+
+def is_file_of_type(data: bytes, kind: Optional[str], content_type: Optional[str] = None) -> bool:
+    """Whether `data` is a file of the type `kind` (a document extension) or, without
+    one, of `content_type` -- rather than, say, the HTML page of a bot check that was
+    served in its place."""
+    kind = kind or _kind("", content_type)
+    head = data[:1024].lstrip()
+    if kind in _SIGNATURES:
+        return head.startswith(_SIGNATURES[kind])
+    return not head[:15].lower().startswith((b"<!doctype html", b"<html"))
+
+
+def describe(data: Optional[bytes], content_type: Optional[str] = None) -> str:
+    """A short description of what came instead of a file, for the log."""
+    if not data:
+        return "nothing"
+    head = " ".join(data[:60].decode("utf-8", errors="replace").split())
+    return f"{len(data)} bytes{f' of {content_type}' if content_type else ''} starting {head!r}"
+
+
 def to_content(data: bytes, name: str, content_type: Optional[str] = None):
     """The `ScrapedContent` of a downloaded document (`name` gives its type, as does
     `content_type`), or None if scrapeMM does not read documents of its type. Blocking:

@@ -537,12 +537,14 @@ async def download_embedded_video(
         **kwargs
 ) -> Optional[Video]:
     """Downloads the video behind an embedded player with yt-dlp. Returns None if that
-    fails: an embedded video is a bonus, so it must never fail the whole page."""
+    fails: an embedded video is a bonus, so it must never fail the whole page -- nor hold
+    it up: while YouTube is paused for this server, an embedded YouTube video fails at
+    once rather than going through the proxy."""
     from scrapemm.server.integrations.ytdlp import download_video_with_ytdlp
 
     try:
         video, _thumbnail, _metadata = await download_video_with_ytdlp(
-            url, session=session, max_video_size=max_video_size)
+            url, session=session, max_video_size=max_video_size, divert_when_paused=False)
         return video
     except Exception as e:
         logger.info(f"Could not download the video embedded from {url}: "
