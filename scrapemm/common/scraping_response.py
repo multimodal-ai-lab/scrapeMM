@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-from ezmm import MultimodalSequence
+from ezmm import Image, MultimodalSequence
 
 OutputFormat = Literal["multimodal", "markdown", "html"]
 OUTPUT_FORMATS = ("multimodal", "markdown", "html")
@@ -15,6 +15,7 @@ class ScrapedContent:
     html: Optional[str] = None  # The raw HTML code of the scraped page
     markdown: Optional[str] = None  # The scraped text in Markdown format. Media is referenced by hyperlink.
     multimodal: Optional[MultimodalSequence] = None  # The scraped text with the media downloaded and embedded
+    stripped: bool = False  # Whether UI elements (navigation, footers, banners, etc.) were removed from all formats
 
     def __bool__(self) -> bool:
         """True iff any content is available."""
@@ -35,8 +36,12 @@ class ScrapingResponse:
     method: Optional[str] = None  # The successful method used to retrieve the content
     output_format: OutputFormat = "multimodal"  # The format that was requested
     errors: dict[str, Optional[Exception]] | None = None  # The exceptions raised during retrieval for each method
-    retrieval_time: Optional[float] = None  # Time in seconds for retrieving this URL
+    # Seconds from the URL's first outgoing request to its result (see server `timing`)
+    retrieval_time: Optional[float] = None
+    # Seconds the URL waited before that, for a concurrency or browser slot
+    queue_time: Optional[float] = None
     from_cache: bool = False  # Whether this response was served from the cache
+    screenshot: Optional[Image] = None  # The page as the server's browser shows it, if requested
 
     @property
     def success(self) -> bool:

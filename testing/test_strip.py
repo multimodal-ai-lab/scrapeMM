@@ -1,0 +1,166 @@
+"""Tests for `strip`: UI elements are removed from the result on the way out, never from
+what is scraped, detected on or cached."""
+
+import aiohttp
+import pytest
+from ezmm import Image, MultimodalSequence
+from PIL import Image as PillowImage
+
+from scrapemm import CaptchaEncounteredError
+from scrapemm.common.scraping_response import ScrapedContent
+from scrapemm.common.wire import ResponsePayload
+from scrapemm.server import chain, challenges, engine, reachability
+from scrapemm.server.cache import cache, clear_cache
+from scrapemm.server.challenges import ChallengeStore
+from scrapemm.server.engine import retrieve_one
+from scrapemm.server.util import remove_ui_elements, strip_content, to_scraped_content
+
+pytestmark = pytest.mark.server
+
+URL = "https://example.com/article"
+
+PAGE_WITH_UI = """<html><body>
+<header><nav><a href="/">Home</a> <a href="/news">News</a></nav></header>
+<div class="cookie">We use cookies. Accept?</div>
+<main>
+  <article>
+    <header><h1>Headline</h1><p>By A. Author</p></header>
+    <p>The article text.</p>
+    <img src="https://example.com/photo.jpg">
+  </article>
+  <aside><article><a href="/other">A related story</a></article></aside>
+</main>
+<footer>Imprint and privacy</footer>
+</body></html>"""
+
+# A challenge whose only conclusive marker sits in an overlay, which gets stripped
+CAPTCHA_PAGE = ('<html><body><main><p>The article text.</p></main><div class="modal">'
+                '<iframe src="https://geo.captcha-delivery.com/captcha/"></iframe>'
+                '</div></body></html>')
+
+
+def test_remove_ui_elements():
+    html = remove_ui_elements(PAGE_WITH_UI)
+    for ui in ("Home", "cookies", "A related story", "Imprint"):
+        assert ui not in html
+    # The article's own header carries its headline and byline
+    for content in ("Headline", "By A. Author", "The article text.", "photo.jpg"):
+        assert content in html
+
+
+@pytest.mark.parametrize("main", [
+    '<div class="side"><div id="main"><p>Content</p></div></div>',
+    '<div class="side"><main><p>Content</p></main></div>',
+    '<div class="widget"><div role="main"><p>Content</p></div></div>',
+    '<main class="top"><p>Content</p></main>',  # Matches a UI selector itself
+])
+def test_remove_ui_elements_keeps_main_content(main: str):
+    html = remove_ui_elements(f"<html><body><nav>Menu</nav>{main}</body></html>")
+    assert "Menu" not in html
+    assert "Content" in html
+
+
+def test_remove_ui_elements_keeps_page_it_would_empty():
+    html = '<html><head><title>Site</title></head><body class="side"><p>All there is</p></body></html>'
+    assert remove_ui_elements(html) == html
+
+
+async def test_strip_content_leaves_original_untouched():
+    original = await to_scraped_content(PAGE_WITH_UI, session=None, output_format="markdown")
+    stripped = await strip_content(original, url=URL)
+    assert stripped.stripped and not original.stripped
+    assert "Home" not in stripped.html and "Home" not in stripped.markdown
+    assert "The article text." in stripped.markdown
+    assert original.html == PAGE_WITH_UI and "Home" in original.markdown
+    assert await strip_content(stripped) is stripped  # Not twice
+
+
+async def test_strip_content_without_html_is_unchanged():
+    content = ScrapedContent(markdown="A post from an API integration")
+    assert await strip_content(content) is content
+
+
+def _image(url: str) -> Image:
+    return Image(pillow_image=PillowImage.new("RGB", (300, 300), "red"), source_url=url)
+
+
+async def test_strip_content_reuses_media_without_fetching():
+    """The stripped sequence takes its media from the original one; a session of None
+    would fail on any download."""
+    logo, photo = _image("https://example.com/logo.png"), _image("https://example.com/photo.jpg")
+    html = ('<html><body><header><img src="/logo.png"></header>'
+            '<main><p>Text</p><img src="photo.jpg"></main></body></html>')
+    original = ScrapedContent(html=html, markdown="Text",
+                              multimodal=MultimodalSequence(f"{logo.reference} Text {photo.reference}"))
+    stripped = await strip_content(original, url=URL)
+    assert photo.reference in str(stripped.multimodal)
+    assert logo.reference not in str(stripped.multimodal)
+    assert "Text" in str(stripped.multimodal)
+
+
+async def test_strip_content_keeps_media_it_cannot_place():
+    """A medium not traceable to an element (here: a video the browser collected from
+    the page beyond its HTML) is no UI element as far as anybody can tell."""
+    video = _image(URL)  # Its source is the page itself
+    html = '<html><body><nav>Menu</nav><main><p>Text</p></main></body></html>'
+    original = ScrapedContent(html=html, multimodal=MultimodalSequence(f"Text {video.reference}"))
+    stripped = await strip_content(original, url=URL)
+    assert video.reference in str(stripped.multimodal)
+    assert "Menu" not in str(stripped.multimodal)
+
+
+@pytest.fixture
+def browser_serves(monkeypatch, tmp_path):
+    """Makes the browser return the given HTML, with the host reachable and not
+    blacklisted, the browser method enabled, and the CAPTCHA queue in a throwaway file.
+    Counts the browser's calls."""
+    async def reachable(url):
+        return "ok", ""
+
+    monkeypatch.setattr(reachability, "check", reachable)
+    monkeypatch.setattr(engine.blacklist, "reason", lambda domain: None)
+    monkeypatch.setattr(chain, "is_enabled", lambda key: True)
+    monkeypatch.setattr(challenges, "store", ChallengeStore(path=tmp_path / "challenges.json"))
+    clear_cache()
+    calls = []
+
+    def serve(html: str):
+        async def get(url, output_format="multimodal", **kwargs):
+            calls.append(url)
+            return await to_scraped_content(html, session=None, output_format=output_format)
+        monkeypatch.setattr(engine.browser, "_get", get)
+        return calls
+
+    yield serve
+    clear_cache()
+
+
+async def test_stripped_and_whole_share_one_scrape(browser_serves):
+    calls = browser_serves(PAGE_WITH_UI)
+    async with aiohttp.ClientSession() as session:
+        stripped = await retrieve_one(URL, session, methods=["browser"], output_format="markdown",
+                                      strip=True)
+        whole = await retrieve_one(URL, session, methods=["browser"], output_format="markdown")
+    assert stripped.success and whole.success, (stripped.errors, whole.errors)
+    assert stripped.content.stripped and "Home" not in stripped.content.html
+    assert not whole.content.stripped and whole.content.html == PAGE_WITH_UI
+    assert whole.from_cache
+    assert len(calls) == 1
+    assert len(cache) == 1
+
+
+async def test_captcha_detection_sees_the_whole_page(browser_serves):
+    """Stripped first, the challenge would lose its marker and pass for content."""
+    browser_serves(CAPTCHA_PAGE)
+    async with aiohttp.ClientSession() as session:
+        response = await retrieve_one(URL, session, methods=["browser"], output_format="html",
+                                      strip=True)
+    assert not response.success
+    assert isinstance(response.errors["browser"], CaptchaEncounteredError)
+
+
+def test_stripped_travels_over_the_wire():
+    payload = ResponsePayload.from_dict({"url": URL, "output_format": "html",
+                                         "content": {"html": "<p>Hi</p>", "stripped": True}})
+    assert payload.to_response().content.stripped
+    assert ResponsePayload.from_dict(payload.to_dict()).content.stripped

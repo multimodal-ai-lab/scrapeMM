@@ -65,7 +65,8 @@ def test_the_client_itself_is_published(artefacts):
     wheel = artefacts["wheel"]
     for expected in ("scrapemm/__init__.py",
                      "scrapemm/client/client.py",
-                     "scrapemm/common/wire.py"):
+                     "scrapemm/common/wire.py",
+                     "scrapemm/search/serper.py"):
         assert expected in wheel, f"the wheel is missing {expected}"
 
 

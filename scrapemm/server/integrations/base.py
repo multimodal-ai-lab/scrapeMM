@@ -3,6 +3,7 @@ import logging
 from abc import ABC, abstractmethod
 
 from scrapemm.common.scraping_response import ScrapedContent
+from scrapemm.server import timing
 from scrapemm.server.util import get_domain
 
 logger = logging.getLogger("scrapeMM")
@@ -15,6 +16,9 @@ class RetrievalIntegration(ABC):
     name: str
     domains: list[str]  # The domains supported by this integration
     connected: bool | None = None
+    # Whether its first request waits for a browser slot, which then starts the URL's
+    # retrieval time (see `timing`); otherwise calling the integration does
+    waits_for_browser_slot: bool = False
 
     @property
     def _connect_lock(self) -> asyncio.Lock:
@@ -69,6 +73,8 @@ class RetrievalIntegration(ABC):
             raise RuntimeError(f"Connection to {self.name} service could not be established.")
 
         logger.debug(f"Calling {self.name} service for {url}")
+        if not self.waits_for_browser_slot:
+            timing.work_started()
         return await self._get(url, **kwargs)
 
     async def probe(self) -> None:

@@ -7,6 +7,7 @@ const DESCRIPTIONS: Record<string, string> = {
   TargetUnavailableError: 'The target was unavailable.',
   AccessBlockedError: 'Access to the content was blocked.',
   CaptchaEncounteredError: 'A CAPTCHA stood in the way.',
+  PaywallError: 'Only the teaser came through: the content is behind a paywall.',
   RateLimitError: 'A rate limit was reached.',
   QuotaExceededError: 'A service quota is used up.',
   DomainBlacklistedError: 'The domain is blacklisted.',

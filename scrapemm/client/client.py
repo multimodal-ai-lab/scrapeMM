@@ -8,14 +8,14 @@ being scraped.
 
 import json
 import logging
-from typing import Any, AsyncIterator, Collection, Literal, Optional
+from typing import Any, AsyncIterator, Collection, Literal, Optional, overload
 
 import aiohttp
 from tqdm import tqdm
 
 from scrapemm.common import APP_NAME, OUTPUT_FORMATS, OutputFormat, ScrapingResponse
 from scrapemm.common.exceptions import ServerError
-from scrapemm.common.wire import PROTOCOL_VERSION, RegistryInfo, ResponsePayload
+from scrapemm.common.wire import ContentPayload, PROTOCOL_VERSION, RegistryInfo, ResponsePayload
 from .media import resolve_content
 from .settings import Settings, settings
 
@@ -24,11 +24,47 @@ logger = logging.getLogger(APP_NAME)
 CHUNK_SIZE = 64 * 1024
 
 
-def _headers(config: Settings) -> dict[str, str]:
-    headers = {"Accept": "application/x-ndjson"}
+def _headers(config: Settings, accept: str = "application/x-ndjson") -> dict[str, str]:
+    headers = {"Accept": accept}
     if config.api_key:
         headers["Authorization"] = f"Bearer {config.api_key}"
     return headers
+
+
+@overload
+async def retrieve(  # type: ignore[overload-overlap]  # str is a Collection[str]
+        urls: str,
+        show_progress: bool = True,
+        actions: list[dict] | None = None,
+        methods: Literal["auto"] | list[str] | list[Literal["auto"] | list[str]] = "auto",
+        output_format: OutputFormat = "multimodal",
+        include_media: bool = True,
+        max_video_size: int | None = None,
+        prioritize: Literal["completeness", "speed"] = "completeness",
+        use_cache: bool = True,
+        hedging_delay: float | None = None,
+        strip: bool = False,
+        screenshot: bool = False,
+        config: Optional[Settings] = None,
+) -> ScrapingResponse: ...
+
+
+@overload
+async def retrieve(
+        urls: Collection[str],
+        show_progress: bool = True,
+        actions: list[dict] | None = None,
+        methods: Literal["auto"] | list[str] | list[Literal["auto"] | list[str]] = "auto",
+        output_format: OutputFormat = "multimodal",
+        include_media: bool = True,
+        max_video_size: int | None = None,
+        prioritize: Literal["completeness", "speed"] = "completeness",
+        use_cache: bool = True,
+        hedging_delay: float | None = None,
+        strip: bool = False,
+        screenshot: bool = False,
+        config: Optional[Settings] = None,
+) -> list[ScrapingResponse]: ...
 
 
 async def retrieve(
@@ -42,6 +78,8 @@ async def retrieve(
         prioritize: Literal["completeness", "speed"] = "completeness",
         use_cache: bool = True,
         hedging_delay: float | None = None,
+        strip: bool = False,
+        screenshot: bool = False,
         config: Optional[Settings] = None,
 ) -> ScrapingResponse | list[ScrapingResponse]:
     """Retrieves the contents present at the given URL(s) through a scrapeMM server.
@@ -77,6 +115,12 @@ async def retrieve(
         instead of scraping it again.
     :param hedging_delay: Seconds of head start each retrieval method gets before the
         next one is launched alongside it. None uses the server's configured default.
+    :param strip: Whether to remove the page's UI elements (navigation, headers, footers,
+        sidebars, cookie banners, etc.) from every output format, the HTML included,
+        keeping only the main content. See `ScrapedContent.stripped`.
+    :param screenshot: Whether to also capture each retrieved page in the server's browser,
+        as it looks to a visitor (`ScrapingResponse.screenshot`, an ezMM Image). Costs the
+        server a page load per URL.
     :param config: Connection settings to use instead of the global ones.
     """
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
@@ -105,6 +149,8 @@ async def retrieve(
         "prioritize": prioritize,
         "use_cache": use_cache,
         "hedging_delay": hedging_delay,
+        "strip": strip,
+        "screenshot": screenshot,
     }
 
     by_url: dict[str, ScrapingResponse] = {}
@@ -132,6 +178,10 @@ async def retrieve(
 
             elif kind == "error":
                 raise ServerError(message.get("message", "The server reported an error."))
+
+            # Anything else -- "heartbeat" lines that keep a slow batch's connection from
+            # going silent, the closing "summary", kinds a newer server adds -- carries
+            # nothing the results need
 
         if progress is not None:
             progress.close()
@@ -200,9 +250,11 @@ def _describe_failure(url: str, response: aiohttp.ClientResponse,
     return message, informative
 
 
-async def _identify(session: aiohttp.ClientSession, base_url: str) -> str:
-    """Says what actually answers at `base_url`. The health check needs no API key,
-    so this works even when the key is wrong or missing."""
+async def _identify(session: aiohttp.ClientSession, base_url: str,
+                    route: str = "POST /v1/retrieve") -> str:
+    """Says what actually answers at `base_url`, which was expected to serve `route`.
+    The health check needs no API key, so this works even when the key is wrong or
+    missing."""
     service = None
     try:
         async with session.get(f"{base_url}/healthz", allow_redirects=False,
@@ -214,8 +266,8 @@ async def _identify(session: aiohttp.ClientSession, base_url: str) -> str:
         pass
 
     if service is not None:
-        return (f". A scrapeMM server {service} runs at {base_url} but has no POST "
-                f"/v1/retrieve; update the server or the client so their versions match.")
+        return (f". A scrapeMM server {service} runs at {base_url} but has no {route}; "
+                f"update the server or the client so their versions match.")
     return (f". Whatever answers at {base_url} is not a scrapeMM server (it has no "
             f"scrapeMM health check at /healthz), so another service probably holds "
             f"this port. Point the client at the scrapeMM server with "
@@ -247,12 +299,18 @@ def _check_protocol(header: dict) -> None:
 async def _to_response(payload: ResponsePayload, registry: RegistryInfo,
                        session: aiohttp.ClientSession,
                        config: Settings) -> ScrapingResponse:
-    multimodal = None
+    multimodal = screenshot = None
     if payload.content is not None:
         multimodal = await resolve_content(
             payload.content, registry, session, config.base_url,
             _headers(config), config.media_transfer)
-    return payload.to_response(multimodal=multimodal)
+    if payload.screenshot is not None:
+        # Delivered like a medium: as a sequence of just that one
+        sequence = await resolve_content(
+            ContentPayload(multimodal=payload.screenshot.ref, items=[payload.screenshot]),
+            registry, session, config.base_url, _headers(config), config.media_transfer)
+        screenshot = next((e for e in sequence or [] if not isinstance(e, str)), None)
+    return payload.to_response(multimodal=multimodal, screenshot=screenshot)
 
 
 def _missing(url: str, output_format: OutputFormat) -> ScrapingResponse:

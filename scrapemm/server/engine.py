@@ -21,8 +21,11 @@ from scrapemm.common import (ScrapingResponse, ScrapedContent, OutputFormat, OUT
                              RateLimitError)
 from scrapemm.common.exceptions import RetrievalFailed, UnsupportedDomainError, \
     DomainBlacklistedError, DiskFull, TargetUnavailableError, QuotaExceededError, \
-    AccessBlockedError, CaptchaEncounteredError, PaywallError
-from scrapemm.server import challenges, reachability
+    AccessBlockedError, CaptchaEncounteredError, PaywallError, RegionBlockedError
+from scrapemm.server import challenges, reachability, chain, proxy, timing
+from scrapemm.server.download.documents import (document_extension, is_document_content_type,
+                                                to_content as documents_to_content)
+from scrapemm.server import screenshot as screenshot_module
 from scrapemm.server.blacklist import blacklist
 from scrapemm.server.cache import cache, cache_key
 from scrapemm.server.captcha_detect import detect_captcha
@@ -31,61 +34,28 @@ from scrapemm.server.config import get_config_var
 from scrapemm.server.download import download_image, download_video
 from scrapemm.server.download.common import HEADERS
 from scrapemm.server.download.util import (looks_like_image_file_url, looks_like_video_file_url,
-                                           looks_like_hls_url, looks_like_pdf_url)
+                                           looks_like_hls_url)
 from scrapemm.server.integrations import (retrieve_via_integration, fire, decodo, browser,
-                                          get_integrations_for_url, INTEGRATION_NAMES,
+                                          INTEGRATION_NAMES,
                                           DOMAIN_TO_INTEGRATION)
 from scrapemm.server.integrations.firecrawl.firecrawl import configured_firecrawl_urls
-from scrapemm.server.toggles import filter_methods, is_enabled, resolve_alias
+from scrapemm.server.integrations import proxy_browser
+from scrapemm.server.toggles import is_enabled
+from scrapemm.server.workers import run_light
 from scrapemm.server.util import (run_with_semaphore, get_domain, normalize_video, preprocess_url,
-                                  to_scraped_content)
+                                  strip_content, to_scraped_content)
 
 logger = logging.getLogger("scrapeMM")
 
 # Hedging duplicates work to save latency, so it stays opt-in: None disables it.
 DEFAULT_HEDGING_DELAY = None
 
-# The Browser method -- the shared headed browser -- comes before the scraping services:
-# on open-web pages it succeeded more often than Firecrawl and as often as Decodo, at a
-# fraction of Decodo's time, and it costs nothing. Decodo is paid, so it comes last.
+# The order of the methods, the domain routes and which methods run at all are the
+# retrieval chain's business (see `chain.py`); the engine executes its plan.
 BROWSER = "browser"
-METHODS = ["integrations", BROWSER, "firecrawl", "decodo"]
-ALL_METHODS = METHODS + INTEGRATION_NAMES
+PLAIN_HTTP = chain.label("plain_http")
 
 UNSUPPORTED_DOMAINS = []
-
-BEST_METHODS = {
-    # Social media platforms:
-    "instagram.com": ["integrations"],
-    "facebook.com": ["integrations"],
-    "fb.watch": ["integrations"],
-    "x.com": ["integrations"],
-    "twitter.com": ["integrations"],
-    "t.co": ["integrations"],
-    "t.me": ["integrations"],
-    "tiktok.com": ["integrations"],
-    "telegram.me": ["integrations"],
-    "bsky.app": ["integrations"],
-    "truthsocial.com": ["firecrawl"],
-    "reddit.com": ["integrations", "firecrawl", "decodo"],
-    "youtube.com": ["integrations"],
-    "youtu.be": ["integrations"],
-    # Archiving services:
-    "archive.today": ["integrations"],
-    "archive.is": ["integrations"],
-    "archive.ph": ["integrations"],
-    "archive.vn": ["integrations"],
-    "archive.li": ["integrations"],
-    "archive.fo": ["integrations"],
-    "archive.md": ["integrations"],
-    "perma.cc": ["integrations"],
-    "archive.org": ["integrations"],
-    "awesomescreenshot.com": ["integrations"],
-    # Miscellaneous:
-    "washingtonpost.com": ["decodo"],
-    "verafiles.org": ["decodo", "firecrawl"],
-    "youturn.in": ["decodo"],
-}
 
 
 async def retrieve(
@@ -98,7 +68,9 @@ async def retrieve(
         max_video_size: int | None = None,
         prioritize: Literal["completeness", "speed"] = "completeness",
         use_cache: bool = True,
-        hedging_delay: float | None = None
+        hedging_delay: float | None = None,
+        strip: bool = False,
+        screenshot: bool = False
 ) -> ScrapingResponse | list[ScrapingResponse]:
     """Main function of this repository. Downloads the contents present at the given URL(s).
     For each URL, returns a ScrapingResponse containing the retrieved content, error, and method.
@@ -144,6 +116,16 @@ async def retrieve(
         work (and, for paid methods, duplicated requests), hence disabled by default.
         Pass a number to enable it for this call, or set it process-wide via
         `update_config(hedging_delay=5)`. None or 0 runs the methods one after another.
+    :param strip: If True, the page's UI elements (navigation, headers, footers,
+        sidebars, cookie banners, etc.) are removed from every output format, the HTML
+        included, keeping only the main content. Done by scrapeMM alike for every method,
+        on the retrieved page as cached: stripped and unstripped requests share the cache.
+        See `ScrapedContent.stripped`.
+    :param screenshot: If True, each retrieved page is also captured as it looks to a
+        visitor: `ScrapingResponse.screenshot`. Taken in the same session by the method
+        that renders the page (the browser, the archives retrieved in it, Firecrawl), never
+        by loading it again; methods that do not render it (plain HTTP, Decodo, API
+        integrations) yield none. See `scrapemm.server.screenshot`.
     """
     # Ensure URLs are string or list
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
@@ -171,7 +153,7 @@ async def retrieve(
     if methods == "auto":
         methods = len(urls_to_retrieve) * ["auto"]
     elif methods is None:
-        methods = len(urls_to_retrieve) * [METHODS.copy()]  # Use copy to avoid modifying the original list
+        methods = len(urls_to_retrieve) * ["auto"]
     elif isinstance(methods, list):
         assert len(methods) >= 1, "'methods' cannot be an empty list."
 
@@ -187,14 +169,16 @@ async def retrieve(
 
     urls_unique = set(urls_to_retrieve)
 
-    async with aiohttp.ClientSession(headers=HEADERS) as session:
+    async with aiohttp.ClientSession(headers=HEADERS, trace_configs=[timing.request_trace()]) as session:
         # Retrieve URLs concurrently
         tasks = [_retrieve_single(url, session, url_to_methods[url], actions,
                                   output_format, max_video_size, prioritize, use_cache,
-                                  hedging_delay) for url in
+                                  hedging_delay, screenshot) for url in
                  urls_unique]
         results = await run_with_semaphore(tasks, limit=40, show_progress=show_progress and len(urls_unique) > 1,
                                            progress_description="Retrieving URLs...")
+        if strip:
+            results = [await _strip(response) for response in results]
         _release_media_memory()
 
         # Reconstruct output list
@@ -234,27 +218,30 @@ async def retrieve_one(
         prioritize: Literal["completeness", "speed"] = "completeness",
         use_cache: bool = True,
         hedging_delay: float | None = None,
+        strip: bool = False,
+        screenshot: bool = False,
 ) -> ScrapingResponse:
     """Retrieves a single URL, subject to the server's concurrency limit. This is what
     the API streams over: it needs results one at a time, as they finish, rather than
     the whole batch at once."""
     if methods is None:
-        methods = METHODS.copy()
+        methods = "auto"
     if hedging_delay is None:
         hedging_delay = get_config_var("hedging_delay", DEFAULT_HEDGING_DELAY)
 
     # Identical requests in flight at the same time -- from concurrent jobs, typically --
     # share one retrieval instead of each scraping the same page. The cache only helps
-    # once the first of them has finished.
+    # once the first of them has finished. Stripping is not part of the key: it is done
+    # per caller, on the shared result. A screenshot is: it is taken during the retrieval.
     key = (preprocess_url(url), output_format, json.dumps(methods, default=str),
            json.dumps(actions, sort_keys=True, default=str), max_video_size, prioritize,
-           use_cache, hedging_delay)
+           use_cache, hedging_delay, screenshot)
     shared = _in_flight.get(key)
     joined = shared is not None
     if shared is None:
         shared = _InFlight(asyncio.create_task(_gated_retrieve(
             url, session, methods, actions, output_format, max_video_size, prioritize,
-            use_cache, hedging_delay)))
+            use_cache, hedging_delay, screenshot)))
         _in_flight[key] = shared
         shared.task.add_done_callback(lambda _, k=key, s=shared: _forget(k, s))
     else:
@@ -275,9 +262,19 @@ async def retrieve_one(
     if joined and response.success:
         # Answered without a scrape of its own, which is what a cache hit means
         response = replace(response, from_cache=True)
+    if strip:
+        response = await _strip(response)
     # Report under the URL as requested, not as preprocessed (e.g. percent-decoded):
     # the client maps results back onto its request by URL
     return replace(response, url=url)
+
+
+async def _strip(response: ScrapingResponse) -> ScrapingResponse:
+    """The response with its content stripped of UI elements. Never alters the given
+    response's content, which may be the one held in the cache."""
+    if response.content is None:
+        return response
+    return replace(response, content=await strip_content(response.content, url=response.url))
 
 
 @dataclass
@@ -296,15 +293,19 @@ def _forget(key: tuple, shared: _InFlight) -> None:
 
 
 async def _gated_retrieve(url, session, methods, actions, output_format, max_video_size,
-                          prioritize, use_cache, hedging_delay) -> ScrapingResponse:
+                          prioritize, use_cache, hedging_delay, screenshot) -> ScrapingResponse:
     # Its own HTTP session rather than the first caller's: that one closes when its job
     # ends or its client disconnects, while others may still be waiting on this result
     global _active
-    async with _concurrency_gate(), aiohttp.ClientSession(headers=HEADERS) as own:
+    clock = timing.start_clock()  # Queue time starts here, see `timing`
+    async with (_concurrency_gate(),
+                aiohttp.ClientSession(headers=HEADERS, trace_configs=[timing.request_trace()]) as own):
+        clock.admit()
         _active += 1
         try:
             return await _retrieve_single(url, own, methods, actions, output_format,
-                                          max_video_size, prioritize, use_cache, hedging_delay)
+                                          max_video_size, prioritize, use_cache, hedging_delay,
+                                          screenshot)
         finally:
             _active -= 1
             _release_media_memory()
@@ -335,7 +336,17 @@ except OSError:
     _libc = None
 
 
-async def _retrieve_single(
+async def _retrieve_single(url: str, session: aiohttp.ClientSession, *args) -> ScrapingResponse:
+    """Retrieves the URL, its response timed from its first outgoing request on (see
+    `timing`). In a batch of `retrieve()`, the URL counts as admitted when this runs."""
+    clock = timing.current()
+    if clock is None:
+        clock = timing.start_clock()
+    clock.admit()
+    return clock.stamp(await _retrieve(url, session, *args))
+
+
+async def _retrieve(
         url: str,
         session: aiohttp.ClientSession,
         methods: Literal["auto"] | list[str] = "auto",
@@ -344,11 +355,13 @@ async def _retrieve_single(
         max_video_size: int | None = None,
         prioritize: Literal["completeness", "speed"] = "completeness",
         use_cache: bool = True,
-        hedging_delay: float | None = None
+        hedging_delay: float | None = None,
+        screenshot: bool = False
 ) -> ScrapingResponse:
     logger.debug(f"Retrieving {url}")
     start_time = time.time()
-    auto = methods == "auto"  # Only then may fallbacks beyond the requested methods run
+    # The methods that render the page capture it while they have it open
+    screenshot_module.requested(screenshot)
 
     if get_domain(url) in UNSUPPORTED_DOMAINS:
         return _failure(url, output_format, dict(scrapemm=UnsupportedDomainError("Unsupported domain.")),
@@ -365,73 +378,104 @@ async def _retrieve_single(
             f"the server's web UI to allow it again.")
         return _failure(url, output_format, dict(scrapemm=e), start_time)
 
-    # Resolve the best methods to try in order. Both lists are kept: the disabled ones
-    # explain an empty result better than their absence does.
-    applicable: list[str] = applicable_methods(url, methods)
-    methods: list[str] = filter_methods(applicable)
+    # The retrieval chain's plan for this URL: its methods in order, live and archive
+    plan = chain.resolve(url, methods)
+    methods: list[str] = [chain.label(m) for m in plan.live]
+    archives: list[str] = plan.archive
 
-    if len(methods) == 0:
+    if not methods and not archives:
         # Distinguish "nothing here can do this" from "you switched off the things that
         # could". The second is a setting somebody can undo, and saying so saves the
         # confusion of a domain that worked yesterday reporting itself unsupported.
-        turned_off = [m for m in applicable if not is_enabled(m)]
+        turned_off = [m for m, why in plan.skipped if why == "switched off"]
         e = UnsupportedDomainError(
-            f"Every retrieval method for this URL is disabled "
-            f"({', '.join(turned_off)}). Re-enable one on the dashboard."
+            f"Every retrieval method for this URL is switched off "
+            f"({', '.join(turned_off)}). Switch one on in the retrieval chain (Settings)."
             if turned_off else
             "scrapeMM does not support that URL at this time.")
         return _failure(url, output_format, dict(scrapeMM=e), start_time)
 
     # Re-use a recent, successful retrieval of the same URL, if there is any
-    key = cache_key(url, output_format, methods, max_video_size)
+    key = cache_key(url, output_format, [chain.label(m) for m in plan.order],
+                    max_video_size)
     if use_cache:
         cached = cache.get(key)
-        if cached is not None:
+        # Without a screenshot, it cannot answer for one: retrieved again, with one, the
+        # result then serves either kind of request
+        if cached is not None and not (screenshot and cached.screenshot is None):
             logger.info(f"📎 Serving {url} from cache.")
-            return replace(cached, from_cache=True, retrieval_time=time.time() - start_time)
+            return replace(cached, from_cache=True, retrieval_time=time.time() - start_time,
+                           screenshot=cached.screenshot if screenshot else None)
 
     # A domain behind an open CAPTCHA challenge would only gate this URL too: queue it
     # with the challenge, to be retrieved once somebody solves it
     if challenges.store.holds(domain):
-        challenge = challenges.store.get(domain)
-        challenges.store.record(domain, url, challenge.captcha if challenge else "CAPTCHA",
-                                output_format, methods, max_video_size)
         e = CaptchaEncounteredError(
             f"{domain} is behind a CAPTCHA that is waiting for a human. The URL is queued: "
             f"solve the challenge on the CAPTCHA page of the web UI, then request it again "
             f"to get the result.")
-        return _failure(url, output_format, dict(scrapemm=e), start_time)
+        errors = dict(scrapemm=e)
+        # An archived copy beats waiting for a human, who may never come
+        if winner := await _run_archives(archives, url, session, errors, output_format,
+                                         max_video_size):
+            return await _success(url, key, *winner, errors, output_format, start_time)
+        challenges.store.record(domain, url, challenges.store.captcha_for(domain),
+                                output_format, methods, max_video_size)
+        return _failure(url, output_format, errors, start_time)
 
     # A host that is down fails every method only after its full timeout, minutes in
     # all: find out cheaply first. Integrations' domains are up by definition.
     unreachable: Optional[str] = None  # Why the host cannot be reached from here
     skipped: list[str] = []
+    # Set once a method found the page withheld from this server's region (HTTP 451):
+    # the other methods fetching from here would be too, the others may not
+    region_blocked: list[RegionBlockedError] = []
+    # The methods that go through the proxy right away (see `scrapemm.server.proxy`)
+    proxy_first: set[str] = set()
     if domain not in DOMAIN_TO_INTEGRATION:
+        timing.work_started()
         verdict, reason = await reachability.check(url)
         if verdict == "dead":
-            return _failure(url, output_format, dict(scrapemm=TargetUnavailableError(reason)),
-                            start_time)
+            errors = dict(scrapemm=TargetUnavailableError(reason))
+            return await _last_resort(url, key, session, errors, output_format,
+                                      max_video_size, start_time, archives)
         if verdict == "unreachable":
             # Only from this server, maybe (e.g. its IP is blocked): services that fetch
             # from elsewhere still get their chance, the local methods are skipped
             local = _local_methods()
+            if proxy.active():
+                # ...unless they can go through the proxy: from its address, the host
+                # may well answer
+                proxy_first = {m for m in methods if m in local and m in proxy.PROXY_METHODS}
+                local = local - proxy_first
+                if proxy_first:
+                    logger.info(f"🔀 {url} is unreachable from this server; trying "
+                                f"{', '.join(sorted(proxy_first))} through the proxy.")
             skipped = [m for m in methods if m in local]
             methods = [m for m in methods if m not in local]
             unreachable = reason
             if not methods:
-                return _failure(url, output_format, dict(scrapemm=TargetUnavailableError(
-                    f"{reason} No enabled method fetches from elsewhere.")), start_time)
+                if not skipped:  # The plan had archives only
+                    return await _last_resort(url, key, session, dict(), output_format,
+                                              max_video_size, start_time, archives)
+                errors = dict(scrapemm=TargetUnavailableError(
+                    f"{reason} No enabled method fetches from elsewhere."))
+                return await _last_resort(url, key, session, errors, output_format,
+                                          max_video_size, start_time, archives)
             logger.info(f"Skipping {', '.join(skipped) or 'no method'} for {url}: the host "
                         f"is unreachable from this server. Trying {', '.join(methods)}.")
 
     try:
         # Validate methods
+        known = {chain.label(k) for k in chain.METHOD_INFO} | set(INTEGRATION_NAMES)
         for method in methods:
-            assert method in ALL_METHODS, f"Unknown method '{method}'. Allowed: {ALL_METHODS}"
+            assert method in known, f"Unknown method '{method}'. Allowed: {sorted(known)}"
 
         # Shortcut to download as medium
         if output_format == "multimodal":
             medium = None
+            if looks_like_image_file_url(url) or looks_like_video_file_url(url) or looks_like_hls_url(url):
+                timing.work_started()
             if looks_like_image_file_url(url):
                 medium = await download_image(url, session=session)
             elif looks_like_video_file_url(url) or looks_like_hls_url(url):
@@ -450,8 +494,10 @@ async def _retrieve_single(
                 return fire.scrape(url, session=session, output_format=output_format,
                                    actions=actions, max_video_size=max_video_size)
             elif m.lower() == BROWSER:
-                return browser._get(url, output_format=output_format,
-                                    max_video_size=max_video_size)
+                # Through the proxy, in a context of its own, if the attempt goes through it
+                via = proxy_browser.browser if proxy.route() else browser
+                return via._get(url, output_format=output_format,
+                                max_video_size=max_video_size)
             elif m == PLAIN_HTTP:
                 return _plain_http(url, session, output_format, max_video_size)
             elif m.lower() == "decodo":
@@ -460,7 +506,9 @@ async def _retrieve_single(
                 return decodo.scrape(url, session, output_format=output_format,
                                      timeout=15 if prioritize == "speed" else 30 if unreachable else 60,
                                      max_retries=1 if prioritize == "speed" or unreachable else 5,
-                                     max_video_size=max_video_size)
+                                     max_video_size=max_video_size,
+                                     # Through a proxy outside the region that blocks
+                                     geo=decodo.UNBLOCKED_GEO if region_blocked else None)
             else:
                 return retrieve_via_integration(url, integration_name=m, session=session,
                                                 max_video_size=max_video_size,
@@ -473,83 +521,106 @@ async def _retrieve_single(
     # Try the methods until one succeeds
     logger.debug(f"Trying methods in order: {', '.join(methods)}")
 
-    async def evaluate(method_name: str) -> tuple[str, object]:
-        """Runs one method and classifies its outcome."""
-        logger.debug(f"Now executing {method_name}...")
-        content = await _execute(url, map_method_to_retrieval_routine, method_name, session)
+    # The methods whose (last) attempt went through the proxy, and the errors of their
+    # direct attempts before (see `scrapemm.server.proxy`)
+    proxied: set[str] = set()
+    direct_errors: dict[str, Exception] = {}
 
+    async def run_attempt(method_name: str, via_proxy: bool) -> tuple[tuple[str, object], bool]:
+        """Runs the method once, through the proxy if so, and classifies its outcome.
+        Also returns whether the attempt went through the proxy."""
+        with proxy.attempt(proxy.active() if via_proxy else None) as current:
+            content = await _execute(url, map_method_to_retrieval_routine, method_name, session)
         if isinstance(content, Exception):
-            return "error", content
+            return ("error", content), current.used
+        # In a thread: the checks parse the whole page (BeautifulSoup for the paywall
+        # check), which for a large page held the event loop -- every request -- for
+        # seconds. In a thread, the loop keeps getting its turns.
+        return await run_light(_classify, url, method_name, content, output_format), current.used
 
-        if not content:
-            # Methods are expected to raise instead of returning empty-handed
-            logger.info(f"Method {method_name} returned no content for url: {url}.")
-            return "error", RetrievalFailed(f"Method {method_name} returned no content.")
+    async def evaluate(method_name: str) -> tuple[str, object]:
+        """Runs one method and classifies its outcome. A method that failed because of
+        this server's address is retried once through the proxy, if one is in use."""
+        local = method_name in _local_methods()
+        via_proxy = method_name in proxy_first
+        if region_blocked and local:
+            if not (method_name in proxy.PROXY_METHODS and proxy.active()):
+                return "error", RegionBlockedError(f"Skipped: {region_blocked[0]}")
+            via_proxy = True  # From the proxy's region instead
+        logger.debug(f"Now executing {method_name}{' through the proxy' if via_proxy else ''}...")
+        outcome, used = await run_attempt(method_name, via_proxy)
+        if outcome[0] == "error" and not used and proxy.retry_worthy(method_name, outcome[1]):
+            logger.info(f"🔀 Retrying {method_name} for {url} through the proxy: "
+                        f"{str(outcome[1]).splitlines()[0][:200]}")
+            direct_errors[method_name] = outcome[1]
+            outcome, used = await run_attempt(method_name, True)
+        if used:
+            proxied.add(method_name)
+        elif isinstance(outcome[1], RegionBlockedError) and local:
+            if not region_blocked:
+                logger.info(f"🌍 {url} is withheld from this server's region; skipping the "
+                            f"other methods that fetch from here"
+                            f"{' (or going through the proxy)' if proxy.active() else ''}.")
+            region_blocked.append(outcome[1])
+        return outcome
 
-        # Ensure the method returned the actual content and not a CAPTCHA challenge
-        if captcha := detect_captcha(content):
-            logger.warning(f"🤖 Method {method_name} encountered a {captcha} at {url}.")
-            return "error", CaptchaEncounteredError(f"Method {method_name} encountered a {captcha}.")
+    # The chain in its order: consecutive live methods as one group (hedged if so
+    # configured), archive methods one after another, until one gets the page
+    winner, errors, partial = None, {}, None
+    live_over = False  # A live method found the page missing: the others would too
+    segments = _segments(plan.order)
+    last_live = max((i for i, (stage, _) in enumerate(segments) if stage == chain.LIVE),
+                    default=-1)
+    archive_deadline = _archive_deadline(url)
+    for i, (stage, keys) in enumerate(segments):
+        if stage == chain.ARCHIVE:
+            winner = await _run_archives(keys, url, session, errors, output_format,
+                                         max_video_size, deadline=archive_deadline)
+        else:
+            group = [chain.label(k) for k in keys if chain.label(k) in methods]
+            if group and not live_over:
+                if hedging_delay and hedging_delay > 0 and len(group) > 1:
+                    winner, found, part = await _run_methods_hedged(group, evaluate,
+                                                                    hedging_delay, output_format)
+                else:
+                    winner, found, part = await _run_methods_sequentially(group, evaluate,
+                                                                          output_format)
+                errors.update(found)
+                partial = partial or part
+                live_over = any(isinstance(e, TargetUnavailableError) for e in found.values())
+            # The browser also steps in for a Cloudflare-challenged page routed to other
+            # methods, once the last live method failed
+            if (winner is None and i == last_live and unreachable is None and methods
+                    and BROWSER not in methods
+                    and (content := await _cloudflare_fallback(url, domain, session, errors,
+                                                               output_format, max_video_size))):
+                winner = (BROWSER, content)
+        if winner is not None:
+            break
 
-        # ...nor only the teaser of a paywalled article
-        if reason := detect_paywall(content):
-            logger.info(f"💰 Method {method_name} got only the paywalled teaser of {url}: {reason}.")
-            return "error", PaywallError(f"Method {method_name} could not get around the "
-                                         f"paywall: {reason}.")
-
-        # ...nor an empty page: it would count as a success and be cached, so that
-        # asking again returned nothing too (seen with archive replays that never loaded)
-        if _is_empty(content, output_format):
-            logger.info(f"Method {method_name} returned an empty page for {url}.")
-            return "error", RetrievalFailed(f"Method {method_name} returned an empty page "
-                                            f"without any text or media.")
-
-        if content.get(output_format) is not None:
-            return "success", content
-
-        # The method retrieved something, just not in the requested format (e.g. the X API
-        # has no HTML page to offer). Keep it, but continue with the remaining methods.
-        logger.info(f"Method {method_name} could not provide the content of {url} as {output_format}.")
-        return "partial", content
-
-    if hedging_delay and hedging_delay > 0 and len(methods) > 1:
-        winner, errors, partial = await _run_methods_hedged(methods, evaluate, hedging_delay,
-                                                            output_format)
-    else:
-        winner, errors, partial = await _run_methods_sequentially(methods, evaluate, output_format)
+    # Which attempts went through the proxy: "<method> (via proxy)" for the winner and
+    # the errors, the direct attempt's error under the method's own name
+    if proxied:
+        for m in proxied:
+            if m in errors:
+                errors[f"{m} (via proxy)"] = errors.pop(m)
+        if winner is not None and winner[0] in proxied:
+            winner = (f"{winner[0]} (via proxy)", winner[1])
+    errors.update(direct_errors)
 
     if unreachable:
         for m in skipped:
             errors[m] = TargetUnavailableError(f"Skipped: {unreachable}")
-        if winner is None and all(isinstance(e, (TimeoutError, asyncio.TimeoutError,
-                                                  aiohttp.ClientConnectorError))
-                                  for m, e in errors.items() if m not in skipped):
+        tried = [errors[m] for m in methods if m in errors]
+        if winner is None and tried and all(isinstance(e, (TimeoutError, asyncio.TimeoutError,
+                                                            aiohttp.ClientConnectorError))
+                                            for e in tried):
             # Nobody got through from elsewhere either: the host is down. Its other
             # URLs need not try again.
             reachability.mark_dead(url, f"{unreachable} Remote services timed out on it too.")
 
-    if unreachable is None and winner is None and BROWSER not in methods and (content := await _cloudflare_fallback(
-            url, domain, session, errors, output_format, max_video_size)):
-        winner = (BROWSER, content)
-
-    # Last resort for the open web: the page as a plain request gets it
-    if winner is None and auto and domain not in DOMAIN_TO_INTEGRATION and not unreachable:
-        status, result = await evaluate(PLAIN_HTTP)
-        if status == "success":
-            winner = (PLAIN_HTTP, result)
-        elif status == "error":
-            errors[PLAIN_HTTP] = result
-
     if winner is not None:
-        method_name, content = winner
-        logger.info(f"🎉 Successfully retrieved with method: {method_name}")
-        if content.multimodal is not None:
-            await postprocess_media(content.multimodal)
-        response = ScrapingResponse(url=url, content=content, method=method_name, errors=errors,
-                                    output_format=output_format,
-                                    retrieval_time=time.time() - start_time)
-        cache.put(key, response)
-        return response
+        return await _success(url, key, *winner, errors, output_format, start_time)
 
     # All methods failed
     logger.warning(f"All retrieval methods failed for URL: {url}")
@@ -562,14 +633,480 @@ async def _retrieve_single(
     return _failure(url, output_format, errors, start_time, content=partial)
 
 
+def _classify(url: str, method_name: str, content: Optional[ScrapedContent],
+              output_format: OutputFormat) -> tuple[str, object]:
+    """Judges what a method returned: "success", "partial" (content, but not in the
+    requested format) or "error", along with the content or the exception."""
+    if not content:
+        # Methods are expected to raise instead of returning empty-handed
+        logger.info(f"Method {method_name} returned no content for url: {url}.")
+        return "error", RetrievalFailed(f"Method {method_name} returned no content.")
+
+    _derive_markdown(content)
+
+    # ...nor a notice that the page is withheld from this region (a 451 page). It may
+    # carry a CAPTCHA widget too, and is no CAPTCHA anybody could solve
+    if notice := _region_block_notice(content):
+        logger.info(f"🌍 Method {method_name} got a regional block notice for {url}.")
+        return "error", RegionBlockedError(f"Method {method_name}: the page is blocked in "
+                                            f"this region (\"{notice}\").")
+
+    # Ensure the method returned the actual content and not a CAPTCHA challenge
+    if captcha := detect_captcha(content):
+        if document_extension(url):
+            # A bot check in front of a file: the browser waits it out and downloads the
+            # file (see `HeadedBrowser._document()`); for any other method it is a wall,
+            # not a CAPTCHA a human could usefully solve for the queue
+            logger.info(f"Method {method_name} got a bot check ({captcha}) in front of the "
+                        f"document {url}.")
+            return "error", RetrievalFailed(f"Method {method_name} got a bot check in front "
+                                            f"of the document, not the file.")
+        logger.warning(f"🤖 Method {method_name} encountered a {captcha} at {url}.")
+        return "error", CaptchaEncounteredError(f"Method {method_name} encountered a {captcha}.")
+
+    # ...nor only the teaser of a paywalled article
+    if reason := detect_paywall(content):
+        logger.info(f"💰 Method {method_name} got only the paywalled teaser of {url}: {reason}.")
+        return "error", PaywallError(f"Method {method_name} could not get around the "
+                                     f"paywall: {reason}.")
+
+    # ...nor an empty page: it would count as a success and be cached, so that
+    # asking again returned nothing too (seen with archive replays that never loaded)
+    if _is_empty(content, output_format):
+        logger.info(f"Method {method_name} returned an empty page for {url}.")
+        return "error", RetrievalFailed(f"Method {method_name} returned an empty page "
+                                        f"without any text or media.")
+
+    # ...nor an archive's own "no such capture" page (Perma.cc's and the Wayback
+    # Machine's replayers answer a miss with a page of their own, which scraped fine).
+    # Not for the Perma.cc integration: its replay shows that page for a while also for
+    # records that do have the capture (under load), so the integration judges it itself,
+    # on the capture's frame, after waiting and reloading (see `PermaCC._extract_content`)
+    if method_name not in ("Perma.cc", chain.label("perma_cc")) and (marker := _replay_miss(content)):
+        logger.info(f"Method {method_name} got the archive's \"not archived\" page for {url}.")
+        return "error", TargetUnavailableError(
+            f"The archive has no capture of this page: its replay says \"{marker}\".")
+
+    if content.get(output_format) is not None:
+        return "success", content
+
+    # The method retrieved something, just not in the requested format (e.g. the X API
+    # has no HTML page to offer). Keep it, but continue with the remaining methods.
+    logger.info(f"Method {method_name} could not provide the content of {url} as {output_format}.")
+    return "partial", content
+
+
+# What sites show visitors from a region they withhold their pages from (HTTP 451),
+# typically US news sites for the EU over the GDPR
+REGION_BLOCK_MARKERS = (
+    "451: unavailable due to legal reasons",
+    "451 unavailable for legal reasons",
+    "unavailable for legal reasons",
+    "unavailable due to legal reasons",
+    "not available in your country",
+    "not available in your region",
+    "is currently unavailable in most european countries",
+    "from a country belonging to the european economic area",
+)
+
+
+def _region_block_notice(content: ScrapedContent) -> Optional[str]:
+    """The marker of a regional block notice, if the content is one: a short page that
+    says so. Articles quoting the phrase are long, and left alone."""
+    text = (content.markdown or (str(content.multimodal) if content.multimodal else "")
+            or _TAGS.sub(" ", content.html or "")).lower()
+    if len(text) > 3000:
+        return None
+    text = " ".join(text.split())
+    return next((m for m in REGION_BLOCK_MARKERS if m in text), None)
+
+
+# What the replayers show for a capture they do not have: pywb (Perma.cc, and archives
+# built on it) and the Wayback Machine
+REPLAY_MISS_MARKERS = (
+    "sorry, this page was not found in this archive",
+    "archived page not found",
+    "the wayback machine has not archived that url",
+    "hrm. the wayback machine",
+)
+
+
+def _replay_miss(content: ScrapedContent) -> Optional[str]:
+    """The marker of an archive's "no such capture" page, if the content is one: a short
+    page without media that says so. Real pages quoting the phrase are long, or have
+    media, and are left alone."""
+    if content.multimodal is not None and (content.multimodal.images or content.multimodal.videos):
+        return None
+    text = (content.markdown or (str(content.multimodal) if content.multimodal else "")
+            or _TAGS.sub(" ", content.html or "")).lower()
+    if len(text) > 2000:
+        return None
+    return next((m for m in REPLAY_MISS_MARKERS if m in text), None)
+
+
+def _derive_markdown(content: ScrapedContent) -> None:
+    """Fills in the Markdown of content that only came as a multimodal sequence, as the
+    integrations (TikTok, X, Telegram, ...) deliver it: the sequence's text with every
+    medium referenced by hyperlink to where it came from, as in the Markdown of a web
+    page, or by its ezMM reference where there is no web address to link to. So every
+    method provides the "markdown" format, not just those that scrape HTML."""
+    if content.markdown is not None or content.multimodal is None:
+        return
+    parts = []
+    for element in content.multimodal:
+        if isinstance(element, str):
+            parts.append(element)
+            continue
+        source = getattr(element, "source_url", None) or ""
+        if not source.startswith(("http://", "https://")):
+            parts.append(element.reference)  # E.g. a file:// URI: meaningless elsewhere
+        elif isinstance(element, Image):
+            parts.append(f"![{element.reference}]({source})")
+        else:
+            parts.append(f"[{element.kind}: {element.reference}]({source})")
+    content.markdown = " ".join(parts)
+
+
+async def _success(url: str, key, method_name: str, content: ScrapedContent,
+                   errors: dict, output_format: OutputFormat,
+                   start_time: float) -> ScrapingResponse:
+    logger.info(f"🎉 Successfully retrieved with method: {method_name}")
+    if content.multimodal is not None:
+        await postprocess_media(content.multimodal)
+    # What the method captured of the page, if asked to (see `screenshot`)
+    png = screenshot_module.take(content)
+    image = await screenshot_module.to_image(png, url) if png and screenshot_module.wanted() else None
+    response = ScrapingResponse(url=url, content=content, method=method_name, errors=errors,
+                                output_format=output_format,
+                                retrieval_time=time.time() - start_time, screenshot=image)
+    cache.put(key, response)
+    return response
+
+
+async def _last_resort(url: str, key, session: aiohttp.ClientSession,
+                       errors: dict, output_format: OutputFormat,
+                       max_video_size: Optional[int], start_time: float,
+                       archives: list[str]) -> ScrapingResponse:
+    """For a URL that no live method can even try (its host is down or refuses this
+    server): the archived copy, if there is one, or else the failure."""
+    if winner := await _run_archives(archives, url, session, errors, output_format,
+                                     max_video_size):
+        return await _success(url, key, *winner, errors, output_format, start_time)
+    return _failure(url, output_format, errors, start_time)
+
+
+ARCHIVE_ORG = "Internet Archive"
+
+
+def _segments(order: list[str]) -> list[tuple[str, list[str]]]:
+    """The plan's methods as runs of the same stage, in order:
+    [browser, decodo, wayback, plain_http] -> [(live, [browser, decodo]), (archive,
+    [wayback]), (live, [plain_http])]."""
+    segments: list[tuple[str, list[str]]] = []
+    for key in order:
+        stage = chain.stage_of(key)
+        if segments and segments[-1][0] == stage:
+            segments[-1][1].append(key)
+        else:
+            segments.append((stage, [key]))
+    return segments
+
+
+def _archive_deadline(url: str) -> Optional[float]:
+    """When the archive methods of a platform URL must be done, all together (see
+    PLATFORM_ARCHIVE_BUDGET); None for the open web."""
+    return time.monotonic() + PLATFORM_ARCHIVE_BUDGET if chain.platform_of(url) else None
+
+
+async def _run_archives(archives: list[str], url: str, session: aiohttp.ClientSession,
+                        errors: dict, output_format: OutputFormat,
+                        max_video_size: Optional[int],
+                        deadline: Optional[float] | str = "new") -> Optional[tuple[str, ScrapedContent]]:
+    """Archive methods, strictly one after another, until one yields the page. Returns
+    (method label, content), or None; failures are filed into `errors`. Each outcome is
+    judged like a live method's, so an archived CAPTCHA or paywall teaser does not count
+    either. `deadline` is the platform budget's end (shared by all archive methods of a
+    retrieval), by default one starting now."""
+    platform = chain.platform_of(url)
+    if deadline == "new":
+        deadline = _archive_deadline(url)
+    for key in archives:
+        name = chain.label(key)
+        if key == "wayback":
+            routine = _wayback(url, session, errors, output_format, max_video_size)
+        elif key == "perma_cc":
+            routine = _perma_cc(url, session, errors, output_format, max_video_size)
+        else:
+            errors[name] = NotImplementedError(f"No archive method '{key}'.")
+            continue
+        try:
+            if deadline is None:
+                content = await routine
+            elif (remaining := deadline - time.monotonic()) <= 0:
+                routine.close()
+                errors[name] = RetrievalFailed(
+                    f"Not tried: the {PLATFORM_ARCHIVE_BUDGET:.0f} s for archived copies of "
+                    f"{platform} URLs were used up.")
+                continue
+            else:
+                content = await asyncio.wait_for(routine, remaining)
+        except asyncio.TimeoutError:
+            errors[name] = RetrievalFailed(
+                f"{name} did not deliver within the {PLATFORM_ARCHIVE_BUDGET:.0f} s allowed "
+                f"for archived copies of {platform} URLs.")
+            continue
+        except Exception as e:
+            logger.warning(f"Archive method {name} failed for {url}: {type(e).__name__}: {e}")
+            errors[name] = e
+            continue
+        if content is None:
+            continue
+        if platform and (problem := _unusable_platform_copy(url, platform, content)):
+            logger.info(f"Rejected {name}'s copy of {url}: {problem}")
+            errors[name] = _rejection(problem, errors)
+            continue
+        return name, content
+    return None
+
+
+# Seconds the archive stage may take for a platform URL, all archives together. Its
+# integration has already failed, mostly for good (a removed post, a bot check), and an
+# archive of a platform page seldom holds the content: better an answer in under a minute
+# than a replay of a YouTube page for minutes.
+PLATFORM_ARCHIVE_BUDGET = 45.0
+
+# Visible text of a platform's login or consent page, lower case. Checked in archived
+# copies of platform URLs only, where such a page is what the archive captured instead of
+# the content.
+LOGIN_WALL_MARKERS = (
+    "you must log in to continue", "log in to continue", "log into facebook",
+    "log in or sign up to view", "see more on facebook",
+    "before you continue to youtube", "consent.youtube.com",
+    "confirm you're not a bot", "confirm you\u2019re not a bot",
+    "log in to instagram", "sign up to see photos and videos",
+    "log in to tiktok", "don't miss what's happening",
+)
+
+
+def _unusable_platform_copy(url: str, platform: str,
+                            content: ScrapedContent) -> Optional[str]:
+    """Why an archived copy of a platform URL is not the platform's content, or None if it
+    is: it must carry a video for a video URL, some image or video otherwise, and must not
+    be a login or consent page."""
+    images, videos = _media_counts(content)
+    text = (content.markdown or (str(content.multimodal) if content.multimodal else "")).lower()
+    if marker := next((m for m in LOGIN_WALL_MARKERS if m in text), None):
+        return f"the archived copy shows {platform}'s login or consent page (\"{marker}\")."
+    if chain.is_video_url(url):
+        if not videos:
+            return f"the archived copy of this {platform} video lacks the video."
+    elif not images and not videos:
+        return (f"the archived copy carries none of the {platform} post's media, so it is "
+                f"most likely a login wall.")
+    return None
+
+
+def _media_counts(content: ScrapedContent) -> tuple[int, int]:
+    """(images, videos) in the content: the downloaded media for multimodal output, the
+    media referenced in the HTML or Markdown otherwise."""
+    if content.multimodal is not None:
+        return len(content.multimodal.images), len(content.multimodal.videos)
+    markup = content.html or content.markdown or ""
+    videos = len(re.findall(r"<video\b|\.mp4\b|\[video:", markup, re.I))
+    images = len(re.findall(r"<img\b|!\[", markup, re.I))
+    return images, videos
+
+
+def _rejection(problem: str, errors: dict) -> Exception:
+    """The error that records a rejected archived copy. Unavailable ("yellow") when nothing
+    else explains the failure; a mere RetrievalFailed when a method already found the
+    target unavailable, so that finding -- the integration's own, typically -- stays the
+    decisive one (see `scrapemm.common.outcome`)."""
+    from scrapemm.common.outcome import UNAVAILABLE_KINDS, _error_type
+    message = problem[0].upper() + problem[1:]
+    if any(_error_type(e) in UNAVAILABLE_KINDS for e in errors.values()):
+        return RetrievalFailed(message)
+    return AccessBlockedError(message)
+
+
+async def _wayback(url: str, session: aiohttp.ClientSession, errors: dict,
+                   output_format: OutputFormat,
+                   max_video_size: Optional[int]) -> Optional[ScrapedContent]:
+    """The newest capture of the URL in the Wayback Machine, retrieved through the
+    Internet Archive integration. A failure is filed into `errors`; no capture at all is
+    None without an error, as nothing went wrong."""
+    name = chain.label("wayback")
+    snapshot = await _latest_wayback_snapshot(url, session)
+    if snapshot is None:
+        return None
+    logger.info(f"Trying the Wayback Machine's capture of {url}: {snapshot}.")
+    try:
+        content = await retrieve_via_integration(snapshot, integration_name=ARCHIVE_ORG,
+                                                 session=session, output_format=output_format,
+                                                 max_video_size=max_video_size)
+    except Exception as e:
+        errors[name] = e
+        return None
+    status, result = await run_light(_classify, snapshot, name, content, output_format)
+    if status == "success":
+        return result
+    errors[name] = result if status == "error" else RetrievalFailed(
+        f"The snapshot {snapshot} did not provide the content as {output_format}.")
+    return None
+
+
+async def _perma_cc(url: str, session: aiohttp.ClientSession, errors: dict,
+                    output_format: OutputFormat,
+                    max_video_size: Optional[int]) -> Optional[ScrapedContent]:
+    """The newest existing Perma.cc archive of the URL, found through Perma.cc's Memento
+    TimeMap and retrieved through the Perma.cc integration (see
+    `integrations.perma_cc.retrieve_archived_copy()`). No archive is None without an error:
+    it says nothing about the page, so the chain simply moves on to the next archive.
+    Other failures (a rate limit, an archive that would not load) go into `errors`."""
+    from scrapemm.server.integrations.perma_cc import retrieve_archived_copy
+    name = chain.label("perma_cc")
+    try:
+        content = await retrieve_archived_copy(url, session, output_format=output_format,
+                                               max_video_size=max_video_size)
+    except TargetUnavailableError:
+        return None  # Perma.cc has no archive of this URL
+    except Exception as e:
+        errors[name] = e
+        return None
+    status, result = await run_light(_classify, url, name, content, output_format)
+    if status == "success":
+        return result
+    errors[name] = result if status == "error" else RetrievalFailed(
+        f"The Perma.cc archive did not provide the content as {output_format}.")
+    return None
+
+
+async def _latest_wayback_snapshot(url: str, session: aiohttp.ClientSession) -> Optional[str]:
+    """The URL of the most recent successful (HTTP 200) capture of `url`, if any.
+
+    Asks both of the Wayback Machine's indexes at once, as each misses what the other
+    finds: the availability API had no capture of a thip.media page that CDX listed,
+    and CDX regularly takes longer than half a minute to answer, or answers with its
+    "Temporarily Offline" page. CDX matches the URL regardless of scheme, `www.` and a
+    trailing slash; the availability API does not, so it is asked for the other `www.`
+    form too if nothing turned up. Answers are cached for a while, and only a couple of
+    lookups run at once, so a batch of failing URLs does not flood archive.org (which
+    rate-limits with HTTP 429) or crowd out the Internet Archive integration."""
+    query = re.sub(r"^https?://", "", url)  # With the scheme, the API often finds nothing
+    key = _wayback_key(query)
+    if (cached := _wayback_cache.get(key)) and cached[0] > time.monotonic():
+        return cached[1]
+    if time.monotonic() < _wayback_backoff[0]:
+        return None  # Rate-limited a moment ago: give archive.org a rest
+
+    async with _wayback_gate:
+        found, answered = [], True
+        for result in await asyncio.gather(_wayback_available(query, session),
+                                           _wayback_cdx(query, session)):
+            answered &= result is not _FAILED
+            if result and result is not _FAILED:
+                found.append(result)
+        if not found:
+            other = query[4:] if query.startswith("www.") else f"www.{query}"
+            result = await _wayback_available(other, session)
+            answered &= result is not _FAILED
+            if result and result is not _FAILED:
+                found.append(result)
+
+    snapshot = None
+    if found:
+        timestamp, original = max(found)  # The newest
+        snapshot = f"https://web.archive.org/web/{timestamp}/{original}"
+    if snapshot or answered:  # Not a lookup that failed: that one is worth repeating
+        ttl = WAYBACK_HIT_TTL if snapshot else WAYBACK_MISS_TTL
+        _wayback_cache[key] = (time.monotonic() + ttl, snapshot)
+    return snapshot
+
+
+WAYBACK_TIMEOUT = aiohttp.ClientTimeout(total=20)
+WAYBACK_HIT_TTL = 60 * 60
+WAYBACK_MISS_TTL = 10 * 60
+WAYBACK_BACKOFF = 60  # Seconds without lookups after archive.org answered HTTP 429
+_wayback_gate = asyncio.Semaphore(2)
+_wayback_cache: dict[str, tuple[float, Optional[str]]] = {}
+_wayback_backoff = [0.0]
+_FAILED = object()  # A lookup that got no valid answer, as opposed to "no capture"
+
+
+def _wayback_key(query: str) -> str:
+    """The form under which a URL's lookup is cached: variants CDX treats as one."""
+    query = query.lower()
+    return (query[4:] if query.startswith("www.") else query).rstrip("/")
+
+
+async def _wayback_json(endpoint: str, params: dict, session: aiohttp.ClientSession):
+    """GETs a JSON answer from archive.org, or `_FAILED`. A rate limit (429), a server
+    error or a non-JSON body (the "Temporarily Offline" page) is retried once, after a
+    short pause (a timeout is not); a second 429 suspends all lookups for WAYBACK_BACKOFF seconds."""
+    for attempt in range(2):
+        try:
+            async with session.get(endpoint, params=params, timeout=WAYBACK_TIMEOUT) as response:
+                if response.status == 200:
+                    try:
+                        return await response.json(content_type=None)
+                    except ValueError:
+                        problem = "a page that is not JSON (archive.org offline?)"
+                else:
+                    problem = f"HTTP {response.status}"
+                    if response.status == 429 and attempt:
+                        _wayback_backoff[0] = time.monotonic() + WAYBACK_BACKOFF
+                    elif 400 <= response.status < 500 and response.status != 429:
+                        break  # Asking again will not change that
+        except asyncio.TimeoutError:
+            # Already cost the full timeout: another go would only double that
+            logger.debug(f"Wayback lookup {endpoint} for {params.get('url')} timed out.")
+            break
+        except Exception as e:
+            problem = f"{type(e).__name__}: {e}"
+        logger.debug(f"Wayback lookup {endpoint} for {params.get('url')} got {problem}.")
+        if not attempt:
+            await asyncio.sleep(3)
+    return _FAILED
+
+
+async def _wayback_available(query: str, session: aiohttp.ClientSession):
+    """(timestamp, original URL) of the capture the availability API names, None if it
+    names none, or `_FAILED`."""
+    data = await _wayback_json("https://archive.org/wayback/available", {"url": query}, session)
+    if data is _FAILED or not isinstance(data, dict):
+        return _FAILED
+    closest = (data.get("archived_snapshots") or {}).get("closest") or {}
+    match = re.match(r"https?://web\.archive\.org/web/(\d+)/(.+)", closest.get("url") or "")
+    if closest.get("available") and str(closest.get("status")) == "200" and match:
+        return match.group(1), match.group(2)
+    return None
+
+
+async def _wayback_cdx(query: str, session: aiohttp.ClientSession):
+    """(timestamp, original URL) of the newest HTTP 200 capture in the CDX index, None if
+    there is none, or `_FAILED`. Filtered here rather than by the server: its `filter`
+    makes it scan far more slowly."""
+    params = {"url": query, "limit": "-10", "output": "json", "fl": "timestamp,original,statuscode"}
+    rows = await _wayback_json("https://web.archive.org/cdx/search/cdx", params, session)
+    if rows is _FAILED or not isinstance(rows, list):
+        return _FAILED
+    captures = [(row[0], row[1]) for row in rows[1:] if len(row) == 3 and row[2] == "200"]
+    return max(captures) if captures else None
+
+
 def _record_outcome(method_name: str, status: str, payload, errors: dict, partial,
                     output_format: OutputFormat):
     """Files one method's outcome into the error dict / partial content.
     Returns the (possibly updated) partial content."""
     if status == "partial":
-        errors[method_name] = RetrievalFailed(
-            f"Method {method_name} did not provide the content as {output_format}."
-        )
+        if output_format == "html":
+            # The only format a method can lack: Markdown is derived from the sequence
+            message = (f"Method {method_name} has no HTML page to offer (it retrieves the "
+                       f"content through an API or a player); request 'markdown' or "
+                       f"'multimodal' instead.")
+        else:
+            message = f"Method {method_name} did not provide the content as {output_format}."
+        errors[method_name] = RetrievalFailed(message)
         return partial or payload
     errors[method_name] = payload
     return partial
@@ -684,17 +1221,54 @@ async def _plain_http(url: str, session: aiohttp.ClientSession, output_format: O
     goes through (archive.premier.gov.ru, which Firecrawl could not load). Its result goes
     through the same checks as any method's, so a bot page or an empty JavaScript shell
     does not count as content."""
-    async with session.get(url, headers=HEADERS, allow_redirects=True,
-                           timeout=aiohttp.ClientTimeout(total=30)) as response:
-        if response.status != 200:
-            raise RetrievalFailed(f"A plain request got HTTP {response.status}.")
-        content_type = response.headers.get("content-type", "text/html")
-        if "html" not in content_type:
-            raise RetrievalFailed(f"A plain request got {content_type}, not a web page.")
-        html = await response.text(errors="replace")
-        final_url = str(response.url)
+    status, content_type, data, final_url, encoding = await _plain_get(url, session)
+    if status in (404, 410):
+        raise TargetUnavailableError(f"{url} does not exist on the live site "
+                                     f"(HTTP {status}).")
+    if status != 200:
+        if status == 451:
+            raise RegionBlockedError(f"{url} is blocked in this server's region "
+                                     f"(HTTP 451).")
+        raise RetrievalFailed(f"A plain request got HTTP {status}.")
+    if is_document_content_type(content_type):
+        # A PDF, a spreadsheet: read into text (see `download.documents`)
+        name = urlsplit(final_url).path.rstrip("/").rsplit("/", 1)[-1]
+        if content := await asyncio.to_thread(documents_to_content, data, name, content_type):
+            logger.info(f"📄 {url} is a {content_type.split(';')[0]} document; read it into text.")
+            return content
+        raise UnsupportedDomainError(f"{url} is a {content_type.split(';')[0]} document, "
+                                     f"a type scrapeMM does not extract text from.")
+    if "html" not in content_type:
+        raise RetrievalFailed(f"A plain request got {content_type}, not a web page.")
+    html = data.decode(encoding or "utf-8", errors="replace")
     return await to_scraped_content(html, session=session, output_format=output_format,
                                     url=final_url, max_video_size=max_video_size)
+
+
+async def _plain_get(url: str, session: aiohttp.ClientSession
+                     ) -> tuple[int, str, bytes, str, Optional[str]]:
+    """GETs the URL: status, content type, body (only of a 200), final URL and encoding.
+    Through the attempt's proxy, if any: aiohttp for an HTTP proxy, curl_cffi for a SOCKS
+    one, which aiohttp cannot use."""
+    if proxy.wants_curl():
+        from scrapemm.server.download.requests import curl_get
+        response = await curl_get(url, headers=HEADERS, impersonate="chrome124", timeout=30,
+                                  allow_redirects=True)
+        return (response.status_code, response.headers.get("content-type", "text/html"),
+                response.content if response.status_code == 200 else b"", str(response.url),
+                getattr(response, "encoding", None))
+    async with session.get(url, headers=HEADERS, allow_redirects=True,
+                           timeout=aiohttp.ClientTimeout(total=30),
+                           proxy=proxy.aiohttp_proxy()) as response:
+        content_type = response.headers.get("content-type", "text/html")
+        data = await response.read() if response.status == 200 else b""
+        encoding = None
+        if data and "html" in content_type:
+            try:
+                encoding = response.get_encoding()
+            except Exception:  # No charset to tell: decoded as UTF-8
+                pass
+        return response.status, content_type, data, str(response.url), encoding
 
 
 async def _cloudflare_fallback(url: str, domain: str, session: aiohttp.ClientSession,
@@ -720,7 +1294,7 @@ async def _cloudflare_fallback(url: str, domain: str, session: aiohttp.ClientSes
     except Exception as e:
         errors[BROWSER] = e
         return None
-    if captcha := detect_captcha(content):
+    if captcha := await run_light(detect_captcha, content):
         errors[BROWSER] = CaptchaEncounteredError(
             f"Method {BROWSER} encountered a {captcha}.")
         return None
@@ -752,8 +1326,15 @@ def _record_challenge(domain: str, url: str, errors: dict[str, Optional[Exceptio
     """Opens (or joins) a CAPTCHA challenge for the domain if a method ran into one.
     A human decides on it in the web UI: solve it, or discard it -- which blacklists the
     domain, as used to happen straight away. Integrations that queue their own gated
-    requests (Archive.today) are left to do so."""
-    error = next((e for e in errors.values() if isinstance(e, CaptchaEncounteredError)), None)
+    requests (Archive.today) are left to do so.
+
+    Only a CAPTCHA the shared browser met counts (the Browser method's, or a browser-
+    based integration's): a human solves it in that browser, and the clearance helps
+    nothing else. Firecrawl's or Decodo's CAPTCHAs used to queue domains that the
+    browser's own Cloudflare solver passes -- thip.media, after the browser merely timed
+    out once -- and every later URL of those domains then failed at once, for hours."""
+    error = next((e for m, e in errors.items() if isinstance(e, CaptchaEncounteredError)
+                  and (m == BROWSER or m in INTEGRATION_NAMES)), None)
     if error is None:
         return
     integration = DOMAIN_TO_INTEGRATION.get(domain)
@@ -867,35 +1448,20 @@ async def _execute(
             return e
 
     except Exception as e:
-        logger.warning(f"Error while retrieving with method {method_name}.", exc_info=True)
+        from scrapemm.common.outcome import UNAVAILABLE_KINDS, _error_type
+        if _error_type(e) in UNAVAILABLE_KINDS:
+            # A known verdict about the target (e.g. Decodo refusing a domain as
+            # unsupported): one line says it all, a traceback would be noise
+            logger.info(f"Method {method_name} for {url}: {type(e).__name__}: {e}")
+        else:
+            logger.warning(f"Error while retrieving with method {method_name}.", exc_info=True)
         return e
 
 
-def applicable_methods(url: str, allowed_methods: Literal["auto"] | list[str]) -> list[str]:
-    """Every retrieval method that could handle this URL, in the order to try them,
-    whether or not the deployment has switched it off."""
-    # Initialize methods list
-    methods = (get_optimal_methods(url) if allowed_methods == "auto"
-               else [resolve_alias(m) for m in allowed_methods])
-
-    # Resolve 'integrations' method to specific, applicable integrations, maintaining order
-    methods_resolved = []
-    for method in methods:
-        if method == "integrations":
-            methods_resolved.extend(get_integrations_for_url(url))
-        else:
-            methods_resolved.append(method)
-
-    return methods_resolved
-
-
 def resolve_best_methods(url: str, allowed_methods: Literal["auto"] | list[str]) -> list[str]:
-    """The methods that will actually be tried for this URL.
-
-    Methods the deployment has switched off are dropped here rather than left to fail
-    their way down the list: a disabled method should cost nothing at all.
-    """
-    return filter_methods(applicable_methods(url, allowed_methods))
+    """The methods that will be tried for this URL, live ones first, by the names
+    responses give them (see `chain.resolve()`)."""
+    return [chain.label(m) for m in chain.resolve(url, allowed_methods).methods]
 
 
 async def postprocess_media(result: MultimodalSequence):
@@ -915,14 +1481,3 @@ def _relocate_items(result: MultimodalSequence):
     """Moves every item into the ezmm registry directory."""
     for item in result.unique_items():
         item.relocate(move_not_copy=True)
-
-
-def get_optimal_methods(url: str) -> list[str]:
-    """Returns the best retrieval methods for the given URL."""
-    domain = get_domain(url)
-    methods = BEST_METHODS.get(domain, METHODS).copy()
-    if looks_like_pdf_url(url):
-        # The browser only shows a PDF, it cannot extract its text. Firecrawl parses
-        # PDFs itself, and Decodo does too.
-        methods = [m for m in methods if m != BROWSER]
-    return methods

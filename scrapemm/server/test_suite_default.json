@@ -652,13 +652,156 @@
  },
  {
   "url": "http://archive.premier.gov.ru/eng/events/news/9424/",
+  "expected": {},
+  "category": "Open web"
+ },
+ {
+  "url": "https://www.congress.gov/bill/119th-congress/senate-bill/1383",
+  "expected": {},
+  "category": "Open web"
+ },
+ {
+  "url": "https://eur-lex.europa.eu/legal-content/EN/TXT/PDF/?uri=OJ:C_202407215",
+  "expected": {
+   "pdf": 1
+  },
+  "category": "Open web"
+ },
+ {
+  "url": "https://www.facebook.com/permalink.php?story_fbid=pfbid02yJMC3foQksvEcJX5ySQMmPZEeRyUSK1EjDEdUcK8SSe6RRmHqeZHf7MNtygMt1fTl&#038;id=61556745955761",
+  "expected": {
+   "image": 1
+  },
+  "category": "Facebook"
+ },
+ {
+  "url": "https://www.facebook.com/permalink.php?story_fbid=pfbid02CPn7q8czyPAQpMrJ3GWDeCpM1TXDofU5NpwtaeTEieNApvtQsBjLVKFp7ShUCopvl&#038;id=100078635210746",
+  "expected": {
+   "image": 1
+  },
+  "category": "Facebook"
+ },
+ {
+  "url": "https://www.facebook.com/plugins/video.php?height=310&href=https://web.facebook.com/reel/2235520617213502/&show_text=true&width=560&t=0",
+  "expected": {
+   "video": 1
+  },
+  "category": "Facebook"
+ },
+ {
+  "url": "https://www.facebook.com/permalink.php?story_fbid=pfbid02r9tvsJwbku8d7fH1MHxAzW4LJtiVEWiypCyGRt9rkMZzNaprYmj6A92oLMHhooY9l&id=61591193794307",
+  "expected": {},
+  "expect": "unavailable",
+  "category": "Facebook"
+ },
+ {
+  "url": "https://www.facebook.com/photo/?fbid=122180201066837756&set=a.122096757884837756",
+  "expected": {},
+  "expect": "unavailable",
+  "category": "Facebook"
+ },
+ {
+  "url": "https://perma.cc/4T3S-A8TP",
+  "expected": {
+   "video": 1
+  },
+  "category": "Perma.cc"
+ },
+ {
+  "url": "https://perma.cc/BY97-E2X2",
+  "expected": {
+   "image": 1
+  },
+  "category": "Perma.cc"
+ },
+ {
+  "url": "https://perma.cc/9C58-F7HY",
+  "expected": {
+   "image": 1
+  },
+  "category": "Perma.cc"
+ },
+ {
+  "url": "https://www.instagram.com/p/DcnqvWeMy3D/",
+  "expected": {},
+  "category": "Instagram",
+  "expect": "unavailable"
+ },
+ {
+  "url": "https://www.instagram.com/reel/Dbd9JsJM-hU/",
+  "expected": {},
+  "category": "Instagram",
+  "expect": "unavailable"
+ },
+ {
+  "url": "https://www.instagram.com/reels/DDxA-RkMJmP/",
+  "expected": {},
+  "category": "Instagram",
+  "expect": "unavailable"
+ },
+ {
+  "url": "https://www.facebook.com/profile.php?id=61562975451292",
+  "expected": {
+   "image": 1
+  },
+  "category": "Facebook"
+ },
+ {
+  "url": "https://www.facebook.com/ghytimes/videos/1807162647396372/",
+  "expected": {},
+  "category": "Facebook",
+  "expect": "unavailable"
+ },
+ {
+  "url": "https://perma.cc/FD9Q-4S9Y",
+  "expected": {
+   "image": 1
+  },
+  "category": "Perma.cc"
+ },
+ {
+  "url": "https://perma.cc/XF4V-9D2S",
+  "expected": {
+   "image": 1
+  },
+  "category": "Perma.cc"
+ },
+ {
+  "url": "https://perma.cc/55YA-N88K",
+  "expected": {},
+  "category": "Perma.cc",
+  "expect": "unavailable"
+ },
+ {
+  "url": "https://insse.ro/cms/sites/default/files/com_presa/anexa_date/pib_tr4r2025.xlsx",
+  "expected": {},
+  "category": "Open web"
+ },
+ {
+  "url": "https://kentuckytoday.com",
+  "expected": {},
+  "category": "Open web"
+ },
+ {
+  "url": "https://niagara-gazette.com",
+  "expected": {},
+  "category": "Open web"
+ },
+ {
+  "url": "https://naagara-gazette.com",
+  "expected": {},
+  "category": "Open web",
+  "expect": "unavailable"
+ },
+ {
+  "url": "https://www.dcceew.gov.au/energy/security/australias-fuel-security/minimum-stockholding-obligation/statistics",
   "expected": {
    "image": 1
   },
   "category": "Open web"
  },
  {
-  "url": "https://www.congress.gov/bill/119th-congress/senate-bill/1383",
+  "url": "https://insse.ro/cms/sites/default/files/com_presa/com_pdf/pib_tr4r2025.pdf",
   "expected": {},
   "category": "Open web"
  }

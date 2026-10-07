@@ -1,9 +1,10 @@
 import html as html_lib
 import json
 import logging
+import asyncio
 import re
 from datetime import datetime, timezone
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import aiohttp
 from ezmm import MultimodalSequence
@@ -13,6 +14,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 from yt_dlp.networking.impersonate import ImpersonateTarget
 
+from scrapemm.server.workers import run_light
 from scrapemm.common import RateLimitError, RetrievalFailed
 from scrapemm.server.paths import CONFIG_DIR
 from scrapemm.common.exceptions import AccessBlockedError, TargetUnavailableError
@@ -53,6 +55,24 @@ FB_OG_DESCRIPTION_REGEX = re.compile(
 FB_OG_TITLE_REGEX = re.compile(r'<meta\s+property="og:title"\s+content="(.*?)"', re.DOTALL)
 FB_MESSAGE_TEXT_REGEX = re.compile(r'"message":\{"text":"((?:[^"\\]|\\.)*)"')
 FB_CREATION_TIME_REGEX = re.compile(r'"creation_time":(\d+)')
+FB_UNAVAILABLE_MARKERS = (
+    '"tracePolicy":"comet.error"',  # "This content isn't available right now"
+    '"tracePolicy":"comet.watch.video.not.found"',  # "This video is no longer available"
+    '"currMedia":null',  # A photo page without its photo
+)
+FB_OG_IMAGE_REGEX = re.compile(r'<meta\s+property="og:image"\s+content="(.*?)"', re.DOTALL)
+UNAVAILABLE_MESSAGE = ("The Facebook content is not available: it was removed, its "
+                       "visibility was restricted, or it never existed.")
+
+# Query parameters of Facebook's embed plugins (plugins/post.php, plugins/video.php).
+# Embed codes often carry the target in an unencoded 'href', so the target's own query
+# parameters and the plugin's run together; these tell them apart.
+FB_PLUGIN_PARAMS = {
+    "href", "width", "height", "show_text", "t", "appid", "app_id", "show_captions",
+    "autoplay", "mute", "allowfullscreen", "lazy", "adapt_container_width",
+    "hide_cover", "show_facepile", "small_header", "tabs", "locale", "sdk",
+    "container_width", "ref", "colorscheme", "layout", "size", "share", "action",
+}
 
 JS_GET_PHOTO_IMAGE = """
     () => {
@@ -132,12 +152,19 @@ def _extract_post_text(html: str) -> str:
     return postprocess_markdown(description)
 
 
+def _shows_error_page(html: str) -> bool:
+    """Whether the page is Facebook's "This content isn't available right now" (removed,
+    private or restricted content), recognized by language-independent markers: the
+    error route that post pages render, or a photo page whose photo came back null."""
+    return any(marker in html for marker in FB_UNAVAILABLE_MARKERS)
+
+
 def _is_unavailable_page(html: str) -> bool:
-    """Whether Facebook served its "This content isn't available" page. That message
-    is rendered client-side (and localized), so it is recognized by what is missing
-    instead: a page that loaded fine, with no login form, but without any post metadata
-    and without a single video object."""
-    return ('id="login_form"' not in html
+    """Whether Facebook served its "This content isn't available" page. Besides the
+    explicit markers, it is recognized by what is missing: a page that loaded fine,
+    with no login form, but without any post metadata and without a single video object."""
+    return _shows_error_page(html) or (
+            'id="login_form"' not in html
             and not FB_OG_TITLE_REGEX.search(html)
             and '"__typename":"Video"' not in html)
 
@@ -208,6 +235,8 @@ class Facebook(RetrievalIntegration):
         # Get the text first, straight from the page: it is public for public posts
         content = []
         html = await self._fetch_page(url)
+        if html and _shows_error_page(html):
+            raise TargetUnavailableError(UNAVAILABLE_MESSAGE)
         if header := _extract_post_header(html or ""):
             content.append(header)
 
@@ -234,10 +263,11 @@ class Facebook(RetrievalIntegration):
         if content:
             return ScrapedContent(multimodal=MultimodalSequence(content))
 
-        try:
-            return await self._get_user_profile(url, **kwargs)
-        except Exception:
-            pass
+        if len(urlparse(url).path.strip("/").split("/")) == 1:  # facebook.com/<vanity>
+            try:
+                return await self._get_user_profile(url, **kwargs)
+            except Exception:
+                pass
 
         raise RetrievalFailed("Unable to retrieve content from Facebook URL.")
 
@@ -280,9 +310,7 @@ class Facebook(RetrievalIntegration):
         video_urls = _extract_video_urls(html)
         if not video_urls:
             if _is_unavailable_page(html):
-                raise TargetUnavailableError(
-                    "The Facebook content is not available: it was removed, its "
-                    "visibility was restricted, or it never existed.")
+                raise TargetUnavailableError(UNAVAILABLE_MESSAGE)
             raise RetrievalFailed(f"No video found in the Facebook page for {url}.")
 
         session = kwargs.get("session")
@@ -308,15 +336,14 @@ class Facebook(RetrievalIntegration):
     async def _fetch_page(self, url: str) -> str | None:
         """Downloads the post's HTML with the stored session cookies, impersonating a
         real browser. Facebook serves aiohttp's TLS fingerprint a login wall."""
-        from curl_cffi.requests import AsyncSession
+        from scrapemm.server.download.requests import curl_get
 
         cookies = {c["name"]: c["value"]
                    for c in parse_netscape_cookies(self.cookie_file)}
         try:
-            async with AsyncSession() as session:
-                response = await session.get(url, cookies=cookies,
-                                             impersonate="chrome124", timeout=30)
-                return response.text if response.status_code == 200 else None
+            # Not curl_cffi's AsyncSession, which breaks the event loop's sockets
+            response = await curl_get(url, cookies=cookies, impersonate="chrome124", timeout=30)
+            return response.text if response.status_code == 200 else None
         except Exception:
             logger.debug(f"Could not fetch the Facebook page {url}.", exc_info=True)
             return None
@@ -358,15 +385,15 @@ class Facebook(RetrievalIntegration):
                 except PlaywrightTimeoutError:
                     raise TimeoutError("Timed out loading Facebook photo page.")
 
-                image_url = await page.evaluate(JS_GET_PHOTO_IMAGE)
-
-            except TimeoutError:
-                raise
+                html = await page.content()
+                if not _shows_error_page(html):
+                    image_url = await page.evaluate(JS_GET_PHOTO_IMAGE)
 
             finally:
-                html = await page.content()
                 await browser.close()
 
+        if _shows_error_page(html):
+            raise TargetUnavailableError(UNAVAILABLE_MESSAGE)
         if not image_url:
             raise RetrievalFailed("Could not locate image on Facebook photo page.")
 
@@ -376,13 +403,13 @@ class Facebook(RetrievalIntegration):
         if not image:
             raise RetrievalFailed("Could not download image from Facebook photo.")
 
-        # Retrieve text only
-        text = md(html, heading_style="ATX")
-        postprocessed_text = postprocess_markdown(text)
-        # Remove SVG icons for like/comment/share
-        postprocessed_text = re.sub(
-            LIKE_COMMENT_SHARE_SVG_REGEX, "", str(postprocessed_text)
-        )
+        # Retrieve text only. In a thread: converting Facebook's megabytes of markup held
+        # the event loop -- every other request -- for seconds.
+        def page_text() -> str:
+            text = postprocess_markdown(md(html, heading_style="ATX"))
+            # Remove SVG icons for like/comment/share
+            return re.sub(LIKE_COMMENT_SHARE_SVG_REGEX, "", str(text))
+        postprocessed_text = await run_light(page_text)
 
         return MultimodalSequence([image, postprocessed_text])
 
@@ -442,23 +469,69 @@ class Facebook(RetrievalIntegration):
         return list(dict.fromkeys(hrefs))
 
     async def _get_user_profile(self, url: str, **kwargs) -> ScrapedContent:
-        """Retrieves content from a Facebook user profile URL."""
-        raise NotImplementedError("No method available to retrieve Facebook profiles.")
+        """Retrieves a Facebook profile or page as a logged-out visitor sees it: name,
+        the summary Facebook gives (followers, bio) and the profile picture, all read
+        off the page's metadata."""
+        html = await self._fetch_page(url)
+        if not html:
+            raise RetrievalFailed(f"Could not load the Facebook page for {url}.")
+        if _shows_error_page(html):
+            raise TargetUnavailableError(UNAVAILABLE_MESSAGE)
+        name = FB_OG_TITLE_REGEX.search(html)
+        if not name:
+            raise AccessBlockedError("Facebook shows this profile only to logged-in users.")
+
+        header = f"**Facebook Profile**\n{html_lib.unescape(name.group(1))}"
+        if description := FB_OG_DESCRIPTION_REGEX.search(html):
+            header += f"\n\n{postprocess_markdown(html_lib.unescape(description.group(1)))}"
+        items: list = [header]
+        if picture_url := FB_OG_IMAGE_REGEX.search(html):
+            # Profile pictures are small; keep them anyway, they identify the account
+            picture = await download_image(html_lib.unescape(picture_url.group(1)),
+                                           kwargs.get("session"), ignore_small_images=False)
+            if picture:
+                items.append(picture)
+        return ScrapedContent(multimodal=MultimodalSequence(items))
 
     def _normalize_url(self, url: str) -> str:
-        """If the URL is a login Facebook URL, i.e., of the form https://www.facebook.com/login/?next=...
-        or https://www.facebook.com/plugins/post.php?href=..., extracts the actual post's URL."""
-        if url.startswith(
-                "https://www.facebook.com/login/?next="
-        ):  # Login redirect URLs
-            query = urlparse(url).query
-            return parse_qs(query).get("next", [])[0] or url
-        elif url.startswith(
-                "https://www.facebook.com/plugins/post.php?href="
-        ):  # Post embedding links
-            query = urlparse(url).query
-            return parse_qs(query).get("href", [])[0] or url
+        """Turns the URL into the canonical www.facebook.com URL of the target: undoes
+        HTML escaping ('&#038;' from WordPress embeds), unifies web./m./mbasic. hosts,
+        and unwraps login redirects (login/?next=...) and embed plugins (plugins/post.php
+        or plugins/video.php?href=...)."""
+        url = html_lib.unescape(url.strip())
+        # A URL pasted twice in a row ("https://…/reel/1https://…/reel/1"): keep the
+        # first. Only in the path, since query strings may carry URLs legitimately.
+        if doubled := re.match(r"(https?://[^?#]+?)https?://", url, flags=re.IGNORECASE):
+            url = doubled.group(1)
+        url = re.sub(r"^(?:https?://)?(?:(?:www|web|m|mbasic|touch)\.)?facebook\.com(?=[/?#]|$)",
+                     "https://www.facebook.com", url, flags=re.IGNORECASE)
+        parsed = urlparse(url)
+        if parsed.netloc != "www.facebook.com":
+            return url
+        if parsed.path.rstrip("/") == "/login":
+            target = parse_qs(parsed.query).get("next", [""])[0]
+            return self._normalize_url(target) if target.startswith("http") else url
+        if parsed.path.startswith("/plugins/"):
+            target = self._extract_plugin_href(parsed.query)
+            return self._normalize_url(target) if target.startswith("http") else url
         return url
+
+    @staticmethod
+    def _extract_plugin_href(query: str) -> str:
+        """Returns the target URL of an embed plugin's query. The 'href' may be
+        URL-encoded or not; in the latter case, the parameters following it belong to
+        the target until one is a known plugin parameter."""
+        parts = query.split("&")
+        for i, part in enumerate(parts):
+            if part.startswith("href="):
+                href = [part.removeprefix("href=")]
+                for following in parts[i + 1:]:
+                    if following.split("=", 1)[0].lower() in FB_PLUGIN_PARAMS:
+                        break
+                    href.append(following)
+                href = "&".join(href)
+                return unquote(href) if re.match(r"https?%3A", href, re.I) else href
+        return ""
 
     def _is_video_url(self, url: str) -> bool:
         """Checks if the URL is a Facebook video URL."""
@@ -489,7 +562,7 @@ class Facebook(RetrievalIntegration):
         """Checks if the URL is a Facebook profile URL."""
         parsed = urlparse(url)
         path_parts = parsed.path.strip("/").split("/")
-        return len(path_parts) > 0 and path_parts[0] == "profile.php"
+        return path_parts[0] in ("profile.php", "people")
 
     def _extract_username(self, url: str) -> str:
         """Extracts the username from a Facebook profile URL."""

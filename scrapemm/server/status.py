@@ -7,8 +7,9 @@ why it failed if it did, and names the secrets that are missing -- the dashboard
 is to turn "Instagram doesn't work" into "Instagram needs instagram_cookie".
 
 The Browser, Firecrawl and Decodo are not integrations (they are general retrieval
-methods), but from a dashboard's point of view they are the same kind of thing: something
-that either works or needs configuring. They get cards here too.
+methods), and the search providers retrieve nothing at all, but from a dashboard's point
+of view they are the same kind of thing: something that either works or needs
+configuring. They get cards here too.
 
 Statuses are cached for STATUS_TTL, because connecting costs real API calls.
 """
@@ -28,9 +29,11 @@ from . import registry
 from .blacklist import blacklist
 from .cache import cache
 from .environment import ffmpeg_available, ffprobe_available
-from .jobs import jobs
+from .jobs import SLOT, jobs
+from .search import SEARCH_PROVIDERS
 from .secrets import is_set
 from .toggles import is_enabled, resolve_alias
+from .workers import run_light
 
 logger = logging.getLogger(APP_NAME)
 
@@ -73,8 +76,15 @@ OPTIONAL_SECRETS: dict[str, tuple[str, ...]] = {
     "instagram": ("instagram_cookie",),
 }
 
+# The search providers declare their own secrets; repeating them here could only drift
+REQUIRED_SECRETS.update({provider.name: provider.secret_names
+                         for provider in SEARCH_PROVIDERS})
+
 # The general retrieval methods, which are not tied to a platform like the integrations
 METHOD_KEYS = ("browser", "firecrawl", "decodo")
+
+# The search providers (see `scrapemm.server.search`), keyed by the name in their route
+SEARCH_KEYS = tuple(provider.name for provider in SEARCH_PROVIDERS)
 
 # The states a card can be in, which is also the colour it gets in the UI
 READY, UNCONFIGURED, ERROR, DISABLED = "ready", "unconfigured", "error", "disabled"
@@ -89,7 +99,7 @@ GATED = "gated"
 class IntegrationStatus:
     name: str
     key: str = ""  # Stable lower-case id, used by the API and the UI
-    kind: str = "integration"  # "integration" or "method"
+    kind: str = "integration"  # "integration", "method" or "search"
     domains: list[str] = field(default_factory=list)
     required_secrets: list[str] = field(default_factory=list)
     missing_secrets: list[str] = field(default_factory=list)
@@ -157,6 +167,9 @@ def all_methods() -> list[dict]:
                 {"key": "firecrawl", "name": "Firecrawl", "kind": "method",
                  "domains": []},
                 {"key": "decodo", "name": "Decodo", "kind": "method", "domains": []}]
+    methods += [{"key": provider.name, "name": provider.label, "kind": "search",
+                 "domains": []}
+                for provider in SEARCH_PROVIDERS]
     return methods
 
 
@@ -165,7 +178,7 @@ async def check(name: str, force: bool = False) -> IntegrationStatus:
     from .integrations import NAME_TO_INTEGRATION
 
     key = name.lower()
-    if key not in NAME_TO_INTEGRATION and key not in METHOD_KEYS:
+    if key not in NAME_TO_INTEGRATION and key not in METHOD_KEYS and key not in SEARCH_KEYS:
         raise KeyError(f"Unknown integration or method '{name}'.")
 
     if not force:
@@ -181,6 +194,8 @@ async def check(name: str, force: bool = False) -> IntegrationStatus:
 
         if key in METHOD_KEYS:
             status = await _probe_method(key)
+        elif key in SEARCH_KEYS:
+            status = _probe_search(key)
         else:
             status = await _probe(key, NAME_TO_INTEGRATION[key])
         _cache[key] = (time.time(), status)
@@ -335,6 +350,18 @@ async def _probe_method(key: str) -> IntegrationStatus:
     return _settle(status)
 
 
+def _probe_search(key: str) -> IntegrationStatus:
+    """A search provider. Like Decodo, it is paid per request and has no free endpoint to
+    ping, so a configured key counts as ready; a key Serper rejects shows up as the error
+    of the first search instead."""
+    provider = next(p for p in SEARCH_PROVIDERS if p.name == key)
+    status = _base_status(key, provider.label, "search", [])
+    status.connected = status.configured and status.enabled
+    if status.enabled and status.configured:
+        status.detail = "API key configured."
+    return _settle(status)
+
+
 async def check_all(force: bool = False) -> list[IntegrationStatus]:
     """Probes everything concurrently."""
     keys = all_keys()
@@ -394,9 +421,12 @@ async def environment() -> dict:
         "playwright": await _playwright_status(),
         "display": _display_status(),
         "captcha": _captcha_backlog(),
+        "queue": _queue(),
         "media": _media_usage(),
         "address": _address(),
-        **_job_figures(),
+        "proxy": proxy_status(),
+        # In a thread: they are queries of the job history
+        **(await run_light(_job_figures)),
         "blacklist": {
             "domains": len(blacklist),
             "ttl": blacklist.ttl,
@@ -408,7 +438,16 @@ async def environment() -> dict:
     }
 
 
-# The 24-hour count slides with the clock even when nothing is written, so it is also
+def proxy_status() -> dict:
+    """The proxy (see `scrapemm.server.proxy`), and until when YouTube is paused for this
+    server's address, during which YouTube retrievals go through it."""
+    from scrapemm.server import proxy
+    from scrapemm.server.integrations.ytdlp import youtube_gate
+    paused = youtube_gate.blocked_until
+    return {**proxy.status(), "youtube_paused_until": paused if paused > time.time() else None}
+
+
+# The recent counts slide with the clock even when nothing is written, so they are also
 # refreshed on this interval
 JOB_FIGURES_MAX_AGE = 60.0
 
@@ -426,28 +465,21 @@ def _job_figures() -> dict:
     version = jobs.version
     figures = {
         "throughput": {
-            "last_24h": jobs.count_since(24 * 60 * 60),
+            # Per 15-minute slot, for "today" in the viewer's time zone (see `recent_counts`)
+            "recent": {"slot": SLOT, "counts": jobs.recent_counts()},
             "success_rate": jobs.recent_success_rate(RECENT_WINDOW),
         },
-        "jobs": jobs.stats(),
+        "jobs": {**jobs.stats(), "running": jobs.count_jobs(status="running")},
+        "searches": jobs.search_figures(),
     }
     _job_figures_cache = (version, time.time(), figures)
     return figures
 
 
-# Walking the media tree is O(files), so after new retrievals it is re-walked at most
-# this often; with nothing retrieved, the registry's own longer TTL applies.
-MEDIA_MIN_AGE = 15.0
-
-_media_version = -1
-
-
 def _media_usage() -> dict:
-    """Never walks the tree itself (see `registry.usage`); after new retrievals it asks
-    for a background re-measurement, which a walk started from now on will include."""
-    global _media_version
-    if jobs.version != _media_version and registry.refresh(MEDIA_MIN_AGE):
-        _media_version = jobs.version
+    """Never walks the tree itself (see `registry.usage`), and never because of a job:
+    re-measuring after every job kept a walk over a shared registry of millions of files
+    running for a whole batch. The figure is refreshed on the registry's TTL instead."""
     return registry.usage()
 
 
@@ -508,6 +540,22 @@ def _address() -> dict:
         # True when those addresses are container-internal and should not be offered
         # as something to hand to a colleague.
         "containerised": os.path.exists("/.dockerenv"),
+    }
+
+
+def _queue() -> dict:
+    """The URLs waiting in line: accepted by a running job but not yet started, because
+    the server's concurrency limit is full. URLs parked with a CAPTCHA challenge are not
+    in line (see `_captcha_backlog()`); they wait for a human, not for a free slot."""
+    from . import engine
+    from .config import get_config_var
+    in_flight = len(getattr(engine, "_in_flight", {}))
+    active = getattr(engine, "_active", 0)
+    return {
+        "waiting": max(0, in_flight - active),
+        "active": active,
+        "limit": int(get_config_var("max_concurrency",
+                                    getattr(engine, "DEFAULT_MAX_CONCURRENCY", 40))),
     }
 
 

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { DropdownMenuItem } from '@nuxt/ui'
+
 /**
  * One retrieval method on the dashboard.
  *
@@ -32,16 +34,20 @@ const chips = computed(() => [
     .map((name: string) => ({ name, color: 'warning' })),
 ])
 
+const isAdmin = useIsAdmin()
+
 const menuItems = computed(() => {
-  const actions = [
+  const actions: DropdownMenuItem[] = [
     {
       label: 'Re-check',
       icon: 'i-fa7-solid-rotate',
       onSelect: () => emit('recheck', props.item.key),
     },
   ]
+  // Credentials and switching methods on and off are for Admins: they apply to everybody
+  if (!isAdmin.value) return [actions]
   if (props.item.configurable) {
-    actions.push({ label: 'Configure', icon: 'i-fa7-solid-sliders', to: '/secrets' })
+    actions.push({ label: 'Configure', icon: 'i-fa7-solid-sliders', to: '/settings#secrets' })
   }
   actions.push({
     label: props.item.enabled ? 'Disable' : 'Enable',

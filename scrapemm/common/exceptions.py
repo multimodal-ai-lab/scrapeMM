@@ -34,6 +34,12 @@ class CaptchaEncounteredError(AccessBlockedError):
     that needs to be solved before it can be accessed."""
 
 
+class RegionBlockedError(AccessBlockedError):
+    """The target withholds the content from this server's region, e.g. with HTTP 451
+    ("Unavailable For Legal Reasons"), as US news sites do for the EU. Methods that
+    fetch from elsewhere (a proxy in another country, an archive) may still get it."""
+
+
 class PaywallError(AccessBlockedError):
     """The target could be reached, but its content is behind a paywall that
     scrapeMM could not get around: only the teaser was delivered."""
@@ -66,6 +72,7 @@ WIRE_EXCEPTIONS: dict[str, type[Exception]] = {
         QuotaExceededError,
         RetrievalFailed,
         AccessBlockedError,
+        RegionBlockedError,
         CaptchaEncounteredError,
         PaywallError,
         TargetUnavailableError,

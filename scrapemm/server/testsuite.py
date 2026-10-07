@@ -5,11 +5,16 @@ each with the images and videos it must at least yield. Users add their own on t
 
 A run retrieves the whole suite as one job -- it shows up under Jobs like any other --
 with the cache bypassed, since a cached answer measures the cache, not the scraping.
-Each URL is scored against its expectation:
+Each URL is scored against its expectation. Most entries expect content:
 
 * passed  -- retrieved, with at least the expected media
 * partial -- retrieved, but media is missing
 * failed  -- not retrieved at all
+
+An entry may instead expect the target to be unavailable (`"expect": "unavailable"`): a
+private post, a removed page. It passes when scrapeMM classifies the result as
+unavailable (see `scrapemm.common.outcome`) and fails otherwise -- when content came back
+(the detection broke) or when the retrieval ran into an error of scrapeMM's own.
 
 Only one run at a time: a second one would compete with the first for the same
 concurrency slots and measure nothing but that.
@@ -28,6 +33,7 @@ from typing import Optional
 import aiohttp
 
 from scrapemm.common import ScrapingResponse
+from scrapemm.common.outcome import UNAVAILABLE, classify
 from scrapemm.common.paths import APP_NAME
 from scrapemm.common.wire import errors_to_wire
 from .paths import CONFIG_DIR
@@ -40,6 +46,10 @@ RUNS_PATH = CONFIG_DIR / "test_runs.json"
 MAX_RUNS_KEPT = 20
 
 OUTPUT_FORMAT = "multimodal"  # What the retrieval tests check
+STRIP = True  # The suite measures the content without UI elements, see `strip_content()`
+
+# What an entry may expect besides content (the default, when "expect" is absent)
+EXPECTATIONS = (UNAVAILABLE,)
 
 
 # --- The suite ------------------------------------------------------------------------
@@ -78,19 +88,30 @@ def suite() -> list[dict]:
     return entries
 
 
-def add(url: str, category: str = "Added", expected: Optional[dict] = None) -> dict:
+def add(url: str, category: str = "Added", expected: Optional[dict] = None,
+        expect: Optional[str] = None) -> dict:
+    """Adds a URL, expecting at least `expected` media ({"image": n, "video": n}), or,
+    with `expect="unavailable"`, expecting the target to be unavailable."""
     url = url.strip()
     if not url.startswith(("http://", "https://")):
         raise ValueError("A URL must start with http:// or https://.")
+    if expect is not None and expect not in EXPECTATIONS:
+        raise ValueError(f"An entry can expect content (the default) or one of: "
+                         f"{', '.join(EXPECTATIONS)}; not '{expect}'.")
     expected = {k: int(v) for k, v in (expected or {}).items() if k in ("image", "video") and v}
+    if expect and expected:
+        raise ValueError("An entry that expects the target to be unavailable cannot "
+                         "expect media as well.")
+    entry = {"url": url, "expected": expected, "category": category.strip() or "Added"}
+    if expect:
+        entry["expect"] = expect
     with _suite_lock:
         changes = _read_json(SUITE_PATH, {"added": [], "removed": []})
         changes["removed"] = [u for u in changes.get("removed", []) if u != url]
         changes["added"] = [e for e in changes.get("added", []) if e["url"] != url]
-        changes["added"].append({"url": url, "expected": expected,
-                                 "category": category.strip() or "Added"})
+        changes["added"].append(entry)
         _write_json(SUITE_PATH, changes)
-    return {"url": url, "expected": expected, "category": category}
+    return entry
 
 
 def remove(url: str) -> bool:
@@ -122,11 +143,20 @@ def restore_defaults() -> int:
 def _score(entry: dict, response) -> dict:
     """What happened to one URL, measured against its expectation."""
     sequence = response.content.multimodal if response.content else None
+    # TODO: Count PDFs too once ezMM supports them as items, like media (coming soon). Until
+    #  then, URLs that serve a PDF (e.g. the suite's eur-lex.europa.eu entry, expecting one
+    #  "pdf") count as missing it.
     found = {"image": len(sequence.images), "video": len(sequence.videos)} if sequence else {}
     expected = entry.get("expected") or {}
+    expect = entry.get("expect")
     missing = {kind: count for kind, count in expected.items()
                if found.get(kind, 0) < count}
-    if not response.success:
+    result_class, result_kind = classify(response.success, response.errors)
+    if expect:
+        # The target must turn out unavailable: content, or an error of scrapeMM's own,
+        # means the detection broke
+        outcome = "passed" if result_class == expect else "failed"
+    elif not response.success:
         outcome = "failed"
     elif missing:
         outcome = "partial"
@@ -137,8 +167,10 @@ def _score(entry: dict, response) -> dict:
     return {
         "url": entry["url"], "category": entry.get("category", "Other"),
         "outcome": outcome, "method": response.method,
-        "retrieval_time": response.retrieval_time,
-        "expected": expected, "found": found, "missing": missing,
+        "retrieval_time": response.retrieval_time,  # From the first request, see `timing`
+        "queue_time": response.queue_time,
+        "expected": expected, "expect": expect, "found": found, "missing": missing,
+        "result_class": result_class, "result_kind": result_kind,
         "error": _main_error(errors),
     }
 
@@ -180,6 +212,7 @@ def summarize(results: list[dict], total: int, started: float,
     for r in results:
         if r["outcome"] != "failed" and r["method"]:
             methods[r["method"]] = methods.get(r["method"], 0) + 1
+        # An expected unavailability that was met is no error worth listing
         if r["outcome"] == "failed":
             kind = (r["error"] or {}).get("type") or "Unknown"
             errors[kind] = errors.get(kind, 0) + 1
@@ -221,18 +254,24 @@ class TestRun:
         self.state = "idle"  # idle | running | completed | cancelled | failed
         self.entries: list[dict] = []
         self.results: list[dict] = []
+        # The API key the run was started with, its id and name: the run is its job
+        self.started_by: Optional[dict] = None
 
     @property
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
 
-    def start(self) -> dict:
+    def start(self, started_by: dict) -> dict:
+        """Starts a run of the suite under the API key `started_by` ({"id", "name"})."""
         if self.running:
             return self.status()
+        if not (started_by or {}).get("id"):
+            raise ValueError("A test run runs under the API key of whoever starts it.")
         entries = suite()
         if not entries:
             raise ValueError("The suite is empty; add URLs first.")
         self.id = uuid.uuid4().hex[:10]
+        self.started_by = started_by
         self.entries, self.results = entries, []
         self.started, self.finished, self.state = time.time(), None, "running"
         self._task = asyncio.create_task(self._run())
@@ -253,8 +292,9 @@ class TestRun:
         from .jobs import jobs
 
         urls = [e["url"] for e in self.entries]
-        self.job_id = jobs.start({"urls": urls, "output_format": OUTPUT_FORMAT,
-                                  "use_cache": False, "test_run": self.id}, len(urls))
+        self.job_id = await jobs.astart({"urls": urls, "output_format": OUTPUT_FORMAT,
+                                         "strip": STRIP, "use_cache": False, "test_run": self.id,
+                                         "api_key": self.started_by["id"]}, len(urls))
         passed = failed = 0
         tasks: list[asyncio.Task] = []
         try:
@@ -263,7 +303,7 @@ class TestRun:
                     try:
                         return entry, await retrieve_one(entry["url"], session,
                                                          output_format=OUTPUT_FORMAT,
-                                                         use_cache=False)
+                                                         use_cache=False, strip=STRIP)
                     except Exception as e:
                         # One URL must not end the run; it counts as failed, with why
                         logger.warning(f"Test retrieval of {entry['url']} raised.", exc_info=True)
@@ -274,12 +314,12 @@ class TestRun:
                 tasks = [asyncio.create_task(one(e)) for e in self.entries]
                 for completed in asyncio.as_completed(tasks):
                     entry, response = await completed
-                    jobs.record(self.job_id, _to_payload(response), response.success)
+                    await jobs.arecord(self.job_id, _to_payload(response), response.success)
                     self.results.append(_score(entry, response))
                     passed += response.success
                     failed += not response.success
             self.state = "completed"
-            jobs.finish(self.job_id, passed, failed)
+            await jobs.afinish(self.job_id, passed, failed)
         except asyncio.CancelledError:
             for task in tasks:
                 task.cancel()
@@ -294,13 +334,15 @@ class TestRun:
             self.finished = time.time()
             _save_run(self.report())
 
-    def rerun_captchas(self) -> dict:
+    def rerun_captchas(self, started_by: dict) -> dict:
         """Retrieves again the URLs of the latest run that ran into a CAPTCHA, now that
         somebody may have solved it, and puts their new results into that same report.
         The cache is allowed here: solving drains the queued URLs into it (Archive.today
         into its permanent page cache), which is exactly what this is meant to pick up."""
         if self.running:
             raise ValueError("A test run is under way.")
+        if not (started_by or {}).get("id"):
+            raise ValueError("A rerun runs under the API key of whoever starts it.")
         base = self.report() if self.id else _latest_report()
         if base is None:
             raise ValueError("There is no test run to rerun URLs of.")
@@ -315,18 +357,21 @@ class TestRun:
         self.entries = [{"url": r["url"], "category": r["category"], "expected": r["expected"]}
                         for r in base["results"]]
         final_state = base.get("state", "completed")
+        self.started_by = base.get("started_by")  # The run's; the rerun's own key is its job's
         self.state = "running"
-        self._task = asyncio.create_task(self._rerun(gated, final_state))
+        self._task = asyncio.create_task(self._rerun(gated, final_state, started_by))
         return self.status()
 
-    async def _rerun(self, gated: list[dict], final_state: str) -> None:
+    async def _rerun(self, gated: list[dict], final_state: str, started_by: dict) -> None:
         from .api.retrieve import _to_payload
         from .engine import retrieve_one
         from .jobs import jobs
 
         urls = [r["url"] for r in gated]
-        job_id = jobs.start({"urls": urls, "output_format": OUTPUT_FORMAT, "use_cache": True,
-                             "test_run": self.id, "rerun": "captcha"}, len(urls))
+        job_id = await jobs.astart({"urls": urls, "output_format": OUTPUT_FORMAT, "strip": STRIP,
+                             "use_cache": True,
+                             "test_run": self.id, "rerun": "captcha",
+                             "api_key": started_by["id"]}, len(urls))
         passed = failed = 0
         try:
             async with aiohttp.ClientSession() as session:
@@ -334,7 +379,7 @@ class TestRun:
                     try:
                         return entry, await retrieve_one(entry["url"], session,
                                                          output_format=OUTPUT_FORMAT,
-                                                         use_cache=True)
+                                                         use_cache=True, strip=STRIP)
                     except Exception as e:
                         logger.warning(f"Test rerun of {entry['url']} raised.", exc_info=True)
                         return entry, ScrapingResponse(url=entry["url"], content=None,
@@ -343,12 +388,12 @@ class TestRun:
 
                 for completed in asyncio.as_completed([one(r) for r in gated]):
                     entry, response = await completed
-                    jobs.record(job_id, _to_payload(response), response.success)
+                    await jobs.arecord(job_id, _to_payload(response), response.success)
                     # Its result lives in the rerun's job, not the run's
                     self.results.append(_score(entry, response) | {"job_id": job_id})
                     passed += response.success
                     failed += not response.success
-            jobs.finish(job_id, passed, failed)
+            await jobs.afinish(job_id, passed, failed)
         except asyncio.CancelledError:
             # The URLs not rerun keep their earlier CAPTCHA result
             done = {r["url"] for r in self.results}
@@ -363,7 +408,7 @@ class TestRun:
     def report(self) -> dict:
         return {
             "id": self.id, "job_id": self.job_id, "state": self.state,
-            "started": self.started, "finished": self.finished,
+            "started": self.started, "finished": self.finished, "started_by": self.started_by,
             "summary": summarize(self.results, len(self.entries), self.started or time.time(),
                                  self.finished),
             "results": sorted(self.results, key=lambda r: (r["category"], r["url"])),

@@ -2,10 +2,14 @@
 /** Try a URL and watch the result arrive. Uses the very same streaming endpoint the
  *  Python client uses, so what you see here is what a script would get. */
 const api = useApi()
+const route = useRoute()
 
-const input = ref('')
+// Prefilled when arriving from elsewhere, e.g. a search result's "Retrieve"
+const input = ref((route.query.url as string) || '')
 const outputFormat = ref('multimodal')
 const useCache = ref(true)
+const strip = ref(false)
+const screenshot = ref(false)
 const prioritize = ref('completeness')
 const running = ref(false)
 const error = ref('')
@@ -39,6 +43,8 @@ async function run() {
       urls: urls.value,
       output_format: outputFormat.value,
       use_cache: useCache.value,
+      strip: strip.value,
+      screenshot: screenshot.value,
       prioritize: prioritize.value,
     }, (message) => {
       if (message.type === 'header') progress.value.total = message.total
@@ -65,7 +71,7 @@ function succeeded(payload: any) {
 <template>
   <div class="space-y-6">
     <div>
-      <h1 class="text-2xl font-semibold">Playground</h1>
+      <h1 class="text-2xl font-semibold">Retrieval</h1>
       <p class="text-sm text-muted">One URL per line. Results stream in as they finish.</p>
     </div>
 
@@ -83,6 +89,11 @@ function succeeded(payload: any) {
             <USelect v-model="prioritize" :items="priorities" class="w-40" />
           </UFormField>
           <UCheckbox v-model="useCache" label="Use cache" class="mb-2" />
+          <UCheckbox v-model="strip" label="Strip UI elements" class="mb-2" />
+          <UCheckbox
+            v-model="screenshot" label="Screenshot" class="mb-2"
+            title="Also capture each retrieved page in the server's browser"
+          />
           <UButton
             class="ml-auto" size="lg" icon="i-fa7-solid-play" :loading="running"
             :disabled="!urls.length" label="Retrieve" @click="run"
@@ -110,8 +121,9 @@ function succeeded(payload: any) {
       <ResultView
         v-for="payload in results" :key="payload.url"
         :url="payload.url" :content="payload.content" :method="payload.method"
-        :errors="payload.errors" :retrieval-time="payload.retrieval_time"
+        :errors="payload.errors" :retrieval-time="payload.retrieval_time" :queue-time="payload.queue_time"
         :from-cache="payload.from_cache" :success="succeeded(payload)"
+        :screenshot="payload.screenshot"
       />
     </div>
   </div>

@@ -16,9 +16,9 @@ from pydantic import BaseModel
 
 from scrapemm.common.paths import APP_NAME
 from .. import registry, status as status_module
-from ..auth import api_key_from_environment, regenerate_api_key, require_api_key
+from ..auth import Principal, require_admin, require_api_key
 from ..blacklist import blacklist
-from ..cache import cache
+from ..cache import cache, immutable, KINDS
 from ..config import SETTINGS, get_config, update_config
 from ..jobs import SORTS, jobs
 from ..toggles import set_enabled
@@ -29,6 +29,7 @@ from ..version import __version__
 logger = logging.getLogger(APP_NAME)
 
 router = APIRouter(prefix="/v1", tags=["admin"], dependencies=[Depends(require_api_key)])
+ADMIN = [Depends(require_admin)]  # For what configures the server or reveals its credentials
 
 
 # --- Version and status -----------------------------------------------------------
@@ -99,7 +100,7 @@ class EnabledFlag(BaseModel):
     enabled: bool
 
 
-@router.put("/integrations/{name}/enabled")
+@router.put("/integrations/{name}/enabled", dependencies=ADMIN)
 async def set_integration_enabled(name: str, body: EnabledFlag) -> dict:
     """Switches a retrieval method on or off. A disabled one is dropped from the method
     list before retrieval, so it costs nothing rather than failing its way down it."""
@@ -127,7 +128,7 @@ async def live() -> StreamingResponse:
                                       "X-Accel-Buffering": "no"})
 
 
-@router.get("/logs/stream")
+@router.get("/logs/stream", dependencies=ADMIN)
 async def logs_stream() -> StreamingResponse:
     """The server's log as NDJSON: the recent backlog first, then every new record as
     it is logged, and a ping every few seconds of silence. See `logbuffer.py`."""
@@ -148,12 +149,12 @@ class SecretValue(BaseModel):
     value: str
 
 
-@router.get("/secrets")
+@router.get("/secrets", dependencies=ADMIN)
 async def list_secrets() -> dict:
     return {"secrets": describe_secrets()}
 
 
-@router.put("/secrets/{name}")
+@router.put("/secrets/{name}", dependencies=ADMIN)
 async def put_secret(name: str, body: SecretValue) -> dict:
     if name not in SECRETS:
         raise HTTPException(status_code=404, detail=f"Unknown secret '{name}'.")
@@ -165,22 +166,30 @@ async def put_secret(name: str, body: SecretValue) -> dict:
         raise HTTPException(status_code=400, detail="The value must not be empty.")
 
     set_secret(name, body.value.strip())
-    # The dashboard should show the effect at once, not after the status TTL lapses
-    status_module.invalidate(*status_module.secrets_to_integrations(name))
+    _refresh_dashboard(name)
     logger.info(f"Secret '{name}' was set through the API.")
     return {"name": name, "is_set": True}
 
 
-@router.delete("/secrets/{name}")
+@router.delete("/secrets/{name}", dependencies=ADMIN)
 async def delete_secret(name: str) -> dict:
     if name not in SECRETS:
         raise HTTPException(status_code=404, detail=f"Unknown secret '{name}'.")
     removed = remove_secret(name)
-    status_module.invalidate(*status_module.secrets_to_integrations(name))
+    _refresh_dashboard(name)
     return {"name": name, "removed": removed, "is_set": False}
 
 
-@router.post("/secrets/rotate-key")
+def _refresh_dashboard(secret_name: str) -> None:
+    """Re-probes the cards a changed secret affects, so the dashboard shows the effect
+    at once rather than after the status TTL lapses. A secret no card uses, like a
+    search provider's key, affects nothing -- and must not reach `invalidate()` with no
+    names, which means "everything" and would re-probe every integration."""
+    if affected := status_module.secrets_to_integrations(secret_name):
+        status_module.invalidate(*affected)
+
+
+@router.post("/secrets/rotate-key", dependencies=ADMIN)
 async def rotate_secrets_key() -> dict:
     try:
         rotate_key()
@@ -189,32 +198,15 @@ async def rotate_secrets_key() -> dict:
     return {"rotated": True}
 
 
-# --- API key ----------------------------------------------------------------------
-
-@router.get("/api-key")
-async def describe_api_key() -> dict:
-    """Never the key itself: only whether the UI may regenerate it."""
-    return {"from_environment": api_key_from_environment()}
-
-
-@router.post("/api-key/regenerate")
-async def regenerate_key() -> dict:
-    """Returns the new key once, so the caller can switch over to it."""
-    try:
-        return {"api_key": regenerate_api_key()}
-    except RuntimeError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-
-
 # --- Configuration ----------------------------------------------------------------
 
-@router.get("/config")
+@router.get("/config", dependencies=ADMIN)
 async def read_config() -> dict:
     return {"config": get_config(),
             "settings": {name: kind.__name__ for name, kind in SETTINGS.items()}}
 
 
-@router.patch("/config")
+@router.patch("/config", dependencies=ADMIN)
 async def patch_config(body: dict[str, Any]) -> dict:
     unknown = [name for name in body if name not in SETTINGS]
     if unknown:
@@ -266,16 +258,49 @@ async def remove_from_blacklist(domain: str) -> dict:
 
 # --- Cache ------------------------------------------------------------------------
 
-@router.get("/cache")
+@router.get("/cache", dependencies=ADMIN)
 async def read_cache() -> dict:
-    return {"entries": len(cache), "ttl": cache.ttl}
+    """Live figures and the settings: entries, size_mb, enabled, ttl, max_entries, max_mb."""
+    return cache.stats()
 
 
-@router.post("/cache/clear")
-async def clear_the_cache() -> dict:
+class CacheConfig(BaseModel):
+    enabled: Optional[bool] = None
+    ttl: Optional[float] = None  # Seconds an entry lives; 0 disables the cache
+    max_entries: Optional[int] = None
+    max_mb: Optional[float] = None  # Text held in memory, in MB
+    immutable_max_mb: Optional[float] = None  # The permanent tier on disk, in MB
+
+
+@router.put("/cache/config", dependencies=ADMIN)
+async def configure_cache(body: CacheConfig) -> dict:
+    """Changes the cache's settings; they apply at once, with no restart."""
+    if body.ttl is not None and body.ttl < 0:
+        raise HTTPException(status_code=400, detail="The lifetime cannot be negative.")
+    if body.max_entries is not None and not 1 <= body.max_entries <= 1_000_000:
+        raise HTTPException(status_code=400, detail="Max entries must be between 1 and 1,000,000.")
+    if body.max_mb is not None and not 1 <= body.max_mb <= 64 * 1024:
+        raise HTTPException(status_code=400, detail="Max size must be between 1 MB and 64 GB.")
+    if body.immutable_max_mb is not None and not 1 <= body.immutable_max_mb <= 1024 * 1024:
+        raise HTTPException(status_code=400,
+                            detail="The permanent cache's size must be between 1 MB and 1 TB.")
+    changes = {name: value for name, value in (
+        ("cache_enabled", body.enabled), ("cache_ttl", body.ttl),
+        ("cache_max_entries", body.max_entries), ("cache_max_mb", body.max_mb),
+        ("cache_immutable_max_mb", body.immutable_max_mb))
+        if value is not None}
+    update_config(**changes)  # Applies them to the cache, see `config._apply_config()`
+    return cache.stats()
+
+
+@router.post("/cache/clear", dependencies=ADMIN)
+async def clear_the_cache(tier: str = Query(default="recent", pattern="^(recent|all)$")) -> dict:
+    """Empties the recent tier; with `tier=all`, the permanent one too -- which holds
+    Archive.today pages that cannot be retrieved again without solving its CAPTCHA."""
     entries = len(cache)
     cache.clear()
-    return {"cleared": entries}
+    permanent = await asyncio.to_thread(immutable.clear, KINDS) if tier == "all" else 0
+    return {"cleared": entries, "cleared_permanent": permanent}
 
 
 # --- Job history ------------------------------------------------------------------
@@ -293,6 +318,12 @@ async def list_jobs(
             default=None,
             description="True keeps jobs with at least one success, False with at "
                         "least one failure"),
+        outcome: Optional[str] = Query(
+            default=None,
+            description="Keeps jobs with at least one result of this outcome: ok, "
+                        "unavailable or error, or a kind of unavailability (missing, "
+                        "paywall, captcha, blocked, rate_limit, unsupported). See "
+                        "scrapemm.common.outcome."),
         since: Optional[float] = Query(default=None,
                                        description="UNIX timestamp, inclusive"),
         until: Optional[float] = Query(default=None,
@@ -314,19 +345,25 @@ async def list_jobs(
         raise HTTPException(status_code=400, detail=f"Unknown sort '{sort}'. Allowed: "
                                                     f"{', '.join(SORTS)}.")
     criteria = dict(status=job_status, url=url, output_format=output_format,
-                    method=method, success=success, since=since, until=until)
-    return {
-        "version": jobs.version,
-        "jobs": jobs.list_jobs(limit=limit, offset=offset, sort=sort, **criteria),
-        "total": jobs.count_jobs(**criteria),
-        "stats": jobs.stats(),
-        "methods": jobs.known_methods(),
-    }
+                    method=method, success=success, since=since, until=until,
+                    outcome=outcome)
+
+    # In a thread: a filtered query over a large history can take seconds, and on the
+    # event loop that would freeze every retrieval in flight
+    def answer() -> dict:
+        return {
+            "version": jobs.version,
+            "jobs": jobs.list_jobs(limit=limit, offset=offset, sort=sort, **criteria),
+            "total": jobs.count_jobs(**criteria),
+            "stats": jobs.stats(),
+            "methods": jobs.known_methods(),
+        }
+    return await asyncio.to_thread(answer)
 
 
 @router.get("/jobs/{job_id}")
 async def get_job(job_id: str) -> dict:
-    job = jobs.get_job(job_id)
+    job = await asyncio.to_thread(jobs.get_job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"No job '{job_id}'.")
     return job
@@ -335,6 +372,36 @@ async def get_job(job_id: str) -> dict:
 @router.delete("/jobs/{job_id}")
 async def delete_job(job_id: str) -> dict:
     return {"job_id": job_id, "deleted": jobs.delete_job(job_id)}
+
+
+# --- Statistics -------------------------------------------------------------------
+
+@router.get("/stats/retrievals")
+async def retrieval_statistics(
+        bucket: str = Query(default="day", description="hour, day or week"),
+        group: str = Query(default="outcome",
+                           description="method, outcome, kind or key (API key; Admin and Root only)"),
+        periods: Optional[int] = Query(
+            default=None, ge=1, le=400,
+            description="How many buckets, up to the current one (default: 48 hours, "
+                        "30 days or 26 weeks)"),
+        tz_offset: int = Query(
+            default=0, ge=-14 * 60, le=14 * 60,
+            description="The viewer's offset from UTC in minutes (east positive), so "
+                        "that days and weeks start at local midnight"),
+        principal: Principal = Depends(require_api_key),
+) -> dict:
+    """Past retrievals over time, per method, outcome or API key, for the Statistics view."""
+    from ..retrieval_stats import BUCKET_SECONDS, retrieval_stats
+    if bucket not in BUCKET_SECONDS:
+        raise HTTPException(status_code=400, detail="bucket must be hour, day or week.")
+    if group not in ("method", "outcome", "kind", "key"):
+        raise HTTPException(status_code=400, detail="group must be method, outcome, kind or key.")
+    if group == "key" and not principal.is_admin:
+        # The names of the keys are for those who manage them
+        raise HTTPException(status_code=403, detail="Grouping by API key needs an Admin or Root API key.")
+    # A query over a large range reads many rows: off the event loop
+    return await asyncio.to_thread(retrieval_stats, jobs, bucket, group, periods, tz_offset)
 
 
 # --- Media ------------------------------------------------------------------------
@@ -353,6 +420,6 @@ async def media(kind: str, identifier: int) -> FileResponse:
     return FileResponse(path, filename=path.name)
 
 
-@router.get("/media")
+@router.get("/media", dependencies=ADMIN)
 async def media_usage() -> dict:
     return registry.usage()

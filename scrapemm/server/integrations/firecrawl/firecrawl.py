@@ -12,6 +12,7 @@ from scrapemm.server.config import get_config_var, update_config
 from scrapemm.common.exceptions import (UnsupportedDomainError, TargetUnavailableError,
                                         AccessBlockedError, RetrievalFailed)
 from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
+from scrapemm.server import screenshot
 from scrapemm.server.captcha_detect import detect_captcha
 from scrapemm.server.download.common import HEADERS
 from scrapemm.server.util import read_urls_from_file, get_domain, to_scraped_content
@@ -171,6 +172,13 @@ class Firecrawl:
         # to get stuck in an infinite loop.
         # await self._ensure_availability(url, session)
 
+        # On request, the screenshot comes with the scrape: the same session, no second load
+        formats: list = ["html"]
+        if screenshot.wanted():
+            from firecrawl.v2.types import ScreenshotFormat
+            formats.append(ScreenshotFormat(full_page=True, viewport={"width": screenshot.WIDTH,
+                                                                       "height": screenshot.HEIGHT}))
+
         document = None
         for attempt in range(max_attempts):
             # Each attempt goes to the next instance, so a busy one is retried elsewhere
@@ -178,7 +186,7 @@ class Firecrawl:
             try:
                 document = await client.scrape(
                     url,
-                    formats=["html"],
+                    formats=formats,
                     only_main_content=False,
                     remove_base64_images=False,
                     exclude_tags=["script", "style", "noscript", "footer", "aside"],
@@ -236,8 +244,24 @@ class Firecrawl:
                      else AccessBlockedError)
             raise error(f"Firecrawl got HTTP {status} from {url}.")
 
-        return await to_scraped_content(html, session=session, output_format=output_format,
-                                        url=url, max_video_size=max_video_size)
+        content = await to_scraped_content(html, session=session, output_format=output_format,
+                                           url=url, max_video_size=max_video_size)
+        if getattr(document, "screenshot", None):
+            screenshot.keep(content, await self._screenshot_bytes(document.screenshot, session))
+        return content
+
+    @staticmethod
+    async def _screenshot_bytes(reference: str, session: aiohttp.ClientSession) -> Optional[bytes]:
+        """The screenshot Firecrawl took: inline as a data URL (self-hosted), or a link to
+        the image file (Firecrawl's cloud), which is fetched -- an image, not the page."""
+        if reference.startswith("data:"):
+            return screenshot.from_data_url(reference)
+        try:
+            async with session.get(reference, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                return await response.read() if response.status == 200 else None
+        except Exception:
+            logger.debug(f"Could not fetch Firecrawl's screenshot {reference}.", exc_info=True)
+            return None
 
     async def _ensure_availability(self, url: str, session: aiohttp.ClientSession):
         """Probe if the URL is reachable. If an HTTP error >= 400 occurs, raise an exception."""

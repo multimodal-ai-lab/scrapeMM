@@ -34,7 +34,10 @@ const filters = reactive({
   url: (route.query.url as string) || '',
   method: (route.query.method as string) || ANY,
   format: (route.query.format as string) || ANY,
-  success: (route.query.success as string) || ANY,
+  // `success` is what links from before the outcome classes used ('ok' / 'failed')
+  outcome: (route.query.outcome as string)
+    || ({ ok: 'ok', failed: 'error' } as Record<string, string>)[route.query.success as string]
+    || ANY,
   since: (route.query.since as string) || ANY,
 })
 const sort = ref((route.query.sort as string) || 'newest')
@@ -49,14 +52,14 @@ const FORMATS = [
   { label: 'Markdown', value: 'markdown' },
   { label: 'HTML', value: 'html' },
 ]
-const OUTCOMES = [
-  { label: 'Any outcome', value: ANY },
-  { label: 'Has successes', value: 'ok' },
-  { label: 'Has failures', value: 'failed' },
-]
+// Grouped: the three classes, then the kinds of "unavailable" (see useOutcome.ts)
+const OUTCOMES = outcomeFilterItems(ANY)
+const OUTCOME_OPTIONS = OUTCOMES.flat().filter((o: any) => o.value) as
+  { label: string, value: string, icon: string, tone: string }[]
 const PERIODS = [
   { label: 'Any time', value: ANY },
   { label: 'Last hour', value: '1h' },
+  { label: 'Today', value: 'today' },
   { label: 'Last 24 hours', value: '24h' },
   { label: 'Last 7 days', value: '7d' },
   { label: 'Last 30 days', value: '30d' },
@@ -99,9 +102,11 @@ const activeChips = computed(() => {
     chips.push({ key: 'format', icon: 'i-fa7-solid-file-lines',
                  text: label(FORMATS, filters.format) })
   }
-  if (isSet(filters.success)) {
-    chips.push({ key: 'success', icon: 'i-fa7-solid-circle-check',
-                 text: label(OUTCOMES, filters.success) })
+  if (isSet(filters.outcome)) {
+    chips.push({ key: 'outcome',
+                 icon: OUTCOME_OPTIONS.find((o) => o.value === filters.outcome)?.icon
+                   || 'i-fa7-solid-circle-check',
+                 text: label(OUTCOME_OPTIONS, filters.outcome) })
   }
   if (isSet(filters.since)) {
     chips.push({ key: 'since', icon: 'i-fa7-solid-clock',
@@ -115,13 +120,14 @@ function clearFilter(key: keyof typeof filters) {
 }
 
 function reset() {
-  Object.assign(filters, { url: '', method: ANY, format: ANY, success: ANY, since: ANY })
+  Object.assign(filters, { url: '', method: ANY, format: ANY, outcome: ANY, since: ANY })
 }
 
 function sinceTimestamp(period: string): number | null {
   const spans: Record<string, number> = {
     '1h': 3600, '24h': 86400, '7d': 604800, '30d': 2592000,
   }
+  if (period === 'today') return Math.floor(new Date().setHours(0, 0, 0, 0) / 1000)
   const span = spans[period]
   return span ? Math.floor(Date.now() / 1000 - span) : null
 }
@@ -131,7 +137,7 @@ function query(offset: number, limit: number, withVersion = false) {
   if (isSet(filters.url)) q.set('url', filters.url)
   if (isSet(filters.method)) q.set('method', filters.method)
   if (isSet(filters.format)) q.set('output_format', filters.format)
-  if (isSet(filters.success)) q.set('success', filters.success === 'ok' ? 'true' : 'false')
+  if (isSet(filters.outcome)) q.set('outcome', filters.outcome)
   const since = isSet(filters.since) ? sinceTimestamp(filters.since) : null
   if (since) q.set('since', String(since))
   if (withVersion && version !== null) q.set('version', String(version))
@@ -268,12 +274,13 @@ onBeforeUnmount(stopWatching)
 // --- Presentation ---------------------------------------------------------------
 
 function urlLook(entry: any, job: any) {
-  if (entry.state === 'ok') {
-    return { icon: 'i-fa7-solid-circle-check', color: 'text-success',
-             title: entry.from_cache ? 'Retrieved (from cache)' : 'Retrieved' }
-  }
-  if (entry.state === 'failed') {
-    return { icon: 'i-fa7-solid-circle-exclamation', color: 'text-error', title: 'Failed' }
+  if (entry.state === 'ok' || entry.state === 'failed') {
+    // Results stored before the outcome classes existed are classified on the server
+    // too; the fallback only covers an entry without any
+    const outcome = entry.outcome || (entry.state === 'ok' ? 'ok' : 'error')
+    const look = outcomeLook(outcome, entry.outcome_kind)
+    return { icon: look.icon, color: look.text,
+             title: outcome === 'ok' && entry.from_cache ? 'Retrieved (from cache)' : look.label }
   }
   if (job.status === 'running') {
     return { icon: 'i-fa7-solid-circle-notch', color: 'text-info animate-spin', title: 'In progress' }
@@ -300,7 +307,11 @@ async function copy(id: string) {
       <h1 class="text-2xl font-semibold">Jobs</h1>
       <p class="text-sm text-muted mt-1">
         {{ stats.jobs }} jobs · {{ stats.urls }} URLs ·
-        <span class="text-success">{{ stats.succeeded }} succeeded</span> ·
+        <span class="text-success">{{ stats.outcomes?.ok ?? stats.succeeded }} retrieved</span> ·
+        <span
+          :class="stats.outcomes?.unavailable ? 'text-warning' : ''"
+          title="scrapeMM did its part, but the target was unavailable, behind a paywall or a CAPTCHA, or rate-limited"
+        >{{ stats.outcomes?.unavailable ?? 0 }} unavailable</span> ·
         <span :class="stats.failed ? 'text-error' : ''">{{ stats.failed }} failed</span>
       </p>
     </div>
@@ -323,7 +334,18 @@ async function copy(id: string) {
       </UInput>
       <USelect v-model="filters.method" :items="methodOptions" class="w-40" />
       <USelect v-model="filters.format" :items="FORMATS" class="w-40" />
-      <USelect v-model="filters.success" :items="OUTCOMES" class="w-40" />
+      <USelect
+        v-model="filters.outcome" :items="OUTCOMES" class="w-40" aria-label="Filter by outcome"
+        :icon="OUTCOME_OPTIONS.find((o) => o.value === filters.outcome)?.icon"
+        :ui="{ leadingIcon: OUTCOME_OPTIONS.find((o) => o.value === filters.outcome)?.tone }"
+      >
+        <template #item-leading="{ item }">
+          <UIcon
+            v-if="(item as any).icon" :name="(item as any).icon"
+            class="size-4 shrink-0" :class="(item as any).tone"
+          />
+        </template>
+      </USelect>
       <USelect v-model="filters.since" :items="PERIODS" class="w-40" />
       <USelect
         v-model="sort" :items="SORTS" class="w-48" aria-label="Sort the jobs"
@@ -406,9 +428,31 @@ async function copy(id: string) {
               <UIcon name="i-fa7-solid-file-lines" class="size-3" />
               {{ job.params.output_format }}
             </span>
+            <span v-if="job.params.strip" class="inline-flex items-center gap-1" title="UI elements stripped">
+              <UIcon name="i-fa7-solid-scissors" class="size-3" />
+              stripped
+            </span>
+            <span v-if="job.params.screenshot" class="inline-flex items-center gap-1" title="With screenshots">
+              <UIcon name="i-fa7-solid-camera" class="size-3" />
+              screenshot
+            </span>
             <span v-if="job.methods?.length" class="inline-flex items-center gap-1">
               <UIcon name="i-fa7-solid-wrench" class="size-3" />
               {{ job.methods.join(', ') }}
+            </span>
+            <span
+              v-if="job.url_count > 1 && job.outcomes" class="inline-flex items-center gap-2 tabular-nums"
+              title="Retrieved · unavailable · failed"
+            >
+              <span class="inline-flex items-center gap-0.5 text-success">
+                <UIcon name="i-fa7-solid-circle-check" class="size-3" />{{ job.outcomes.ok }}
+              </span>
+              <span v-if="job.outcomes.unavailable" class="inline-flex items-center gap-0.5 text-warning">
+                <UIcon name="i-fa7-solid-circle-minus" class="size-3" />{{ job.outcomes.unavailable }}
+              </span>
+              <span v-if="job.outcomes.error" class="inline-flex items-center gap-0.5 text-error">
+                <UIcon name="i-fa7-solid-circle-exclamation" class="size-3" />{{ job.outcomes.error }}
+              </span>
             </span>
             <span v-if="job.status === 'running'" class="text-info">
               running · {{ job.done }} of {{ job.url_count }} done
@@ -444,7 +488,8 @@ async function copy(id: string) {
             <div class="min-w-0 flex-1 flex flex-col">
               <UrlLabel :url="entry.url" class="text-sm" />
               <span
-                v-if="entry.state === 'failed'" class="text-xs text-error/90 truncate"
+                v-if="entry.state === 'failed'" class="text-xs truncate"
+                :class="entry.outcome === 'unavailable' ? 'text-warning' : 'text-error/90'"
                 :title="entry.error?.message"
               >{{ describeError(entry.error?.type) }}</span>
             </div>
@@ -453,7 +498,7 @@ async function copy(id: string) {
                 <UIcon name="i-fa7-solid-bolt" class="size-3" />
               </span>
               <span>{{ entry.method }}</span>
-              <span v-if="entry.retrieval_time">{{ seconds(entry.retrieval_time) }}</span>
+              <span v-if="entry.retrieval_time" :title="retrievalTimeTitle(entry.retrieval_time, entry.queue_time)">{{ seconds(entry.retrieval_time) }}</span>
             </span>
           </NuxtLink>
           <NuxtLink

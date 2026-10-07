@@ -12,14 +12,21 @@ const props = defineProps<{
   method?: string | null
   errors?: Record<string, { type: string, message: string }>
   retrievalTime?: number | null
+  queueTime?: number | null
   fromCache?: boolean
   success?: boolean
+  // A screenshot's media descriptor; stored results keep it with their content
+  screenshot?: any | null
+  // The server's classification (see useOutcome.ts); derived here when absent
+  outcome?: string | null
+  outcomeKind?: string | null
   // With `collapsible`, the header toggles the content; `collapsed` is where it starts
   collapsible?: boolean
   collapsed?: boolean
 }>()
 
 const token = useToken()
+const timeTitle = computed(() => retrievalTimeTitle(props.retrievalTime, props.queueTime))
 const open = ref(!(props.collapsible && props.collapsed))
 
 function toggle() {
@@ -60,15 +67,25 @@ function mediaUrl(item: any) {
   return `${apiBase()}${item.media_url}?token=${encodeURIComponent(token.value || '')}`
 }
 
+const screenshotItem = computed(() => props.screenshot || props.content?.screenshot || null)
+
 const tabs = computed(() => {
   const available = []
   if (props.content?.multimodal) available.push({ label: 'Multimodal', slot: 'multimodal', icon: 'i-fa7-solid-photo-film' })
   if (props.content?.markdown) available.push({ label: 'Markdown', slot: 'markdown', icon: 'i-fa7-solid-align-left' })
   if (props.content?.html) available.push({ label: 'HTML', slot: 'html', icon: 'i-fa7-solid-code' })
+  if (screenshotItem.value) available.push({ label: 'Screenshot', slot: 'screenshot', icon: 'i-fa7-solid-camera' })
   return available
 })
 
 const errorList = computed(() => Object.entries(props.errors || {}))
+
+/** Green, yellow or red, with the kind of yellow: from the server, or derived alike. */
+const look = computed(() => {
+  const derived = classifyOutcome(!!props.success, props.errors)
+  return outcomeLook(props.outcome || derived.outcome,
+                     props.outcome ? props.outcomeKind : derived.kind)
+})
 
 /**
  * What actually came back, in numbers.
@@ -144,11 +161,7 @@ function compact(n: number): string {
             <UrlLabel :url="url" />
           </a>
           <div class="flex flex-wrap items-center gap-2 mt-1.5">
-            <UBadge
-              :color="success ? 'success' : 'error'" variant="subtle"
-              :icon="success ? 'i-fa7-solid-circle-check' : 'i-fa7-solid-circle-xmark'"
-              :label="success ? 'Retrieved' : 'Failed'"
-            />
+            <UBadge :color="look.color" variant="subtle" :icon="look.icon" :label="look.label" />
             <UBadge v-if="method" color="neutral" variant="outline" :label="method" />
             <UBadge
               v-if="fromCache" color="info" variant="outline"
@@ -157,6 +170,7 @@ function compact(n: number): string {
             <span
               v-if="retrievalTime != null"
               class="text-xs text-dimmed inline-flex items-center gap-1"
+              :title="timeTitle"
             >
               <UIcon name="i-fa7-solid-stopwatch" class="size-3" />
               {{ seconds(retrievalTime) }}
@@ -222,9 +236,15 @@ function compact(n: number): string {
     </template>
 
     <div v-if="errorList.length" class="space-y-2 mb-4">
+      <!-- Yellow where the target was to blame, red where scrapeMM was. A method's error
+           that did not decide the outcome -- another method retrieved the page, or found
+           the target unavailable -- is only worth a quiet note. -->
       <UAlert
         v-for="[method_, error] in errorList" :key="method_"
-        color="error" variant="subtle" icon="i-fa7-solid-triangle-exclamation"
+        :color="isUnavailableError(error.type) && !success ? 'warning'
+          : success || look.color !== 'error' ? 'neutral' : 'error'"
+        variant="subtle"
+        :icon="isUnavailableError(error.type) ? 'i-fa7-solid-circle-minus' : 'i-fa7-solid-triangle-exclamation'"
         :title="`${method_}: ${error.type}`" :description="error.message"
       />
     </div>
@@ -261,6 +281,16 @@ function compact(n: number): string {
       </template>
       <template #html>
         <pre class="whitespace-pre-wrap text-xs pt-3 overflow-x-auto">{{ content.html }}</pre>
+      </template>
+      <template #screenshot>
+        <!-- No link to open it on its own: its address carries the API key, which would
+             then stand in the address bar -->
+        <div class="pt-3">
+          <img
+            :src="mediaUrl(screenshotItem)" class="max-w-full rounded-lg border border-default"
+            alt="The page as the server's browser showed it" loading="lazy"
+          >
+        </div>
       </template>
     </UTabs>
 

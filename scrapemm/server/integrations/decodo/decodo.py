@@ -7,7 +7,8 @@ import aiohttp
 from aiohttp import ClientConnectorError
 
 from scrapemm.common import (AccessBlockedError, QuotaExceededError, RateLimitError,
-                             RetrievalFailed, UnsupportedDomainError)
+                             RegionBlockedError, RetrievalFailed, TargetUnavailableError,
+                             UnsupportedDomainError)
 from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
 from scrapemm.server.secrets import get_secret
 from scrapemm.server.util import get_domain, to_scraped_content
@@ -25,6 +26,9 @@ class Decodo:
     and JavaScript rendering capabilities."""
 
     DECODO_API_URL = "https://scraper-api.decodo.com/v2/scrape"
+    # Where to fetch a page from that this server's region is denied (HTTP 451): the
+    # pages concerned are mostly US sites blocking the EU
+    UNBLOCKED_GEO = "United States"
 
     def __init__(self):
         self.basic_auth_token = None
@@ -51,6 +55,7 @@ class Decodo:
             timeout: int = 30,
             max_retries: int = 5,
             max_video_size: int | None = None,
+            geo: str | None = None,
     ) -> ScrapedContent:
         """Downloads the contents of the specified webpage using Decodo's API.
 
@@ -63,6 +68,8 @@ class Decodo:
             timeout: Request timeout in seconds (default: 30)
             max_retries: Maximum number of retries for failed requests (default: 5)
             max_video_size: Maximum size of videos embedded in the page, in bytes
+            geo: The country to fetch the page from (Decodo's `geo`), e.g. "United States";
+                Decodo's own choice if None
 
         Returns:
             ScrapedContent holding the scraped HTML along with the requested output format
@@ -82,7 +89,7 @@ class Decodo:
 
         # Try with JS rendering first if enabled
         html = await self._call_decodo(url, session, enable_js, timeout=timeout, max_retries=max_retries,
-                                       use_premium_proxy=use_premium_proxy)
+                                       use_premium_proxy=use_premium_proxy, geo=geo)
 
         return await to_scraped_content(html, session=session, output_format=output_format,
                                         url=url, max_video_size=max_video_size)
@@ -93,7 +100,8 @@ class Decodo:
             enable_js: bool = True,
             timeout: int = 10,
             max_retries: int = 5,
-            use_premium_proxy: bool = False
+            use_premium_proxy: bool = False,
+            geo: str | None = None,
     ) -> str:
         """Calls the Decodo API to scrape the given URL with exponential backoff retry logic.
 
@@ -128,6 +136,9 @@ class Decodo:
 
         if use_premium_proxy:
             payload["proxy_pool"] = "premium"
+
+        if geo:
+            payload["geo"] = geo
 
         # Retry loop with exponential backoff
         for attempt in range(max_retries + 1):
@@ -181,6 +192,10 @@ class Decodo:
                             if status_code and status_code >= 400:
                                 msg = f"Target website returned status {status_code} for {url}"
                                 logger.warning(msg)
+                                if status_code in (404, 410):
+                                    raise TargetUnavailableError(msg)
+                                if status_code == 451:
+                                    raise RegionBlockedError(msg + " (blocked in the proxy's region)")
                                 raise RetrievalFailed(msg)
 
                             html_content = result.get("content")

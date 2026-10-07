@@ -14,7 +14,9 @@ const props = withDefaults(defineProps<{
   height?: number
   /** Scale against this many URLs instead of the bar's own total (for aligned rows) */
   scale?: number
-}>(), { pending: 0, height: 12 })
+  /** Whether the pending URLs are being worked on: their segment shimmers */
+  active?: boolean
+}>(), { pending: 0, height: 12, active: false })
 
 const SEGMENTS = [
   { key: 'passed', label: 'Passed', color: 'var(--viz-good)' },
@@ -51,6 +53,7 @@ function share(value: number) {
       >
         <div
           class="h-full min-w-[2px] transition-[flex-grow] duration-500"
+          :class="{ 'viz-working': active && s.key === 'pending' }"
           :style="{ flexGrow: s.value, flexBasis: 0, background: s.color }"
           :aria-label="`${s.label}: ${s.value}`"
         />
@@ -58,3 +61,37 @@ function share(value: number) {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* What is still being worked on: a soft highlight sweeping across the gray, so a running
+   test reads as alive without a single number changing */
+.viz-working {
+  position: relative;
+  overflow: hidden;
+}
+
+.viz-working::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent 0%,
+    color-mix(in oklab, var(--ui-text-highlighted) 16%, transparent) 50%, transparent 100%);
+  transform: translateX(-100%);
+  animation: viz-sweep 1.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@keyframes viz-sweep {
+  to { transform: translateX(100%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .viz-working::after {
+    animation: viz-breathe 2.4s ease-in-out infinite;
+    transform: none;
+  }
+
+  @keyframes viz-breathe {
+    50% { opacity: 0.4; }
+  }
+}
+</style>

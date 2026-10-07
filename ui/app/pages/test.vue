@@ -2,7 +2,7 @@
 /**
  * Measuring scrapeMM: one button runs the whole suite of known URLs as a job, the page
  * follows it live, and the run ends in a report of coverage and speed -- by category,
- * by method and over past runs.
+ * against the previous run and over past runs.
  *
  * Coverage counts a URL only if it yielded everything its test expects (at least so many
  * images and videos); "retrieved" also counts the ones that came back with media
@@ -18,7 +18,8 @@ const error = ref('')
 const starting = ref(false)
 const outcomeFilter = ref<'all' | 'running' | 'failed' | 'partial' | 'passed'>('all')
 
-const newUrl = reactive({ url: '', category: '', image: 0, video: 0 })
+// `unavailable`: the entry expects the target to be unavailable instead of content
+const newUrl = reactive({ url: '', category: '', image: 0, video: 0, unavailable: false })
 const adding = ref(false)
 const showSuite = ref(false)
 
@@ -124,10 +125,13 @@ async function addUrl() {
   error.value = ''
   try {
     const expected: Record<string, number> = {}
-    if (newUrl.image > 0) expected.image = Number(newUrl.image)
-    if (newUrl.video > 0) expected.video = Number(newUrl.video)
-    await api.post('/v1/test/suite', { url: newUrl.url, category: newUrl.category || 'Added', expected })
-    Object.assign(newUrl, { url: '', image: 0, video: 0 })
+    if (!newUrl.unavailable && newUrl.image > 0) expected.image = Number(newUrl.image)
+    if (!newUrl.unavailable && newUrl.video > 0) expected.video = Number(newUrl.video)
+    await api.post('/v1/test/suite', {
+      url: newUrl.url, category: newUrl.category || 'Added', expected,
+      expect: newUrl.unavailable ? 'unavailable' : null,
+    })
+    Object.assign(newUrl, { url: '', image: 0, video: 0, unavailable: false })
     await load()
   } catch (e: any) {
     error.value = e.message
@@ -237,8 +241,93 @@ const categoryTimes = computed(() => (summary.value?.categories || [])
                       hint: `${c.category}: median ${secs(c.median_time)}`,
                       color: TONE_COLOR[timeTone(c.median_time)] })))
 
-const methodBars = computed(() => Object.entries(summary.value?.methods || {})
-  .map(([label, value]) => ({ label, value: value as number })))
+/** Whether the report shown is the run under way (and so still changing) */
+const live = computed(() => running.value && !viewing.value)
+
+type CategoryStatus = 'running' | 'failed' | 'partial' | 'passed' | 'incomplete'
+
+/** Every category of the run from its start: what is done, and what is still pending
+ *  (gray), with the status its indicator shows. Running wins while it lasts; then the
+ *  worst outcome speaks for the category. */
+const categoryRows = computed(() => {
+  const rows = new Map<string, any>()
+  const row = (category: string) => {
+    if (!rows.has(category)) {
+      rows.set(category, { category, passed: 0, partial: 0, failed: 0, pending: 0 })
+    }
+    return rows.get(category)
+  }
+  for (const c of summary.value?.categories || []) Object.assign(row(c.category), c)
+  if (live.value) for (const p of run.value.pending || []) row(p.category).pending += 1
+  return [...rows.values()]
+    .map((r) => {
+      const status: CategoryStatus = r.pending && live.value ? 'running'
+        : r.failed ? 'failed' : r.partial ? 'partial' : r.pending ? 'incomplete' : 'passed'
+      return { ...r, total: r.passed + r.partial + r.failed + r.pending, status }
+    })
+    .sort((a, b) => a.category.localeCompare(b.category))
+})
+
+const CATEGORY_LOOK: Record<CategoryStatus, { icon: string, color: string, label: string }> = {
+  running: { icon: 'i-fa7-solid-circle-notch', color: 'var(--ui-info)', label: 'Running' },
+  passed: { icon: 'i-fa7-solid-circle-check', color: 'var(--viz-good)', label: 'All passed' },
+  partial: { icon: 'i-fa7-solid-circle-half-stroke', color: 'var(--viz-warning)', label: 'Media missing in at least one' },
+  failed: { icon: 'i-fa7-solid-circle-exclamation', color: 'var(--viz-critical)', label: 'At least one failed' },
+  incomplete: { icon: 'i-fa7-regular-circle', color: 'var(--ui-text-dimmed)', label: 'Not finished' },
+}
+
+// --- Since the previous run ---------------------------------------------------------
+
+/** The run before the one shown: the latest kept run while one is under way */
+const previousId = computed<string | null>(() => {
+  if (!report.value) return null
+  const index = history.value.findIndex((h) => h.id === report.value.id)
+  if (index === -1) return history.value[0]?.id ?? null  // Under way, not kept yet
+  return history.value[index + 1]?.id ?? null
+})
+const previous = ref<any>(null)
+
+watch(previousId, async (id) => {
+  previous.value = null
+  if (!id) return
+  try {
+    previous.value = await api.get<any>(`/v1/test/runs/${id}`)
+  } catch { /* The comparison is a bonus */ }
+}, { immediate: true })
+
+const RANK: Record<string, number> = { failed: 0, partial: 1, passed: 2 }
+
+/** URLs whose outcome changed against the previous run: worse ones and better ones */
+const changes = computed(() => {
+  if (!previous.value) return null
+  const before = new Map<string, any>((previous.value.results || []).map((r: any) => [r.url, r]))
+  const worse: any[] = []
+  const better: any[] = []
+  let compared = 0
+  for (const r of report.value?.results || []) {
+    const old = before.get(r.url)
+    const now = RANK[r.outcome]
+    const then = old ? RANK[old.outcome] : undefined
+    if (now == null || then == null) continue
+    compared += 1
+    if (now < then) worse.push({ ...r, was: old.outcome })
+    else if (now > then) better.push({ ...r, was: old.outcome })
+  }
+  const coverageBefore = previous.value.summary?.coverage
+  return {
+    worse, better, compared, coverageBefore,
+    delta: summary.value?.coverage != null && coverageBefore != null
+      ? summary.value.coverage - coverageBefore : null,
+  }
+})
+const changeGroups = computed(() => changes.value ? [
+  { key: 'worse', title: 'Worse', items: changes.value.worse },
+  { key: 'better', title: 'Better', items: changes.value.better },
+].filter((g) => g.items.length) : [])
+
+function look(outcome: string) {
+  return OUTCOME[outcome as keyof typeof OUTCOME]
+}
 
 /** Failures by what they mean. Several error types share one description (everything
  *  unrecognised is "unexpected"), so they are summed under it; the tooltip keeps the
@@ -289,7 +378,8 @@ const rows = computed(() => {
     : results.filter((r) => r.outcome === outcomeFilter.value)
   // Worst first: what needs looking at leads
   const rank = { failed: 0, partial: 1, passed: 2 } as Record<string, number>
-  const sorted = [...filtered].sort((a, b) => rank[a.outcome] - rank[b.outcome]
+  const order = (r: any) => rank[r.outcome] ?? Object.keys(rank).length  // Unknown ones last
+  const sorted = [...filtered].sort((a, b) => order(a) - order(b)
     || a.category.localeCompare(b.category))
   // What is still changing comes first
   return outcomeFilter.value === 'all' ? [...inProgress.value, ...sorted] : sorted
@@ -314,8 +404,8 @@ function media(record: Record<string, number> | undefined) {
         <h1 class="text-2xl font-semibold">Test</h1>
         <p class="text-sm text-muted mt-1">
           Measures coverage and speed on a suite of {{ suite.length }} known URLs, each
-          with the media it must yield. The cache is bypassed, and the run is a job like
-          any other.
+          with the media it must yield, after stripping UI elements. The cache is
+          bypassed, and the run is a job like any other.
         </p>
       </div>
 
@@ -357,6 +447,10 @@ function media(record: Record<string, number> | undefined) {
           {{ viewing && viewing.id !== history[0]?.id ? 'Past run' : 'Last run' }} ·
           <span :title="absoluteTime(report.started)">{{ timeAgo(report.started) }}</span>
           <template v-if="report.state !== 'completed'"> · {{ report.state }}</template>
+        </span>
+        <!-- Whose run it is: it runs under the API key of whoever started it -->
+        <span v-if="report.started_by" class="inline-flex items-center gap-1" title="Runs under this API key">
+          <UIcon name="i-fa7-solid-key" class="size-3" /> {{ report.started_by.name }}
         </span>
         <NuxtLink
           v-if="report.job_id" :to="`/jobs/${report.job_id}`"
@@ -406,7 +500,7 @@ function media(record: Record<string, number> | undefined) {
         <div class="space-y-3">
           <VizOutcomeBar
             :passed="summary.passed" :partial="summary.partial" :failed="summary.failed"
-            :pending="summary.total - summary.done" :height="18"
+            :pending="summary.total - summary.done" :height="18" :active="live"
           />
           <!-- The legend, with the numbers: identity never rests on colour alone -->
           <div class="flex flex-wrap gap-x-5 gap-y-1 text-sm">
@@ -430,13 +524,25 @@ function media(record: Record<string, number> | undefined) {
           <template #header><h2 class="font-medium text-sm">Coverage by category</h2></template>
           <div class="space-y-2.5">
             <div
-              v-for="c in summary.categories" :key="c.category"
-              class="grid grid-cols-[minmax(0,9rem)_1fr_auto] items-center gap-3 text-sm"
+              v-for="c in categoryRows" :key="c.category"
+              class="grid grid-cols-[auto_minmax(0,9rem)_1fr_auto] items-center gap-3 text-sm"
             >
+              <UIcon
+                :name="CATEGORY_LOOK[c.status as CategoryStatus].icon" class="size-3.5"
+                :class="{ 'animate-spin': c.status === 'running' }"
+                :style="{ color: CATEGORY_LOOK[c.status as CategoryStatus].color }"
+                :title="CATEGORY_LOOK[c.status as CategoryStatus].label"
+              />
               <span class="truncate text-muted" :title="c.category">{{ c.category }}</span>
-              <VizOutcomeBar :passed="c.passed" :partial="c.partial" :failed="c.failed" />
-              <span class="tabular-nums text-xs text-highlighted w-10 text-right">
-                {{ c.passed }}/{{ c.done }}
+              <VizOutcomeBar
+                :passed="c.passed" :partial="c.partial" :failed="c.failed"
+                :pending="c.pending" :active="c.status === 'running'"
+              />
+              <span
+                class="tabular-nums text-xs text-highlighted w-10 text-right"
+                :title="`${c.passed} of ${c.total} passed`"
+              >
+                {{ c.passed }}/{{ c.total }}
               </span>
             </div>
           </div>
@@ -447,7 +553,9 @@ function media(record: Record<string, number> | undefined) {
           <template #header>
             <div class="flex items-baseline justify-between gap-2">
               <h2 class="font-medium text-sm">How long retrievals took</h2>
-              <span class="text-xs text-dimmed">URLs per time range</span>
+              <span class="text-xs text-dimmed cursor-help" :title="RETRIEVAL_TIME_MEANING">
+                URLs per time range, from their first request
+              </span>
             </div>
           </template>
           <VizColumnChart :items="timeHistogram" />
@@ -457,10 +565,55 @@ function media(record: Record<string, number> | undefined) {
           </div>
         </UCard>
 
-        <!-- Methods -->
+        <!-- What changed: the regressions are what a run is for finding -->
         <UCard>
-          <template #header><h2 class="font-medium text-sm">Which methods delivered</h2></template>
-          <VizBarList :items="methodBars" :total="summary.passed + summary.partial" />
+          <template #header>
+            <div class="flex items-baseline justify-between gap-2">
+              <h2 class="font-medium text-sm">Since the previous run</h2>
+              <span
+                v-if="changes?.delta != null" class="text-xs tabular-nums"
+                :class="changes.delta > 0.0005 ? 'text-success'
+                  : changes.delta < -0.0005 ? 'text-error' : 'text-dimmed'"
+                :title="`Coverage of the previous run: ${percent(changes.coverageBefore)}`"
+              >
+                coverage {{ changes.delta > 0 ? '+' : '' }}{{ (changes.delta * 100).toFixed(1) }} pp
+              </span>
+            </div>
+          </template>
+          <p v-if="!previousId" class="text-sm text-muted">No earlier run to compare with.</p>
+          <USkeleton v-else-if="!changes" class="h-16 w-full" />
+          <div v-else class="space-y-4">
+            <p class="text-xs text-dimmed">
+              {{ changes.compared }} URL{{ changes.compared === 1 ? '' : 's' }} retrieved in
+              both<template v-if="live"> so far</template>: {{ changes.worse.length }} worse,
+              {{ changes.better.length }} better, the rest unchanged.
+            </p>
+            <div v-for="group in changeGroups" :key="group.key">
+              <h3 class="text-xs font-semibold uppercase tracking-wider text-dimmed mb-1.5">
+                {{ group.title }}
+              </h3>
+              <div class="space-y-1 max-h-48 overflow-y-auto">
+                <div v-for="r in group.items" :key="r.url" class="flex items-center gap-2 min-w-0 text-sm">
+                  <span
+                    class="inline-flex items-center gap-0.5 shrink-0"
+                    :title="`${look(r.was).label} before, ${look(r.outcome).label.toLowerCase()} now`"
+                  >
+                    <UIcon :name="look(r.was).icon" class="size-3" :style="{ color: look(r.was).color }" />
+                    <UIcon name="i-fa7-solid-arrow-right" class="size-2.5 text-dimmed" />
+                    <UIcon :name="look(r.outcome).icon" class="size-3" :style="{ color: look(r.outcome).color }" />
+                  </span>
+                  <NuxtLink
+                    v-if="r.job_id || report.job_id"
+                    :to="{ path: `/jobs/${r.job_id || report.job_id}`, query: { result: r.url } }"
+                    class="flex min-w-0 hover:underline" title="Show the result in the job"
+                  >
+                    <UrlLabel :url="r.url" />
+                  </NuxtLink>
+                  <UrlLabel v-else :url="r.url" class="min-w-0" />
+                </div>
+              </div>
+            </div>
+          </div>
         </UCard>
 
         <!-- Failures and media -->
@@ -580,20 +733,37 @@ function media(record: Record<string, number> | undefined) {
                 <span>{{ r.category }}</span>
                 <span v-if="r.method">{{ r.method }}</span>
                 <span v-if="r.outcome === 'running'">
-                  in progress<template v-if="Object.keys(r.expected).length"> · expects {{ media(r.expected) }}</template>
+                  in progress<template v-if="r.expect"> · expects: {{ r.expect }}</template>
+                  <template v-else-if="Object.keys(r.expected).length"> · expects {{ media(r.expected) }}</template>
+                </span>
+                <span v-else-if="r.expect" class="inline-flex items-center gap-1.5">
+                  expected: {{ r.expect }} · got:
+                  <span
+                    class="inline-flex items-center gap-1"
+                    :class="outcomeLook(r.result_class, r.result_kind).text"
+                  >
+                    <UIcon :name="outcomeLook(r.result_class, r.result_kind).icon" class="size-3" />
+                    {{ outcomeLook(r.result_class, r.result_kind).label }}
+                  </span>
                 </span>
                 <span v-else-if="Object.keys(r.expected).length">
                   expected {{ media(r.expected) }} · found {{ media(r.found) }}
                 </span>
               </p>
-              <p v-if="r.outcome === 'failed'" class="text-xs text-error/90 mt-0.5" :title="r.error?.message">
+              <p
+                v-if="r.outcome === 'failed' && r.expect && r.result_class === 'ok'"
+                class="text-xs text-error/90 mt-0.5"
+              >
+                Content came back, but the target was expected to be unavailable.
+              </p>
+              <p v-else-if="r.outcome === 'failed'" class="text-xs text-error/90 mt-0.5" :title="r.error?.message">
                 {{ describeError(r.error?.type) }}
               </p>
               <p v-else-if="r.outcome === 'partial'" class="text-xs text-warning/90 mt-0.5">
                 Missing {{ media(r.missing) }}.
               </p>
             </div>
-            <span class="text-xs text-dimmed tabular-nums">{{ r.outcome === 'running' ? '' : secs(r.retrieval_time) }}</span>
+            <span class="text-xs text-dimmed tabular-nums" :title="r.outcome === 'running' ? undefined : retrievalTimeTitle(r.retrieval_time, r.queue_time)">{{ r.outcome === 'running' ? '' : secs(r.retrieval_time) }}</span>
           </div>
         </div>
       </UCard>
@@ -611,7 +781,7 @@ function media(record: Record<string, number> | undefined) {
         </div>
       </template>
 
-      <form class="grid gap-2 sm:grid-cols-[1fr_12rem_auto_auto_auto] items-end" @submit.prevent="addUrl">
+      <form class="grid gap-2 sm:grid-cols-[1fr_12rem_auto_auto_auto_auto] items-end" @submit.prevent="addUrl">
         <UFormField label="Add a URL">
           <UInput v-model="newUrl.url" placeholder="https://…" class="w-full" />
         </UFormField>
@@ -622,10 +792,24 @@ function media(record: Record<string, number> | undefined) {
           </datalist>
         </UFormField>
         <UFormField label="Images" hint="at least">
-          <UInput v-model.number="newUrl.image" type="number" min="0" class="w-20" />
+          <UInput
+            v-model.number="newUrl.image" type="number" min="0" class="w-20"
+            :disabled="newUrl.unavailable"
+          />
         </UFormField>
         <UFormField label="Videos" hint="at least">
-          <UInput v-model.number="newUrl.video" type="number" min="0" class="w-20" />
+          <UInput
+            v-model.number="newUrl.video" type="number" min="0" class="w-20"
+            :disabled="newUrl.unavailable"
+          />
+        </UFormField>
+        <!-- For targets that are not there to be had: a private post, a removed page.
+             Such an entry passes when scrapeMM recognises that. -->
+        <UFormField label="Expects" hint="instead of media">
+          <UCheckbox
+            v-model="newUrl.unavailable" label="Unavailable" class="h-8 items-center"
+            title="Passes when the target is recognised as unavailable (yellow), fails when content comes back or scrapeMM errs"
+          />
         </UFormField>
         <UButton type="submit" icon="i-fa7-solid-plus" label="Add" :loading="adding" :disabled="!newUrl.url.trim()" />
       </form>
@@ -634,7 +818,13 @@ function media(record: Record<string, number> | undefined) {
         <div v-for="e in suite" :key="e.url" class="py-1.5 flex items-center gap-3 group">
           <UrlLabel :url="e.url" class="text-sm flex-1" />
           <span class="text-xs text-dimmed shrink-0">{{ e.category }}</span>
-          <span class="text-xs text-dimmed shrink-0 w-28 text-right">{{ media(e.expected) }}</span>
+          <span class="shrink-0 w-28 text-right text-xs text-dimmed">
+            <UBadge
+              v-if="e.expect" size="sm" variant="subtle" color="warning"
+              :icon="outcomeLook(e.expect).icon" :label="`expects: ${e.expect}`"
+            />
+            <template v-else>{{ media(e.expected) }}</template>
+          </span>
           <UBadge v-if="e.source === 'user'" size="sm" variant="subtle" color="neutral" label="added" />
           <UButton
             size="xs" variant="ghost" color="error" icon="i-fa7-solid-xmark"

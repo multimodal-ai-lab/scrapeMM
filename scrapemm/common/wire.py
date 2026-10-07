@@ -72,6 +72,7 @@ class ContentPayload:
     markdown: Optional[str] = None
     multimodal: Optional[str] = None  # Rendered sequence, media by reference
     items: list[ItemDescriptor] = field(default_factory=list)
+    stripped: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -79,6 +80,7 @@ class ContentPayload:
             "markdown": self.markdown,
             "multimodal": self.multimodal,
             "items": [item.to_dict() for item in self.items],
+            "stripped": self.stripped,
         }
 
     @classmethod
@@ -88,6 +90,7 @@ class ContentPayload:
             markdown=data.get("markdown"),
             multimodal=data.get("multimodal"),
             items=[ItemDescriptor.from_dict(d) for d in data.get("items") or []],
+            stripped=bool(data.get("stripped")),
         )
 
 
@@ -101,7 +104,9 @@ class ResponsePayload:
     output_format: OutputFormat = "multimodal"
     errors: dict[str, dict[str, str]] = field(default_factory=dict)
     retrieval_time: Optional[float] = None
+    queue_time: Optional[float] = None
     from_cache: bool = False
+    screenshot: Optional[ItemDescriptor] = None  # An image, delivered like the media
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -111,7 +116,9 @@ class ResponsePayload:
             "output_format": self.output_format,
             "errors": self.errors,
             "retrieval_time": self.retrieval_time,
+            "queue_time": self.queue_time,
             "from_cache": self.from_cache,
+            "screenshot": self.screenshot.to_dict() if self.screenshot else None,
         }
 
     @classmethod
@@ -124,19 +131,23 @@ class ResponsePayload:
             output_format=data.get("output_format", "multimodal"),
             errors=data.get("errors") or {},
             retrieval_time=data.get("retrieval_time"),
+            queue_time=data.get("queue_time"),
             from_cache=bool(data.get("from_cache")),
+            screenshot=ItemDescriptor.from_dict(data["screenshot"]) if data.get("screenshot") else None,
         )
 
-    def to_response(self, multimodal=None) -> ScrapingResponse:
+    def to_response(self, multimodal=None, screenshot=None) -> ScrapingResponse:
         """Rebuilds the `ScrapingResponse`. `multimodal` is the sequence the client
-        resolved from the item manifest; it is passed in because resolving it needs
-        the filesystem and may need network, neither of which belongs in here."""
+        resolved from the item manifest, `screenshot` the image it resolved; they are
+        passed in because resolving them needs the filesystem and may need network,
+        neither of which belongs in here."""
         content = None
         if self.content is not None:
             content = ScrapedContent(
                 html=self.content.html,
                 markdown=self.content.markdown,
                 multimodal=multimodal,
+                stripped=self.content.stripped,
             )
             if not content:
                 content = None
@@ -147,7 +158,9 @@ class ResponsePayload:
             output_format=self.output_format,
             errors={k: exception_from_wire(v) for k, v in self.errors.items()} or None,
             retrieval_time=self.retrieval_time,
+            queue_time=self.queue_time,
             from_cache=self.from_cache,
+            screenshot=screenshot,
         )
 
 

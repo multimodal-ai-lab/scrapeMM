@@ -1,15 +1,19 @@
 import asyncio
+from contextlib import suppress
+from dataclasses import replace
 import base64
 import binascii
+import inspect
 import json
 import logging
 import os
 import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional, Awaitable, Callable, Iterable, Union, TYPE_CHECKING
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse, urlsplit
 
 import aiohttp
 import tqdm
@@ -20,9 +24,11 @@ from markdownify import markdownify as md
 from playwright.async_api import APIRequestContext, Page, Frame
 
 from scrapemm.server.download import download_video, download_image
+from scrapemm.server.download.images import image_from_binary, image_size
 from scrapemm.server.download.util import (
     looks_like_image_file_url,
     looks_like_vector_file_url,
+    looks_like_video_file_url,
     looks_like_video_embed_url,
 )
 from scrapemm.server.download.browser import BrowserMedia, BLOB_ATTR, BLOB_SCHEME, CURRENT_ATTR
@@ -102,10 +108,24 @@ def read_urls_from_file(file_path):
 
 
 MAX_MEDIA_PER_PAGE = 32
+
+# Threads for parsing and converting HTML: CPU-bound pure Python, so off the event loop,
+# but few, as each one holds the GIL the loop needs as well (see `decode_image()`)
+_html_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="html")
+
+
+async def _in_html_thread(function, *args, **kwargs):
+    return await asyncio.get_running_loop().run_in_executor(
+        _html_executor, lambda: function(*args, **kwargs))
 # Concurrent media downloads per host. Some servers silently drop connection attempts
 # beyond a couple at once, which costs 7 s of TCP retries each (archive.premier.gov.ru).
 # Measured no slower on image-heavy pages than 4 or 6: the connections get reused.
 MAX_MEDIA_PER_HOST = 2
+# Longest a single medium fetched through the page may take (embedded players excepted).
+# The page is returned without it rather than not at all: in a browser retrieval, a
+# medium that took longer ran into the 10-minute limit, which failed the whole page
+# (thequint.com, over a trickling ad video).
+MAX_SECONDS_PER_MEDIUM = 300
 URL_REGEX = r"https?:\/\/(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9@:%_\+.~#?&//=]*)"
 DATA_URI_REGEX = r"data:([\w/+.-]+/[\w.+-]+);base64,([A-Za-z0-9+/=]+)"
 MD_HYPERLINK_REGEX = rf'(!?\[([^]^[]*)\]\((.*?)(?: "[^"]*")?\))'
@@ -134,6 +154,58 @@ def preprocess_html(html: str) -> str:
             except (binascii.Error, UnicodeDecodeError):
                 continue
     return html
+
+
+# Elements that hold page chrome rather than content. This is Firecrawl's list for its
+# `onlyMainContent` option.
+UI_SELECTORS = ", ".join((
+    "header", "footer", "nav", "aside", ".header", ".top", ".navbar", "#header",
+    ".footer", ".bottom", "#footer", ".sidebar", ".side", ".aside", "#sidebar",
+    ".modal", ".popup", "#modal", ".overlay", ".ad", ".ads", ".advert", "#ad",
+    ".lang-selector", ".language", "#language-selector", ".social", ".social-media",
+    ".social-links", "#social", ".menu", ".navigation", "#nav", ".breadcrumbs",
+    "#breadcrumbs", ".share", "#share", ".widget", "#widget", ".cookie", "#cookie"))
+# The page's main content, which is never removed along with the chrome around it.
+# Not <article>: related-article sidebars are full of <article> teaser cards.
+MAIN_CONTENT_SELECTORS = "#main, main, [role=main]"
+
+
+def remove_ui_elements(html: str) -> str:
+    """Strips navigation, headers, footers, sidebars, banners and the like from the
+    HTML, keeping the page's content. Returns the HTML unchanged if nothing is left.
+    The result is re-serialized by BeautifulSoup (entities decoded, void tags closed),
+    not the page's bytes as scraped."""
+    return _remove_ui_elements(html)[0]
+
+
+def _remove_ui_elements(html: str) -> tuple[str, list[str]]:
+    """`remove_ui_elements()`, along with the media URIs (as found, not resolved) of the
+    elements removed."""
+    soup = BeautifulSoup(html, "html.parser")
+    has_body = soup.body is not None
+    # The main content and everything wrapping it, never removed as chrome
+    keep = {id(node) for main in soup.select(MAIN_CONTENT_SELECTORS)
+            for node in (main, *main.parents)}
+    removed_media: list[str] = []
+    removed_any = False
+    for element in soup.select(UI_SELECTORS):
+        if element.decomposed:
+            continue  # Gone with an ancestor already
+        if id(element) in keep:
+            continue  # Is or wraps the main content
+        if element.name == "header" and element.find_parent("article"):
+            continue  # An article's own header: its headline and byline
+        removed_media += [str(m["src"]) for m in _extract_media_elements(element) if m.get("src")]
+        element.decompose()
+        removed_any = True
+    if not removed_any:
+        return html, []  # As is, rather than re-serialized: tells the caller there is nothing to redo
+    # The body's content only: the <title> is none. Media count as content, as they
+    # do for `engine._is_empty()`: a photo page's text may all sit in the chrome
+    body = soup.body if has_body else soup
+    if body is None or not (body.get_text(strip=True) or body.find(["img", "video", "iframe"])):
+        return html, []  # The heuristic misfired (e.g. <body class="side">)
+    return str(soup), removed_media
 
 
 def postprocess_markdown(text: str) -> str:
@@ -253,7 +325,19 @@ def _is_placeholder_src(src: str) -> bool:
     # Callers only prefer an alternative when one actually exists, so this is safe.
     if lowered.startswith("data:"):
         return True
+    if _media_reference(src) is None:
+        return True  # Text, not a URL: the next candidate may hold the real one
     return any(hint in lowered for hint in _PLACEHOLDER_HINTS)
+
+
+def _shown_small(element: Tag) -> bool:
+    """Whether the page sizes the image as an icon: a width or height attribute of at
+    most 256 pixels (the size below which images are dropped anyway)."""
+    for attribute in ("width", "height"):
+        value = str(element.get(attribute) or "").strip().removesuffix("px")
+        if value.isdigit() and int(value) <= 256:
+            return True
+    return False
 
 
 def _best_image_src(element: Tag) -> Optional[str]:
@@ -287,14 +371,44 @@ def _best_image_src(element: Tag) -> Optional[str]:
     return src or None
 
 
-def _resolve_media_url(uri: str, page_url: Optional[str], domain_root: Optional[str]) -> str:
-    """Turns a media reference found in the page into an absolute URL.
+# Schemes a media reference may have; anything else with a scheme (javascript:, about:,
+# mailto:) is no medium
+_MEDIA_SCHEMES = ("http://", "https://", "//", "data:", BLOB_SCHEME)
+_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+# Never in a URL, not even an unencoded one that a browser would repair
+_UNSAFE_URL_CHARS = re.compile(r"[\x00-\x1f\x7f<>\"`{}\\^]")
+
+
+def _media_reference(uri: str) -> Optional[str]:
+    """`uri` if it is syntactically a URL or a relative path, else None. Attributes that
+    ought to hold a URL sometimes hold text -- an error message a lazy loader parked in
+    `data-original`, say -- which, resolved against the page, turned into requests like
+    "https://archive.ph/must be exactly one 'ct' and 'cv' parameter". Blanks inside a
+    path that names a media file are percent-encoded, as a browser does; blanks in
+    anything else mean it is text."""
+    uri = uri.strip()
+    if not uri or uri.startswith(("data:", BLOB_SCHEME)):
+        return uri or None
+    if uri.startswith("#") or (_SCHEME_RE.match(uri) and not uri.lower().startswith(_MEDIA_SCHEMES)):
+        return None
+    if _UNSAFE_URL_CHARS.search(uri):
+        return None
+    if re.search(r"\s", uri):
+        if not (looks_like_image_file_url(uri) or looks_like_video_file_url(uri)):
+            return None
+        uri = re.sub(r"\s", "%20", uri)
+    return uri
+
+
+def _resolve_media_url(uri: str, page_url: Optional[str], domain_root: Optional[str]) -> Optional[str]:
+    """Turns a media reference found in the page into an absolute URL, or None if it is
+    no URL at all (see `_media_reference()`).
 
     Handles protocol-relative (`//cdn/x.jpg`), root-relative (`/x.jpg`) and
     document-relative (`img/x.jpg`) references. Data URIs and already-absolute URLs
     are returned unchanged.
     """
-    uri = uri.strip()
+    uri = _media_reference(uri)
     if not uri or uri.startswith(("data:", BLOB_SCHEME)):
         return uri
     if uri.startswith("//"):
@@ -341,8 +455,10 @@ def _extract_media_elements(soup: BeautifulSoup) -> list[Tag]:
             _add(element)
             continue
         src = _best_image_src(element)
-        # Skip vector graphics
-        if src and looks_like_vector_file_url(src):
+        # Vector graphics: SVGs are rasterized (charts, diagrams), unless the page shows
+        # them small, as it does icons and logos; nothing else is
+        if src and looks_like_vector_file_url(src) and (
+                not urlparse(src).path.lower().endswith(".svg") or _shown_small(element)):
             continue
         if src:
             # Wire the resolved URI through the existing src-based resolve_media path
@@ -442,6 +558,7 @@ async def resolve_media(
         media: Optional[BrowserMedia] = None,
         max_video_size: Optional[int] = None,
         on_browser_done: Optional[Callable[[], Awaitable]] = None,
+        known_media: Optional["KnownMedia"] = None,
         **kwargs
 ) -> MultimodalSequence:
     """Downloads all media that are contained in the provided HTML.
@@ -452,23 +569,45 @@ async def resolve_media(
     from and `media` the page's `BrowserMedia`: media are then taken from the browser,
     see there. `on_browser_done` is awaited as soon as the only downloads left are
     those that need no page (embedded players, via yt-dlp), so the caller can close the
-    page meanwhile. Awaited only if there are media at all."""
+    page meanwhile. Awaited only if there are media at all.
+
+    With `known_media`, nothing is downloaded or decoded: the media are taken from there,
+    and those not found there are left out (see `strip_content()`)."""
     if source_element is not None and media is None:
         page = source_element if isinstance(source_element, Page) else source_element.page
         media = BrowserMedia(page)  # Sees no past responses, but still fetches via the browser
-    soup = BeautifulSoup(html, "html.parser")
-    domain_root = get_domain_root(url) if url else None
+    # Relative references resolve against the document they were found in: a frame's
+    # own URL, not the page's. A replay's images sit at /replay-web-page/... on the
+    # replay host (rejouer.perma.cc); resolved against the record page (perma.cc), they
+    # pointed at nothing, which went unnoticed only while the rendered copy was found.
+    base_url = url
+    with suppress(Exception):
+        document_url = source_element.url if source_element is not None else None
+        if isinstance(document_url, str) and document_url.startswith(("http://", "https://")):
+            base_url = document_url
+    domain_root = get_domain_root(base_url) if base_url else None
 
-    # 1. Identify all potential media elements and their URLs
-    media_elements: list[Tag] = _extract_media_elements(soup)
+    # 1. Identify all potential media elements and their URLs. Parsing, decoding and
+    # rewriting the HTML are CPU-bound -- a second and more for a page with hundreds
+    # of images -- so they run in a thread, not on the event loop every retrieval shares.
+    def parse() -> tuple[BeautifulSoup, list[Tag]]:
+        parsed = BeautifulSoup(html, "html.parser")
+        return parsed, _extract_media_elements(parsed)
+
+    soup, media_elements = await _in_html_thread(parse)
     if not media_elements:
         return MultimodalSequence(html)
 
     media_uris: list[Optional[str]] = [str(element.get("src")) if element.get("src") else None
                                        for element in media_elements]
 
-    # 2. Resolve base64 media
-    resolved_media: list[Optional[Item]] = _resolve_base64_media(list(zip(media_elements, media_uris)), source_url=url)
+    # 2. Resolve base64 media. Not when rebuilding from media resolved before: decoded
+    # again, they would be registered anew (see `strip_content()`)
+    if known_media is None:
+        resolved_media: list[Optional[Item]] = await _in_html_thread(
+            _resolve_base64_media, list(zip(media_elements, media_uris)), source_url=url)
+    else:
+        resolved_media = [None] * len(media_elements)
 
     # 3. Normalize URLs and prepare tasks for remaining elements
     tasks = []
@@ -481,10 +620,12 @@ async def resolve_media(
     # root-relative ones silently drops the rest.
     for i, uri in enumerate(media_uris):
         if uri:
-            media_uris[i] = _resolve_media_url(uri, page_url=url, domain_root=domain_root)
+            media_uris[i] = _resolve_media_url(uri, page_url=base_url, domain_root=domain_root)
 
     # Create retrieval tasks for URL elements
     for element, uri in zip(media_elements, media_uris):
+        if known_media is not None:
+            break  # Nothing to retrieve
         stashed = bool(uri) and uri.startswith(BLOB_SCHEME)
         if uri and (is_url(uri) or stashed and media) and uri not in unique_urls:
             # The URL the browser rendered the medium from, if it differs
@@ -517,12 +658,23 @@ async def resolve_media(
     # 4. Download media, at most a few at a time from each host, like a browser does
     host_gates: dict[str, asyncio.Semaphore] = {}
 
+    async def bounded(uri: str, task: Awaitable):
+        if uri in pageless:
+            # Not these: an embedded YouTube video may queue for minutes behind the
+            # others (YouTube's pacing), and still arrive
+            return await task
+        try:
+            return await asyncio.wait_for(task, MAX_SECONDS_PER_MEDIUM)
+        except TimeoutError:
+            logger.info(f"Gave up on the medium {uri[:120]} after {MAX_SECONDS_PER_MEDIUM} s.")
+            return None
+
     async def gated(uri: str, task: Awaitable):
         if uri in in_browser:
-            return await task
+            return await bounded(uri, task)
         gate = host_gates.setdefault(urlparse(uri).netloc, asyncio.Semaphore(MAX_MEDIA_PER_HOST))
         async with gate:
-            return await task
+            return await bounded(uri, task)
 
     # Those that need no page start right away, but are not waited for before the page
     # can be let go: an embedded video may take minutes (or retry its way to failure)
@@ -539,13 +691,29 @@ async def resolve_media(
         url_to_medium.update(zip([uri for uri, _ in later], await later_results))
     finally:
         later_results.cancel()  # No-op once done
+        # Downloads that never started (the retrieval was cancelled) would each warn
+        # "coroutine ... was never awaited"
+        for task in tasks:
+            if inspect.iscoroutine(task) and inspect.getcoroutinestate(task) == inspect.CORO_CREATED:
+                task.close()
 
     # 5. Add downloaded media to resolved_media
+    if known_media is not None:
+        url_to_medium = known_media
     for i, uri in enumerate(media_uris):
         if medium := url_to_medium.get(uri):
             resolved_media[i] = medium
 
     # 6. Replace or remove elements in the SOUP
+    return MultimodalSequence(await _in_html_thread(
+        _replace_media_elements, soup, media_elements, media_uris, resolved_media))
+
+
+def _replace_media_elements(soup: BeautifulSoup, media_elements: list[Tag],
+                            media_uris: list[Optional[str]],
+                            resolved_media: list[Optional[Item]]) -> str:
+    """Puts each resolved medium's reference in place of its element, removes the
+    elements without one, and returns the resulting HTML."""
     inserted_url_refs: set[str] = set()
     for i, (element, medium) in enumerate(zip(media_elements, resolved_media)):
         # Check if element is still in the tree
@@ -556,7 +724,7 @@ async def resolve_media(
         has_child_tags = any(getattr(child, "name", None) for child in element.children)
 
         if medium:
-            too_small = isinstance(medium, Image) and (medium.width < 256 or medium.height < 256)
+            too_small = isinstance(medium, Image) and min(image_size(medium)) < 256
 
             if not too_small:
                 if uri and uri in inserted_url_refs:
@@ -582,7 +750,7 @@ async def resolve_media(
         else:
             element.decompose()
 
-    return MultimodalSequence(str(soup))
+    return str(soup)
 
 
 def is_url(href: str) -> bool:
@@ -643,13 +811,69 @@ async def to_scraped_content(
         return content
 
     if output_format == "markdown":
-        content.markdown = html2md(html)
+        content.markdown = await _in_html_thread(html2md, html)
         return content
 
     content.multimodal = await to_multimodal_sequence(html, session=session, **kwargs)
     # After the media: a browser page is closed by then (see `resolve_media()`)
-    content.markdown = html2md(html)
+    content.markdown = await _in_html_thread(html2md, html)
     return content
+
+
+class KnownMedia:
+    """Media resolved before, by the URL they were retrieved from. Matches by path too:
+    the page's relative references may have resolved against a different document URL
+    (e.g. after a redirect) than they do now."""
+
+    def __init__(self, items: list[Item]):
+        self.by_url: dict[str, Item] = {}
+        self.by_path: dict[str, Item] = {}
+        for item in items:
+            if source := getattr(item, "source_url", None):
+                self.by_url.setdefault(source, item)
+                self.by_path.setdefault(_path_of(source), item)
+
+    def get(self, uri: Optional[str]) -> Optional[Item]:
+        if not uri:
+            return None
+        return self.by_url.get(uri) or self.by_path.get(_path_of(uri))
+
+
+def _path_of(url: str) -> str:
+    parts = urlsplit(url)
+    return f"{parts.path}?{parts.query}" if parts.query else parts.path
+
+
+async def strip_content(content: "ScrapedContent", url: Optional[str] = None) -> "ScrapedContent":
+    """The content without the page's UI elements (see `remove_ui_elements()`), in the
+    formats given. The content passed, as cached, stays untouched. Nothing is fetched:
+    the media are those of the content's multimodal sequence. Content without HTML, as
+    from API integrations, has no UI to strip and is returned as is.
+
+    The multimodal sequence is rebuilt from the stripped HTML, its media put in place by
+    the URL they were retrieved from. A medium is left out only if it was found in a
+    removed element. Those that cannot be placed -- base64-encoded ones, those the browser
+    held as Blobs, videos collected from the page beyond its HTML -- are kept, after the
+    text."""
+    if content.stripped or content.html is None:
+        return content
+    html, removed_uris = await _in_html_thread(_remove_ui_elements, content.html)
+    if html is content.html:  # Nothing recognizable to strip
+        return replace(content, stripped=True)
+    stripped = replace(content, html=html, stripped=True)
+    if content.multimodal is not None:
+        items = list({e.reference: e for e in content.multimodal if not isinstance(e, str)}.values())
+        known = KnownMedia(items)
+        sequence = await to_multimodal_sequence(html, session=None, url=url, known_media=known)
+        domain_root = get_domain_root(url) if url else None
+        removed = {m.reference for uri in removed_uris
+                   if (m := known.get(_resolve_media_url(uri, page_url=url, domain_root=domain_root)))}
+        accounted = removed | {e.reference for e in sequence if not isinstance(e, str)}
+        unplaced = [i for i in items if i.reference not in accounted]
+        stripped.multimodal = MultimodalSequence([*sequence, *unplaced]) if unplaced else sequence
+    if content.markdown is not None:
+        stripped.markdown = await _in_html_thread(html2md, html)
+    return stripped
 
 
 async def to_multimodal_sequence(
@@ -667,7 +891,7 @@ async def to_multimodal_sequence(
     mms = await resolve_media(html, session=session, **kwargs)
 
     # 2. Convert resulting (partially replaced) HTML to Markdown
-    text = html2md(mms)
+    text = await _in_html_thread(html2md, mms)
 
     return MultimodalSequence(text)
 
@@ -695,7 +919,9 @@ def from_base64(b64_data: str, mime_type: str = "image/jpeg", url: str | None = 
             if mime_type == "image/svg+xml":
                 return None  # We do not care about SVGs
             elif mime_type.startswith("image/"):
-                return Image(binary_data=binary_data, source_url=url)
+                # Downscaled like any downloaded image: a huge inline one otherwise
+                # took hundreds of MB. Small ones are filtered by the caller.
+                return image_from_binary(binary_data, source_url=url, ignore_small_images=False)
             elif mime_type.startswith("video/"):
                 return Video(binary_data=binary_data, source_url=url)
             else:

@@ -50,6 +50,17 @@ MAX_PENDING = 1000
 # Archive.today's challenge, as listed alongside the generic ones
 ARCHIVE_TODAY = "archive.ph"
 
+# Archives that replay what they captured. A CAPTCHA seen in their content is part of
+# the capture -- a GeeTest in a Perma.cc replay of a TikTok page, say -- frozen, and no
+# human can solve it; their own live checks (Cloudflare, Anubis) the browser passes by
+# itself. Queueing their URLs for a human only held them until somebody gave up.
+REPLAYING_ARCHIVES = frozenset({"perma.cc", "archive.org", "ghostarchive.org"})
+
+# Sites that put every visitor behind a CAPTCHA, by the CAPTCHA they show. Scraping them
+# only costs each method its timeout before failing the same way, so their URLs go
+# straight into the queue for a human, as if a challenge were always open.
+ALWAYS_GATED = {"researchgate.net": "DataDome"}
+
 
 @dataclass
 class Pending:
@@ -82,6 +93,10 @@ class ChallengeStore:
     def record(self, domain: str, url: str, captcha: str, output_format: str,
                methods: list[str], max_video_size: Optional[int]) -> None:
         """Opens a challenge for the domain, or queues the URL with the open one."""
+        if domain in REPLAYING_ARCHIVES:
+            logger.info(f"Not queueing {url} for a human: the {captcha} is part of the "
+                        f"archived copy, which nobody can solve.")
+            return
         with self._lock:
             challenge = self._challenges.get(domain)
             if challenge is None:
@@ -102,10 +117,18 @@ class ChallengeStore:
     def holds(self, domain: str) -> bool:
         """Whether new URLs of this domain should wait instead of being scraped."""
         from .integrations import DOMAIN_TO_INTEGRATION
+        if domain in ALWAYS_GATED:
+            return True
         return domain in self._challenges and domain not in DOMAIN_TO_INTEGRATION
 
     def get(self, domain: str) -> Optional[Challenge]:
         return self._challenges.get(domain)
+
+    def captcha_for(self, domain: str) -> str:
+        """The CAPTCHA a held domain's URLs wait on, for the challenge they are queued with."""
+        if challenge := self._challenges.get(domain):
+            return challenge.captcha
+        return ALWAYS_GATED.get(domain, "CAPTCHA")
 
     def all(self) -> list[Challenge]:
         return sorted(self._challenges.values(), key=lambda c: c.first_seen)
@@ -138,6 +161,10 @@ class ChallengeStore:
             return {}
         challenges = {}
         for entry in raw:
+            if entry.get("domain") in REPLAYING_ARCHIVES:
+                logger.info(f"Dropping the {entry['domain']} CAPTCHA challenge: its CAPTCHA "
+                            f"is part of the archived copies, which nobody can solve.")
+                continue
             try:
                 pending = [Pending(**p) for p in entry.pop("pending", [])]
                 challenges[entry["domain"]] = Challenge(**entry, pending=pending)
@@ -233,32 +260,33 @@ def discard(domain: str) -> int:
     return len(challenge.pending)
 
 
-async def solve(domain: str, timeout: float,
-                no_captcha: Optional[asyncio.Event] = None) -> tuple[bool, int, int, bool]:
-    """Opens the challenge page for the human and, once it is passed, retrieves the
-    queue. Returns (passed, retrieved, still waiting, whether the "no CAPTCHA" report
-    was applied -- it is not if it arrives after the check already passed).
+async def await_solution(domain: str, timeout: float,
+                         no_captcha: Optional[asyncio.Event] = None) -> tuple[bool, bool]:
+    """Opens the challenge page for the human and waits until the check is passed. Only
+    the human's part: retrieving the queue afterwards is `drain()`, which the caller
+    runs in the background so the panel can close at once. Returns (passed, whether
+    the "no CAPTCHA" report was applied).
 
     Setting `no_captcha` says the human sees no check at all, only the normal page: the
-    detection was presumably wrong. The case is recorded for debugging, and the queue is
-    retrieved without asking the detection again, which would only repeat the mistake."""
+    detection was presumably wrong. The case is recorded for debugging, and the queue
+    should then be drained with `trust_content`, since asking the detection again would
+    only repeat the mistake."""
+    from .integrations.headed_browser import human_tab
     if domain == ARCHIVE_TODAY:
         from .integrations import NAME_TO_INTEGRATION
-        from .integrations.archive_today import get_archive_today_buffer
-        before = len(get_archive_today_buffer())
-        passed = await NAME_TO_INTEGRATION["archive.today"].capture_session(timeout=timeout)
-        after = len(get_archive_today_buffer())
-        return passed, before - after, after, False
+        from .integrations.archive_today import CANONICAL_DOMAIN, VERIFICATION_SNAPSHOT
+        with human_tab():
+            passed = await NAME_TO_INTEGRATION["archive.today"]._solve_in_browser(
+                f"https://{CANONICAL_DOMAIN}/{VERIFICATION_SNAPSHOT}", timeout)
+        return passed, False
 
     challenge = store.get(domain)
     if challenge is None:
         raise KeyError(f"There is no open CAPTCHA challenge for {domain}.")
     no_captcha = no_captcha or asyncio.Event()
-    if not await _await_human(challenge, timeout, no_captcha):
-        return False, 0, len(challenge.pending), False
-    reported = no_captcha.is_set()  # A report arriving from here on comes too late
-    retrieved, remaining = await drain(domain, trust_content=reported)
-    return True, retrieved, remaining, reported
+    with human_tab():
+        passed = await _await_human(challenge, timeout, no_captcha)
+    return passed, passed and no_captcha.is_set()
 
 
 async def confirm_no_captcha(domain: str) -> tuple[int, int]:
@@ -342,46 +370,102 @@ def _browser_for(domain: str):
     return browser
 
 
+# A CAPTCHA widget on screen: a large visible frame, or overlay element, that names a
+# CAPTCHA.
+# Checked besides the page's markup, since some sites lay their check over a fully
+# loaded page (TikTok): the markup then looks like content, while the human still has a
+# check to pass. Small ones are left out, e.g. reCAPTCHA's "protected by" badge.
+_VISIBLE_CAPTCHA_JS = r"""() => {
+  const shown = e => { const r = e.getBoundingClientRect(), s = getComputedStyle(e);
+    return r.width >= 150 && r.height >= 150 && s.visibility !== 'hidden'
+      && s.display !== 'none' && Number(s.opacity) > 0.05; };
+  const hosts = /captcha|challenges\.cloudflare|geetest|captcha-delivery|arkoselabs/i;
+  for (const f of document.querySelectorAll('iframe'))
+    if (hosts.test(f.src) && shown(f)) return 'frame ' + f.src.slice(0, 100);
+  // Elements only as overlays (in a fixed layer), not e.g. a form of class "captcha-form"
+  const overlaid = e => { for (; e; e = e.parentElement)
+    if (getComputedStyle(e).position === 'fixed') return true; return false; };
+  for (const e of document.querySelectorAll('[id*=captcha i], [class*=captcha i]'))
+    if (shown(e) && overlaid(e)) return e.tagName.toLowerCase() + '#' + e.id + '.' + String(e.className).slice(0, 60);
+  return null;
+}"""
+
+# Counts the pointer input that reaches the page and its frames, so a check that "does
+# not react" to the human can be told apart from input that never arrived
+_COUNT_INPUT_JS = """(() => { if (window.__scrapemmInput) return; const n = window.__scrapemmInput = {};
+  for (const t of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'mousedown',
+                   'mousemove', 'mouseup', 'touchstart', 'dragstart'])
+    addEventListener(t, e => { const k = t + (e.buttons ? '+held' : ''); n[k] = (n[k] || 0) + 1; }, true);
+})()"""
+
+
 async def _await_human(challenge: Challenge, timeout: float,
                        no_captcha: asyncio.Event) -> bool:
     """Shows the challenge page in the server's browser and waits until it is passed,
-    or until the human reports that there is no check to pass."""
-    from playwright.async_api import async_playwright
-    from .integrations.headed_browser import release_page
+    or until the human reports that there is no check to pass. Call it within
+    `human_tab()`, which keeps the page in front of the tabs retrievals open meanwhile.
+
+    Passed means: neither the markup nor the screen shows a CAPTCHA, twice in a row --
+    right after loading, many pages show no check *yet*."""
+    from .integrations.headed_browser import keep_in_front, release_page_soon
     from scrapemm.common import ScrapedContent
     from .captcha_detect import detect_captcha
 
     url = challenge.solve_url
     browser = _browser_for("")  # The generic one; the page is all that matters here
     deadline = time.time() + timeout
-    async with async_playwright() as p:
-        page, _ = await browser._new_page(p)
-        try:
-            await page.goto(url, timeout=60_000, wait_until="domcontentloaded")
-            while True:
-                # Other retrievals open tabs of their own in the same browser; keep this
-                # one in front, or the human would be looking at the wrong page
-                await page.bring_to_front()
-                try:
-                    html = await page.content()
-                except Exception:
-                    html = ""  # Mid-navigation, which passing a check often causes
-                if no_captcha.is_set():
-                    _report_false_positive(challenge, page.url, html)
-                    return True
-                if html and not detect_captcha(ScrapedContent(html=html)):
-                    logger.info(f"The CAPTCHA at {url} was passed.")
-                    return True
-                if time.time() >= deadline:
-                    # Evidence, should the human report afterwards that there was no check
-                    if html:
-                        _last_flagged[challenge.domain] = (page.url, html)
-                    return False
-                # Woken right away by the "no CAPTCHA" report
-                with suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(no_captcha.wait(), timeout=2)
-        finally:
-            await release_page(page)
+    page, _ = await browser._new_page()
+    clean_polls = 0
+    try:
+        with suppress(Exception):
+            await page.add_init_script(_COUNT_INPUT_JS)
+        await page.goto(url, timeout=60_000, wait_until="domcontentloaded")
+        with suppress(Exception):
+            await page.wait_for_load_state("load", timeout=10_000)
+        while True:
+            try:
+                html = await page.content()
+                shown = await page.evaluate(_VISIBLE_CAPTCHA_JS)
+            except Exception:
+                html, shown = "", None  # Mid-navigation, which passing a check often causes
+            if no_captcha.is_set():
+                _report_false_positive(challenge, page.url, html)
+                return True
+            clean = bool(html) and not shown and not detect_captcha(ScrapedContent(html=html))
+            clean_polls = clean_polls + 1 if clean else 0
+            if clean_polls >= 2:
+                logger.info(f"The CAPTCHA at {url} was passed.")
+                return True
+            if time.time() >= deadline:
+                # Evidence, should the human report afterwards that there was no check
+                if html:
+                    _last_flagged[challenge.domain] = (page.url, html)
+                logger.info(f"The CAPTCHA at {url} was not passed in time"
+                            f"{f' (still shown: {shown})' if shown else ''}.")
+                return False
+            # Should anything have come to the front after all (a popup, say)
+            await keep_in_front(page)
+            # Woken right away by the "no CAPTCHA" report
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(no_captcha.wait(), timeout=1)
+    finally:
+        await _log_input(page)
+        # Closed in the background: under load, closing a tab can take seconds, and
+        # the panel should not stay open for that
+        release_page_soon(page)
+
+
+async def _log_input(page) -> None:
+    """Logs the pointer input the CAPTCHA page received, per frame (see
+    `_COUNT_INPUT_JS`)."""
+    counts = []
+    for frame in page.frames:
+        with suppress(Exception):
+            n = await asyncio.wait_for(frame.evaluate("window.__scrapemmInput || null"), 2)
+            if n:
+                counts.append(f"{frame.url[:80]}: {n}")
+    if counts:
+        logger.info("Pointer input on the CAPTCHA page: " + "; ".join(counts))
 
 
 def _report_false_positive(challenge: Challenge, page_url: str, html: str) -> None:

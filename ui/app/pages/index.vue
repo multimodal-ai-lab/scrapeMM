@@ -7,7 +7,7 @@ const environment = ref<any>(null)
 const loading = ref(false)
 const error = ref('')
 const busy = ref<string | null>(null)
-const copied = ref<'address' | 'key' | null>(null)
+const copied = ref<'address' | null>(null)
 // Which cards are still waiting for their probe
 const pending = shallowRef<Set<string>>(new Set())
 
@@ -127,20 +127,68 @@ async function toggle(key: string, enabled: boolean) {
 }
 
 /**
- * The tally beside the Integrations heading. Limited, gated and unreachable are all
- * "works, but not fully", so they are counted together rather than spelled out -- the
- * card itself says which kind it is.
+ * The tally beside a group's heading. Limited, gated and unreachable are all "works,
+ * but not fully", so they are counted together rather than spelled out -- the card
+ * itself says which kind it is.
  */
-const summary = computed(() => {
-  const tally = { ready: 0, warnings: 0, unconfigured: 0, disabled: 0 }
-  for (const item of integrations.value) {
+function tally(items: any[]) {
+  const counts = { ready: 0, warnings: 0, unconfigured: 0, disabled: 0 }
+  for (const item of items) {
     if (item.state === 'checking') continue
-    if (item.state === 'ready') tally.ready++
-    else if (item.state === 'unconfigured') tally.unconfigured++
-    else if (item.state === 'disabled') tally.disabled++
-    else if (isWarning(item.state)) tally.warnings++
+    if (item.state === 'ready') counts.ready++
+    else if (item.state === 'unconfigured') counts.unconfigured++
+    else if (item.state === 'disabled') counts.disabled++
+    else if (isWarning(item.state)) counts.warnings++
   }
-  return tally
+  return counts
+}
+
+/** Retrieval integrations and methods, and apart from them the search providers,
+ *  which retrieve nothing (see the server's `status.py`) */
+const groups = computed(() => {
+  const retrieval = integrations.value.filter((i) => i.kind !== 'search')
+  const search = integrations.value.filter((i) => i.kind === 'search')
+  return [
+    { key: 'retrieval', title: 'Retrieval integrations', items: retrieval,
+      summary: tally(retrieval), placeholders: 12 },
+    { key: 'search', title: 'Search integrations', items: search,
+      summary: tally(search), placeholders: 1 },
+  ].filter((g) => g.items.length || !integrations.value.length)
+})
+
+/**
+ * "Today" is the viewer's calendar day. The server counts per 15-minute slot over the
+ * last day (every time zone's offset is a multiple of 15 minutes, so the slots line up
+ * with any local midnight), and the page adds up the slots since its own midnight. The
+ * clock ticks so that the figure starts over at midnight without a reload.
+ */
+const now = ref(Date.now())
+let clockTimer: ReturnType<typeof setInterval> | undefined
+const midnight = computed(() => new Date(now.value).setHours(0, 0, 0, 0) / 1000)
+
+function sinceMidnight(rows: any[] | undefined): any[] {
+  return (rows || []).filter((row) => row[0] >= midnight.value)
+}
+
+const retrievedToday = computed(() => sinceMidnight(environment.value?.throughput?.recent?.counts)
+  .reduce((sum: number, row: any) => sum + row[1], 0))
+
+/** Today's search requests, in total and per provider (by its dashboard label) */
+const searchesToday = computed(() => {
+  const providers = new Map<string, { ok: number, failed: number }>()
+  for (const [, provider, ok, failed] of sinceMidnight(environment.value?.searches?.recent)) {
+    const entry = providers.get(provider) || { ok: 0, failed: 0 }
+    entry.ok += ok
+    entry.failed += failed
+    providers.set(provider, entry)
+  }
+  const label = (key: string) => integrations.value.find((i) => i.key === key)?.name || key
+  const list = [...providers].map(([key, n]) => ({ name: label(key), ...n }))
+  return {
+    total: list.reduce((sum, p) => sum + p.ok + p.failed, 0),
+    failed: list.reduce((sum, p) => sum + p.failed, 0),
+    providers: list,
+  }
 })
 
 /**
@@ -162,18 +210,12 @@ const lanAddresses = computed(() => {
   return env.address.addresses.map((a: string) => `http://${a}:${env.address.port}`)
 })
 
-/**
- * The API key comes from this browser's own session rather than from the server: the UI
- * already holds it to authenticate with, and an endpoint that hands the key back out
- * would be a way to read it that did not exist before.
- */
+// Signed in or not: the live view stops when the key goes. The key itself is shown
+// nowhere -- only once, when it is created (see the API Keys page).
 const apiKey = useToken()
 
-// Fixed-width mask, so the display does not even give away how long the key is.
-const maskedKey = '•'.repeat(16)
-
-async function copy(what: 'address' | 'key') {
-  const value = what === 'address' ? address.value : apiKey.value
+async function copy(what: 'address') {
+  const value = address.value
   if (!value) return
   const ok = await copyText(value)
   // Only claim success when the clipboard really has it
@@ -223,13 +265,29 @@ const tiles = computed(() => {
     { label: 'Success rate', icon: 'i-fa7-solid-check',
       value: rate.value, tone: rate.tone,
       ring: env.throughput.success_rate.rate,
+      // scrapeMM's success: a target that was unavailable counts, since scrapeMM did its
+      // part (see useOutcome.ts); the breakdown says how many that were
       detail: env.throughput.success_rate.total
-        ? `of the last ${env.throughput.success_rate.total} retrievals`
+        ? (env.throughput.success_rate.outcomes
+          ? `${env.throughput.success_rate.outcomes.error} failed · `
+            + `${env.throughput.success_rate.outcomes.unavailable} unavailable · `
+            + `${env.throughput.success_rate.outcomes.ok} retrieved, `
+            + `of the last ${env.throughput.success_rate.total}`
+          : `of the last ${env.throughput.success_rate.total} retrievals`)
         : 'nothing retrieved yet',
-      to: '/jobs' },
+      to: env.throughput.success_rate.outcomes?.error ? '/jobs?outcome=error' : '/jobs' },
     { label: 'Retrieved today', icon: 'i-fa7-solid-gauge-high',
-      value: `${env.throughput.last_24h}`, tone: 'neutral' as const,
-      detail: 'URLs in the past 24 hours', to: '/jobs?since=24h' },
+      value: `${retrievedToday.value}`, tone: 'neutral' as const,
+      detail: 'URLs since midnight', to: '/jobs?since=today' },
+    { label: 'Search requests today', icon: 'i-fa7-solid-magnifying-glass',
+      value: `${searchesToday.value.total}`,
+      tone: searchesToday.value.failed ? 'warning' as const : 'neutral' as const,
+      detail: searchesToday.value.total
+        ? searchesToday.value.providers
+          .map((p) => `${p.name} ${p.ok + p.failed}${p.failed ? ` (${p.failed} failed)` : ''}`)
+          .join(' · ')
+        : `none since midnight · ${env.searches?.total ?? 0} all time`,
+      to: '/playground/search' },
     { label: 'Awaiting CAPTCHA', icon: 'i-fa7-solid-lock',
       value: `${env.captcha.waiting}`,
       tone: env.captcha.waiting ? 'warning' as const : 'neutral' as const,
@@ -272,18 +330,39 @@ const tiles = computed(() => {
         ? `${env.jobs.from_cache} of ${env.jobs.urls} URLs · ${env.cache.entries} cached, ${duration(env.cache.ttl)}`
         : `${env.cache.entries} cached · ${duration(env.cache.ttl)}`,
       to: '/settings' },
-    { label: 'FFmpeg', icon: 'i-fa7-solid-film',
-      value: env.ffmpeg.available ? 'Ready' : 'Missing',
-      tone: env.ffmpeg.available ? 'neutral' as const : 'warning' as const,
-      detail: env.ffmpeg.available ? 'video merged and normalized'
-        : 'videos download without sound' },
+    // URLs accepted by a job but not started yet, because every slot is taken
+    { label: 'Waiting in line', icon: 'i-fa7-solid-hourglass-half',
+      value: `${env.queue.waiting}`, tone: 'neutral' as const,
+      detail: env.queue.waiting || env.queue.active || env.jobs.running
+        ? `URLs queued · ${env.queue.active}/${env.queue.limit} scraping · `
+          + `${env.jobs.running} job${env.jobs.running === 1 ? '' : 's'} running`
+        : 'no URLs queued',
+      to: '/jobs' },
+    // The proxy for when this server's address is blocked: only once one is configured
+    ...(env.proxy?.configured ? [proxyTile(env.proxy)] : []),
   ]
 })
 
-onMounted(() => connectLive())
+function proxyTile(proxy: any) {
+  const test = proxy.last_test
+  const paused = proxy.youtube_paused_until
+  const parts = [`${proxy.requests_today} through it today`]
+  if (test) parts.push(test.ok ? `tested: ${test.ip}${test.country ? ` (${test.country})` : ''}` : 'last test failed')
+  if (paused) parts.push(`YouTube paused until ${new Date(paused * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`)
+  return { label: 'Proxy', icon: 'i-fa7-solid-shuffle',
+    value: proxy.enabled ? 'On' : 'Off',
+    tone: test && !test.ok ? 'warning' as const : proxy.enabled ? 'success' as const : 'neutral' as const,
+    detail: parts.join(' · '), to: '/settings' }
+}
+
+onMounted(() => {
+  connectLive()
+  clockTimer = setInterval(() => { now.value = Date.now() }, 30_000)
+})
 onUnmounted(() => {
   unmounted = true
   liveAbort?.abort()
+  clearInterval(clockTimer)
 })
 </script>
 
@@ -311,25 +390,6 @@ onUnmounted(() => {
         </button>
         <USkeleton v-else-if="!error" class="h-5 w-48 self-center" />
 
-        <!-- The key is copyable but never legible: what somebody needs from it here is
-             to paste it into a client, not to read it off a screen others can see. -->
-        <button
-          v-if="apiKey && (environment || error)" type="button"
-          class="inline-flex items-center gap-2 font-mono text-base text-muted
-                 hover:text-primary transition-colors"
-          title="API key — click to copy"
-          @click="copy('key')"
-        >
-          <UIcon
-            :name="copied === 'key' ? 'i-fa7-solid-check' : 'i-fa7-regular-copy'"
-            class="size-4" :class="copied === 'key' ? 'text-success' : ''"
-          />
-          <span class="select-none">API key</span>
-          <span class="tracking-tight select-none" aria-label="API key, hidden">
-            {{ copied === 'key' ? 'copied' : maskedKey }}
-          </span>
-        </button>
-        <USkeleton v-else-if="apiKey" class="h-5 w-40 self-center" />
       </div>
 
       <div class="flex items-center gap-3 shrink-0">
@@ -360,10 +420,10 @@ onUnmounted(() => {
       <h2 class="text-xs font-semibold uppercase tracking-wider text-dimmed">
         Status
       </h2>
-      <div class="grid gap-2.5 grid-cols-2 lg:grid-cols-4">
+      <div class="grid gap-2.5 grid-cols-2 lg:grid-cols-3">
         <template v-if="!environment">
           <div
-            v-for="n in 8" :key="n"
+            v-for="n in 9" :key="n"
             class="surface-card rounded-xl p-3.5 flex items-center gap-3.5"
           >
             <USkeleton class="size-11 rounded-lg shrink-0" />
@@ -379,27 +439,27 @@ onUnmounted(() => {
       </div>
     </section>
 
-    <!-- Integrations -->
-    <section class="space-y-2.5">
+    <!-- Retrieval integrations, then search integrations -->
+    <section v-for="group in groups" :key="group.key" class="space-y-2.5">
       <div class="flex items-baseline justify-between gap-4 flex-wrap">
         <h2 class="text-xs font-semibold uppercase tracking-wider text-dimmed">
-          Integrations
+          {{ group.title }}
         </h2>
-        <p class="text-sm flex flex-wrap items-center gap-x-2 text-dimmed">
-          <span class="text-success">{{ summary.ready }} ready</span>
-          <span v-if="summary.warnings" class="text-warning">
-            · {{ summary.warnings }} warnings
+        <p v-if="group.items.length" class="text-sm flex flex-wrap items-center gap-x-2 text-dimmed">
+          <span class="text-success">{{ group.summary.ready }} ready</span>
+          <span v-if="group.summary.warnings" class="text-warning">
+            · {{ group.summary.warnings }} warning{{ group.summary.warnings === 1 ? '' : 's' }}
           </span>
-          <span v-if="summary.unconfigured" class="text-error">
-            · {{ summary.unconfigured }} to configure
+          <span v-if="group.summary.unconfigured" class="text-error">
+            · {{ group.summary.unconfigured }} to configure
           </span>
-          <span v-if="summary.disabled">· {{ summary.disabled }} disabled</span>
+          <span v-if="group.summary.disabled">· {{ group.summary.disabled }} disabled</span>
         </p>
       </div>
 
       <div class="grid gap-2.5 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-        <template v-if="!integrations.length">
-          <div v-for="n in 12" :key="n" class="surface-card rounded-xl p-3.5">
+        <template v-if="!group.items.length">
+          <div v-for="n in group.placeholders" :key="n" class="surface-card rounded-xl p-3.5">
             <div class="flex items-start gap-3.5">
               <USkeleton class="size-10 rounded-lg shrink-0" />
               <div class="flex-1 space-y-2">
@@ -411,7 +471,7 @@ onUnmounted(() => {
           </div>
         </template>
         <IntegrationCard
-          v-for="item in integrations" :key="item.key" :item="item"
+          v-for="item in group.items" :key="item.key" :item="item"
           :busy="busy === item.key" :checking="pending.has(item.key)"
           @recheck="recheck" @toggle="toggle"
         />
