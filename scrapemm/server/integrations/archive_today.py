@@ -997,7 +997,8 @@ class ArchiveToday(HeadedBrowser):
 
         logger.info(f"📤 Retrieving {len(urls)} buffered Archive.today page(s)...")
         semaphore = asyncio.Semaphore(DRAIN_CONCURRENCY)
-        done: set[str] = set()
+        done: set[str] = set()  # Retrieved and cached
+        dropped: set[str] = set()  # Given up on: no such capture, or failing for good
         needs_browser: list[str] = []  # HTTP couldn't render these (JS-rendered captures)
         gated_again = False
 
@@ -1021,8 +1022,8 @@ class ArchiveToday(HeadedBrowser):
                     gated_again = True
                 elif state == NOT_FOUND:
                     # No such capture -- retrying it in every future round is pointless
-                    logger.debug(f"Dropping {url} from the buffer: no such capture.")
-                    done.add(url)
+                    logger.info(f"Dropping {url} from the buffer: no such capture.")
+                    dropped.add(url)
                 else:  # BLOCKED: the HTTP path can't render this one; the browser can
                     needs_browser.append(url)
 
@@ -1042,7 +1043,8 @@ class ArchiveToday(HeadedBrowser):
             except CaptchaEncounteredError:
                 gated_again = True  # session expired mid-drain
             except TargetUnavailableError:
-                done.add(url)  # no such capture -- stop retrying it
+                logger.info(f"Dropping {url} from the buffer: no such capture.")
+                dropped.add(url)
             except Exception:
                 logger.debug(f"Buffered Archive.today page {url} could not be retrieved "
                              f"via the browser.", exc_info=True)
@@ -1055,7 +1057,7 @@ class ArchiveToday(HeadedBrowser):
         # given up on after a few such rounds rather than retried for ever
         if not gated_again:
             for url in urls:
-                if url in done:
+                if url in done or url in dropped:
                     _drain_failures.pop(url, None)
                     continue
                 _drain_failures[url] = _drain_failures.get(url, 0) + 1
@@ -1063,16 +1065,17 @@ class ArchiveToday(HeadedBrowser):
                     logger.warning(f"Dropping {url} from the Archive.today buffer: it could "
                                    f"not be retrieved in {MAX_DRAIN_FAILURES} rounds.")
                     _drain_failures.pop(url)
-                    done.add(url)
-        _buffer.discard_many(done)
+                    dropped.add(url)
+        _buffer.discard_many(done | dropped)
 
+        gave_up = f", dropped {len(dropped)} that cannot be had" if dropped else ""
         if gated_again:
             logger.warning(f"⚠️ Archive.today asks for a captcha again after "
-                           f"{len(done)} page(s); {len(_buffer)} still buffered. Solve it "
-                           f"once more to continue.")
+                           f"{len(done)} page(s){gave_up}; {len(_buffer)} still buffered. "
+                           f"Solve it once more to continue.")
         else:
-            logger.info(f"✅ Cached {len(done)} Archive.today page(s). They are served "
-                        f"from the cache from now on, no session needed.")
+            logger.info(f"✅ Cached {len(done)} Archive.today page(s){gave_up}. Cached ones "
+                        f"are served from the cache from now on, no session needed.")
         return len(done)
 
     async def _try_fetch_content(self, session: aiohttp.ClientSession,

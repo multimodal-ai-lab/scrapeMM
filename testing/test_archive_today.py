@@ -149,7 +149,8 @@ async def test_drain_drops_missing_captures(buffer, monkeypatch):
     buffer.add(fine)
     integration = _integration(monkeypatch, {missing: archive_today.NOT_FOUND,
                                              fine: archive_today.CONTENT})
-    assert await integration._drain_buffer(session=None) == 2
+    # Only the one it got counts as retrieved; the missing one is dropped all the same
+    assert await integration._drain_buffer(session=None) == 1
     assert buffer.urls() == []
 
 
