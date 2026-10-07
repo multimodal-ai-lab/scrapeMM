@@ -278,7 +278,8 @@ const tiles = computed(() => {
       to: env.throughput.success_rate.outcomes?.error ? '/jobs?outcome=error' : '/jobs' },
     { label: 'Retrieved today', icon: 'i-fa7-solid-gauge-high',
       value: `${retrievedToday.value}`, tone: 'neutral' as const,
-      detail: 'URLs since midnight', to: '/jobs?since=today' },
+      // Today, hour by hour: where it came from and how it went
+      detail: 'URLs since midnight', to: '/statistics?bucket=hour&periods=24' },
     { label: 'Search requests today', icon: 'i-fa7-solid-magnifying-glass',
       value: `${searchesToday.value.total}`,
       tone: searchesToday.value.failed ? 'warning' as const : 'neutral' as const,
