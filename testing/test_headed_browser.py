@@ -166,8 +166,8 @@ async def test_get_recovers_from_browser_crash_and_retries_once():
     async def fake_html_and_source(_target, _page):
         return "<html>ok</html>", _page
 
-    async def fake_to_multimodal_sequence(html, **_kwargs):
-        return html
+    async def fake_to_multimodal_and_markdown(html, **_kwargs):
+        return html, None
 
     with patch(
         "scrapemm.server.integrations.headed_browser.cdp_driver.start_async",
@@ -175,7 +175,7 @@ async def test_get_recovers_from_browser_crash_and_retries_once():
     ), patch.object(HeadedBrowser, "_new_page", side_effect=fake_new_page), \
          patch.object(PermaCC, "_extract_content", side_effect=fake_extract_content), \
          patch.object(HeadedBrowser, "_html_and_source", side_effect=fake_html_and_source), \
-         patch("scrapemm.server.util.to_multimodal_sequence", side_effect=fake_to_multimodal_sequence):
+         patch("scrapemm.server.util._to_multimodal_and_markdown", side_effect=fake_to_multimodal_and_markdown):
         result = await integration._get("https://perma.cc/AAAA-BBBB")
 
     assert result.html == "<html>ok</html>"
@@ -240,7 +240,7 @@ async def test_transient_connect_failure_does_not_permanently_block_future_calls
         # (which left self.connected as None, not False) did not permanently disable retries.
         with patch.object(PermaCC, "_extract_content", side_effect=lambda page: page), \
              patch.object(HeadedBrowser, "_html_and_source", side_effect=lambda _t, _p: ("<html>ok</html>", _t)), \
-             patch("scrapemm.server.util.to_multimodal_sequence", side_effect=lambda html, **_kw: html), \
+             patch("scrapemm.server.util._to_multimodal_and_markdown", side_effect=lambda html, **_kw: (html, None)), \
              patch.object(HeadedBrowser, "_new_page", side_effect=lambda _p, attempts=3: (FakePage(), 1)):
             result = await integration.get("https://perma.cc/AAAA-BBBB")
             assert result.html == "<html>ok</html>"
@@ -279,8 +279,38 @@ async def test_get_survives_client_side_redirect_abort():
     with patch.object(HeadedBrowser, "_new_page", side_effect=lambda _p, attempts=3: (page, 1)), \
          patch.object(PermaCC, "_extract_content", side_effect=lambda _page: _page), \
          patch.object(HeadedBrowser, "_html_and_source", side_effect=lambda _t, _p: ("<html>ok</html>", _t)), \
-         patch("scrapemm.server.util.to_multimodal_sequence", side_effect=lambda html, **_kw: html):
+         patch("scrapemm.server.util._to_multimodal_and_markdown", side_effect=lambda html, **_kw: (html, None)):
         result = await integration.get("https://perma.cc/AAAA-BBBB")
 
     assert result.html == "<html>ok</html>"
     assert page.settled is True
+
+
+@pytest.mark.asyncio
+async def test_remove_consent_dialogs_keeps_the_article():
+    """A known platform's consent dialog and its scroll lock go (as on borkenerzeitung.de,
+    whose Cookiebot dialog was 4.9 of its 5 MB); the article and look-alikes stay."""
+    from playwright.async_api import async_playwright
+    from scrapemm.server.integrations.headed_browser import remove_consent_dialogs
+    async with async_playwright() as p:
+        try:
+            browser = await p.chromium.launch(headless=True)
+        except Exception as e:
+            pytest.skip(f"No Chromium for Playwright: {e}")
+        page = await browser.new_page()
+        await page.set_content(
+            '<html><body style="overflow: hidden;">'
+            '<div id="CybotCookiebotDialog" class="CybotCookiebotDialogActive">Wir verwenden Cookies'
+            '<img src="data:,"></div><div id="CybotCookiebotDialogBodyUnderlay"></div>'
+            '<div id="sp_message_container_123">Sourcepoint</div>'
+            '<div class="cookie-recipe">Chocolate cookies</div>'
+            '<article><h1>Headline</h1><p>Checkpoint Charlie</p></article></body></html>')
+        await remove_consent_dialogs(page)
+        html = await page.content()
+        overflow = await page.evaluate("document.body.style.overflow")
+        await browser.close()
+    for gone in ("CybotCookiebotDialog", "Wir verwenden Cookies", "sp_message_container"):
+        assert gone not in html
+    for kept in ("Headline", "Checkpoint Charlie", "Chocolate cookies"):
+        assert kept in html
+    assert overflow == ""

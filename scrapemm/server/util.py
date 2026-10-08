@@ -175,26 +175,40 @@ UI_IDS = frozenset((
     "breadcrumbs", "share", "widget", "cookie"))
 # The root elements of the common consent management platforms (cookie banners), by id
 # and class. Their names are no plain "cookie", so the UI lists above miss them.
-CONSENT_PLATFORM_IDS = frozenset((
-    "CybotCookiebotDialog", "CybotCookiebotDialogBodyUnderlay", "CookiebotWidget",  # Cookiebot
-    "onetrust-consent-sdk", "onetrust-banner-sdk", "ot-sdk-btn-floating",  # OneTrust
-    "usercentrics-root", "usercentrics-cmp-ui", "uc-banner",  # Usercentrics
-    "cmpbox", "cmpbox2", "cmpwrapper",  # consentmanager
-    "qc-cmp2-container",  # Quantcast
-    "didomi-host", "didomi-notice", "didomi-popup",  # Didomi
-    "truste-consent-track", "consent_blackbar",  # TrustArc
-    "BorlabsCookieBox", "BorlabsCookieWidget",  # Borlabs
-    "cmplz-cookiebanner-container",  # Complianz
-    "iubenda-cs-banner", "klaro",  # iubenda, Klaro
-    "cookie-law-info-bar", "cookie-notice", "gdpr-cookie-message",  # WordPress plugins
-))
-CONSENT_PLATFORM_ID_PREFIXES = ("sp_message_container",)  # Sourcepoint
-CONSENT_PLATFORM_CLASSES = frozenset((
-    "sp_veil", "cmpboxBG", "qc-cmp2-container", "truste_overlay", "truste_box_overlay",
-    "cmplz-cookiebanner", "cky-consent-container", "cky-modal", "cky-overlay",
-    "osano-cm-window", "osano-cm-dialog", "cc-window", "cc-banner", "klaro",
-    "cookiefirst-root",
-))
+# Platform: (ids, id prefixes, classes) of its dialog's roots, backdrops included
+CONSENT_PLATFORMS: dict[str, tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = {
+    "Cookiebot": (("CybotCookiebotDialog", "CybotCookiebotDialogBodyUnderlay", "CookiebotWidget"), (), ()),
+    "OneTrust": (("onetrust-consent-sdk", "onetrust-banner-sdk", "ot-sdk-btn-floating"), (), ()),
+    "Usercentrics": (("usercentrics-root", "usercentrics-cmp-ui", "uc-banner"), (), ()),
+    "Sourcepoint": ((), ("sp_message_container",), ("sp_veil",)),
+    "consentmanager": (("cmpbox", "cmpbox2", "cmpwrapper"), (), ("cmpboxBG",)),
+    "Quantcast": (("qc-cmp2-container",), (), ("qc-cmp2-container",)),
+    "Didomi": (("didomi-host", "didomi-notice", "didomi-popup"), (), ()),
+    "TrustArc": (("truste-consent-track", "consent_blackbar"), (), ("truste_overlay", "truste_box_overlay")),
+    "Borlabs": (("BorlabsCookieBox", "BorlabsCookieWidget"), (), ()),
+    "Complianz": (("cmplz-cookiebanner-container",), (), ("cmplz-cookiebanner",)),
+    "CookieYes": ((), (), ("cky-consent-container", "cky-modal", "cky-overlay")),
+    "Osano": ((), (), ("osano-cm-window", "osano-cm-dialog")),
+    "cookieconsent": ((), (), ("cc-window", "cc-banner")),
+    "iubenda": (("iubenda-cs-banner",), (), ()),
+    "Klaro": (("klaro",), (), ("klaro",)),
+    "CookieFirst": ((), (), ("cookiefirst-root",)),
+    "WordPress plugins": (("cookie-law-info-bar", "cookie-notice", "gdpr-cookie-message"), (), ()),
+}
+CONSENT_PLATFORM_IDS = frozenset(i for ids, _, _ in CONSENT_PLATFORMS.values() for i in ids)
+CONSENT_PLATFORM_ID_PREFIXES = tuple(p for _, prefixes, _ in CONSENT_PLATFORMS.values() for p in prefixes)
+CONSENT_PLATFORM_CLASSES = frozenset(c for _, _, classes in CONSENT_PLATFORMS.values() for c in classes)
+
+
+def consent_platform_of(element_id: str, classes: Iterable[str]) -> Optional[str]:
+    """The consent platform whose dialog the element is the root of, if any."""
+    for platform, (ids, prefixes, platform_classes) in CONSENT_PLATFORMS.items():
+        if element_id in ids or (prefixes and element_id.startswith(prefixes)) \
+                or not set(platform_classes).isdisjoint(classes):
+            return platform
+    return None
+
+
 # Beyond the known platforms: an element named after cookies or consent (id or class)...
 CONSENT_NAME_REGEX = re.compile(r"cookie|consent|gdpr|dsgvo|rgpd|privacy-?(?:banner|notice|popup)",
                                 re.IGNORECASE)

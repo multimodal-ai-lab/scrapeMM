@@ -1544,6 +1544,10 @@ class HeadedBrowser(RetrievalIntegration):
 
                 if target := await self._extract_content(page):
                     shown_url = getattr(page, "url", "") or ""  # What the content came from
+                    # Before reading and before any screenshot: never content, and on
+                    # some pages nearly all of the HTML (see `remove_consent_dialogs()`)
+                    if get_config_var("remove_consent_dialogs", True) is not False:
+                        await remove_consent_dialogs(page)
                     await annotate_rendered_media(target)
                     html, source = await self._html_and_source(target, page)
                     if html:
@@ -1949,6 +1953,61 @@ async def settle_dom(target: Page | Frame, min_text: int = 0) -> None:
                 return
             since = now  # Look again after another stable window
         await asyncio.sleep(DOM_SETTLE_INTERVAL)
+
+
+# Removes the dialogs of known consent platforms (see `util.CONSENT_PLATFORMS`) from a
+# document, and the scroll lock they put on it. Returns [bytes removed, [[id, classes]]].
+_REMOVE_CONSENT_JS = """({ids, prefixes, classes}) => {
+    const roots = new Set();
+    for (const id of ids) { const e = document.getElementById(id); if (e) roots.add(e); }
+    for (const p of prefixes) document.querySelectorAll(`[id^="${p}"]`).forEach(e => roots.add(e));
+    for (const c of classes) for (const e of document.getElementsByClassName(c)) roots.add(e);
+    let bytes = 0;
+    const removed = [];
+    for (const e of roots) {
+        if (!e.isConnected || e === document.documentElement || e === document.body) continue;
+        if (e.querySelector("main, article, [role=main]")) continue;  // Never the content
+        bytes += e.outerHTML.length;
+        removed.push([e.id || "", Array.from(e.classList)]);
+        e.remove();
+    }
+    if (removed.length) {
+        // The scroll lock the platforms put on the document while their dialog shows
+        for (const el of [document.documentElement, document.body]) {
+            if (!el) continue;
+            el.classList.remove("CybotCookiebotDialogActive", "ot-overflow-hidden",
+                                "sp-message-open", "didomi-popup-open", "qc-cmp-ui-showing");
+            if (el.style.overflow === "hidden") el.style.overflow = "";
+            if (el.style.overflowY === "hidden") el.style.overflowY = "";
+        }
+    }
+    return [bytes, removed];
+}"""
+
+
+async def remove_consent_dialogs(page: Page) -> None:
+    """Removes the dialogs of known consent platforms (Cookiebot, OneTrust, Sourcepoint,
+    ...) from the page and its frames (archive replays show the captured page in one),
+    and lifts the scroll lock they put on it. Such a dialog is never content (decided
+    2026-10-08), but may be nearly all of the page: Cookiebot's lists over a thousand
+    vendors, 4.9 of borkenerzeitung.de's 5 MB, which cost seconds to read, parse and
+    convert. Gone, it also no longer covers the screenshot. Only the platforms' exact
+    roots; looser matches are left to `strip`. Best-effort: a frame that fails is skipped."""
+    from scrapemm.server.util import (CONSENT_PLATFORM_CLASSES, CONSENT_PLATFORM_IDS,
+                                      CONSENT_PLATFORM_ID_PREFIXES, consent_platform_of)
+    config = {"ids": sorted(CONSENT_PLATFORM_IDS), "prefixes": list(CONSENT_PLATFORM_ID_PREFIXES),
+              "classes": sorted(CONSENT_PLATFORM_CLASSES)}
+    for frame in getattr(page, "frames", None) or [page]:
+        try:
+            removed_bytes, removed = await frame.evaluate(_REMOVE_CONSENT_JS, config)
+        except Exception:  # Detached or navigating (or a test double): nothing to remove
+            logger.debug(f"Could not look for consent dialogs in {getattr(frame, 'url', '?')}.",
+                         exc_info=True)
+            continue
+        if removed:
+            platforms = sorted({consent_platform_of(i, c) or "?" for i, c in removed})
+            logger.info(f"🍪 Removed the consent dialog of {', '.join(platforms)} "
+                        f"({removed_bytes / 1e6:.2f} MB) from {frame.url[:120]}.")
 
 
 class Browser(HeadedBrowser):

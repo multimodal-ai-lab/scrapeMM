@@ -24,6 +24,7 @@ interface RetrievalForm {
   job_retention_days: string
   archive_today_interactive_solve: boolean
   archive_today_screenshot_fallback: boolean
+  remove_consent_dialogs: boolean
 }
 
 const NUMBERS = ['max_concurrency', 'max_browser_pages', 'max_search_concurrency',
@@ -47,6 +48,7 @@ function toForm(config: Record<string, any>): RetrievalForm {
     job_retention_days: text(config.job_retention_days),
     archive_today_interactive_solve: !!config.archive_today_interactive_solve,
     archive_today_screenshot_fallback: !!config.archive_today_screenshot_fallback,
+    remove_consent_dialogs: config.remove_consent_dialogs !== false, // On unless turned off
   }
 }
 
@@ -59,6 +61,7 @@ async function saveRetrieval() {
     firecrawl_urls: form.firecrawl_urls.split('\n').map((u) => u.trim()).filter(Boolean),
     archive_today_interactive_solve: form.archive_today_interactive_solve,
     archive_today_screenshot_fallback: form.archive_today_screenshot_fallback,
+    remove_consent_dialogs: form.remove_consent_dialogs,
   }
   for (const key of NUMBERS) {
     const value = form[key].trim()
@@ -264,6 +267,11 @@ onBeforeUnmount(() => clearInterval(statsTimer))
           </div>
         </div>
         <div class="space-y-2">
+          <UCheckbox
+            v-model="retrieval.remove_consent_dialogs"
+            label="Remove cookie/consent dialogs"
+            description="Removes the dialogs of known consent platforms (Cookiebot, OneTrust, Usercentrics, …) in the browser before the page is read. Faster on pages with large consent dialogs, and screenshots are not covered by them. The dialog's text is then not part of the result."
+          />
           <UCheckbox
             v-model="retrieval.archive_today_interactive_solve"
             label="Archive.today: ask for a CAPTCHA at the moment of a gated request"
