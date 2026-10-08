@@ -11,12 +11,14 @@ import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 from pathlib import Path
 from typing import Optional, Awaitable, Callable, Iterable, Union, TYPE_CHECKING
 from urllib.parse import unquote, urljoin, urlparse, urlsplit
 
 import aiohttp
 import tqdm
+import PIL.Image
 from PIL import UnidentifiedImageError
 from bs4 import BeautifulSoup, Tag
 from ezmm import MultimodalSequence, Item, Image, Video
@@ -24,7 +26,7 @@ from markdownify import markdownify as md
 from playwright.async_api import APIRequestContext, Page, Frame
 
 from scrapemm.server.download import download_video, download_image
-from scrapemm.server.download.images import image_from_binary, image_size
+from scrapemm.server.download.images import _is_svg, image_from_binary, image_size
 from scrapemm.server.download.util import (
     looks_like_image_file_url,
     looks_like_vector_file_url,
@@ -126,6 +128,8 @@ MAX_MEDIA_PER_HOST = 2
 # medium that took longer ran into the 10-minute limit, which failed the whole page
 # (thequint.com, over a trickling ad video).
 MAX_SECONDS_PER_MEDIUM = 300
+# Images with a shorter side are icons, logos and spacers, not content
+MIN_IMAGE_SIDE = 256
 URL_REGEX = r"https?:\/\/(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9@:%_\+.~#?&//=]*)"
 DATA_URI_REGEX = r"data:([\w/+.-]+/[\w.+-]+);base64,([A-Za-z0-9+/=]+)"
 MD_HYPERLINK_REGEX = rf'(!?\[([^]^[]*)\]\((.*?)(?: "[^"]*")?\))'
@@ -266,14 +270,26 @@ def _is_consent_banner(element: Tag) -> bool:
     wrapper telling its styles the consent was given (class="cookies-accepted")."""
     if element.name in ("html", "body", "head"):
         return False
+    if _is_consent_platform(element):
+        return True  # Known for sure, even when empty (a shadow root's host)
     element_id = str(element.get("id") or "")
     classes = element.get("class") or []
-    if (element_id in CONSENT_PLATFORM_IDS or element_id.startswith(CONSENT_PLATFORM_ID_PREFIXES)
-            or not CONSENT_PLATFORM_CLASSES.isdisjoint(classes)):
-        return True  # Known for sure, even when empty (a shadow root's host)
     return (CONSENT_NAME_REGEX.search(" ".join([element_id, *classes])) is not None
             and element.find(_holds_content) is None
             and CONSENT_TEXT_REGEX.search(element.get_text(" ", strip=True)) is not None)
+
+
+def _is_consent_platform(element: Tag) -> bool:
+    """Whether the element is the root of a known consent platform's banner."""
+    element_id = str(element.get("id") or "")
+    return (element_id in CONSENT_PLATFORM_IDS or element_id.startswith(CONSENT_PLATFORM_ID_PREFIXES)
+            or not CONSENT_PLATFORM_CLASSES.isdisjoint(element.get("class") or ()))
+
+
+def _in_consent_platform(element: Tag) -> bool:
+    """Whether the element sits in a known consent platform's banner."""
+    return any(_is_consent_platform(parent) for parent in element.parents
+               if parent.name not in ("html", "body", "[document]"))
 
 
 def postprocess_markdown(text: str) -> str:
@@ -584,17 +600,18 @@ def _resolve_base64_media(
     """Resolves all base64-encoded media elements.
     Returns a list of (element, Item) for the resolved media and removes them from media_elements."""
     resolved = []
-    # Using a while loop or iterating over a copy to safely remove from the original list
+    # Pages repeat the same inline icon hundreds of times (a consent banner's vendor
+    # list); each is decoded and registered once
+    decoded: dict[str, Optional[Item]] = {}
     for element, uri in media_elements_uris:
+        medium = None
         if uri and is_data_uri(uri):
-            data_uri_info = decompose_data_uri(uri)
-            if data_uri_info:
-                mime_type, base64_encoding = data_uri_info
-                medium = from_base64(base64_encoding, mime_type=mime_type, url=source_url)
-                if medium:
-                    resolved.append(medium)
-                    continue
-        resolved.append(None)
+            if uri not in decoded:
+                data_uri_info = decompose_data_uri(uri)
+                decoded[uri] = from_base64(data_uri_info[1], mime_type=data_uri_info[0],
+                                           url=source_url) if data_uri_info else None
+            medium = decoded[uri]
+        resolved.append(medium)
     return resolved
 
 
@@ -660,16 +677,20 @@ async def resolve_media(
     # 1. Identify all potential media elements and their URLs. Parsing, decoding and
     # rewriting the HTML are CPU-bound -- a second and more for a page with hundreds
     # of images -- so they run in a thread, not on the event loop every retrieval shares.
-    def parse() -> tuple[BeautifulSoup, list[Tag]]:
+    def parse() -> tuple[BeautifulSoup, list[Tag], list[Optional[str]]]:
         parsed = BeautifulSoup(html, "html.parser")
-        return parsed, _extract_media_elements(parsed)
+        elements = _extract_media_elements(parsed)
+        # Media in a consent banner are never content: its vendor list may carry
+        # thousands of logos, each to be decoded or fetched and registered. Left
+        # unresolved, they are dropped like any medium that could not be had; the
+        # banner's text stays (stripping it is up to `strip_content()`)
+        uris = [str(e.get("src")) if e.get("src") and not _in_consent_platform(e) else None
+                for e in elements]
+        return parsed, elements, uris
 
-    soup, media_elements = await _in_html_thread(parse)
+    soup, media_elements, media_uris = await _in_html_thread(parse)
     if not media_elements:
         return MultimodalSequence(html)
-
-    media_uris: list[Optional[str]] = [str(element.get("src")) if element.get("src") else None
-                                       for element in media_elements]
 
     # 2. Resolve base64 media. Not when rebuilding from media resolved before: decoded
     # again, they would be registered anew (see `strip_content()`)
@@ -794,7 +815,7 @@ def _replace_media_elements(soup: BeautifulSoup, media_elements: list[Tag],
         has_child_tags = any(getattr(child, "name", None) for child in element.children)
 
         if medium:
-            too_small = isinstance(medium, Image) and min(image_size(medium)) < 256
+            too_small = isinstance(medium, Image) and min(image_size(medium)) < MIN_IMAGE_SIDE
 
             if not too_small:
                 if uri and uri in inserted_url_refs:
@@ -1003,8 +1024,15 @@ def from_base64(b64_data: str, mime_type: str = "image/jpeg", url: str | None = 
             if mime_type == "image/svg+xml":
                 return None  # We do not care about SVGs
             elif mime_type.startswith("image/"):
+                # Icons are left out before they are registered, by the rule the caller
+                # applies to all media (see `_replace_media_elements()`). An SVG has no
+                # size of its own; rasterizing it decides.
+                if not _is_svg(binary_data):
+                    with PIL.Image.open(BytesIO(binary_data)) as header:  # Reads the header only
+                        if min(header.size) < MIN_IMAGE_SIDE:
+                            return None
                 # Downscaled like any downloaded image: a huge inline one otherwise
-                # took hundreds of MB. Small ones are filtered by the caller.
+                # took hundreds of MB
                 return image_from_binary(binary_data, source_url=url, ignore_small_images=False)
             elif mime_type.startswith("video/"):
                 return Video(binary_data=binary_data, source_url=url)
