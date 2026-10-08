@@ -11,20 +11,22 @@ import re
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 from pathlib import Path
 from typing import Optional, Awaitable, Callable, Iterable, Union, TYPE_CHECKING
 from urllib.parse import unquote, urljoin, urlparse, urlsplit
 
 import aiohttp
 import tqdm
+import PIL.Image
 from PIL import UnidentifiedImageError
 from bs4 import BeautifulSoup, Tag
 from ezmm import MultimodalSequence, Item, Image, Video
-from markdownify import markdownify as md
+from markdownify import MarkdownConverter
 from playwright.async_api import APIRequestContext, Page, Frame
 
 from scrapemm.server.download import download_video, download_image
-from scrapemm.server.download.images import image_from_binary, image_size
+from scrapemm.server.download.images import _is_svg, image_from_binary, image_size
 from scrapemm.server.download.util import (
     looks_like_image_file_url,
     looks_like_vector_file_url,
@@ -126,6 +128,8 @@ MAX_MEDIA_PER_HOST = 2
 # medium that took longer ran into the 10-minute limit, which failed the whole page
 # (thequint.com, over a trickling ad video).
 MAX_SECONDS_PER_MEDIUM = 300
+# Images with a shorter side are icons, logos and spacers, not content
+MIN_IMAGE_SIDE = 256
 URL_REGEX = r"https?:\/\/(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9@:%_\+.~#?&//=]*)"
 DATA_URI_REGEX = r"data:([\w/+.-]+/[\w.+-]+);base64,([A-Za-z0-9+/=]+)"
 MD_HYPERLINK_REGEX = rf'(!?\[([^]^[]*)\]\((.*?)(?: "[^"]*")?\))'
@@ -156,23 +160,77 @@ def preprocess_html(html: str) -> str:
     return html
 
 
-# Elements that hold page chrome rather than content. This is Firecrawl's list for its
-# `onlyMainContent` option.
-UI_SELECTORS = ", ".join((
-    "header", "footer", "nav", "aside", ".header", ".top", ".navbar", "#header",
-    ".footer", ".bottom", "#footer", ".sidebar", ".side", ".aside", "#sidebar",
-    ".modal", ".popup", "#modal", ".overlay", ".ad", ".ads", ".advert", "#ad",
-    ".lang-selector", ".language", "#language-selector", ".social", ".social-media",
-    ".social-links", "#social", ".menu", ".navigation", "#nav", ".breadcrumbs",
-    "#breadcrumbs", ".share", "#share", ".widget", "#widget", ".cookie", "#cookie"))
-# The page's main content, which is never removed along with the chrome around it.
-# Not <article>: related-article sidebars are full of <article> teaser cards.
-MAIN_CONTENT_SELECTORS = "#main, main, [role=main]"
+# Elements that hold page chrome rather than content, by tag, class and id. This is
+# Firecrawl's list for its `onlyMainContent` option ("header", ".header", "#header", ...).
+# Looked up in one pass over the page (see `_remove_ui_elements()`): as CSS selectors,
+# soupsieve takes seconds on a large page.
+UI_TAGS = frozenset(("header", "footer", "nav", "aside"))
+UI_CLASSES = frozenset((
+    "header", "top", "navbar", "footer", "bottom", "sidebar", "side", "aside", "modal",
+    "popup", "overlay", "ad", "ads", "advert", "lang-selector", "language", "social",
+    "social-media", "social-links", "menu", "navigation", "breadcrumbs", "share", "widget",
+    "cookie"))
+UI_IDS = frozenset((
+    "header", "footer", "sidebar", "modal", "ad", "language-selector", "social", "nav",
+    "breadcrumbs", "share", "widget", "cookie"))
+# The root elements of the common consent management platforms (cookie banners), by id
+# and class. Their names are no plain "cookie", so the UI lists above miss them.
+# Platform: (ids, id prefixes, classes) of its dialog's roots, backdrops included
+CONSENT_PLATFORMS: dict[str, tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = {
+    "Cookiebot": (("CybotCookiebotDialog", "CybotCookiebotDialogBodyUnderlay", "CookiebotWidget"), (), ()),
+    "OneTrust": (("onetrust-consent-sdk", "onetrust-banner-sdk", "ot-sdk-btn-floating"), (), ()),
+    "Usercentrics": (("usercentrics-root", "usercentrics-cmp-ui", "uc-banner"), (), ()),
+    "Sourcepoint": ((), ("sp_message_container",), ("sp_veil",)),
+    "consentmanager": (("cmpbox", "cmpbox2", "cmpwrapper"), (), ("cmpboxBG",)),
+    "Quantcast": (("qc-cmp2-container",), (), ("qc-cmp2-container",)),
+    "Didomi": (("didomi-host", "didomi-notice", "didomi-popup"), (), ()),
+    "TrustArc": (("truste-consent-track", "consent_blackbar"), (), ("truste_overlay", "truste_box_overlay")),
+    "Borlabs": (("BorlabsCookieBox", "BorlabsCookieWidget"), (), ()),
+    "Complianz": (("cmplz-cookiebanner-container",), (), ("cmplz-cookiebanner",)),
+    "CookieYes": ((), (), ("cky-consent-container", "cky-modal", "cky-overlay")),
+    "Osano": ((), (), ("osano-cm-window", "osano-cm-dialog")),
+    "cookieconsent": ((), (), ("cc-window", "cc-banner")),
+    "iubenda": (("iubenda-cs-banner",), (), ()),
+    "Klaro": (("klaro",), (), ("klaro",)),
+    "CookieFirst": ((), (), ("cookiefirst-root",)),
+    "WordPress plugins": (("cookie-law-info-bar", "cookie-notice", "gdpr-cookie-message"), (), ()),
+}
+CONSENT_PLATFORM_IDS = frozenset(i for ids, _, _ in CONSENT_PLATFORMS.values() for i in ids)
+CONSENT_PLATFORM_ID_PREFIXES = tuple(p for _, prefixes, _ in CONSENT_PLATFORMS.values() for p in prefixes)
+CONSENT_PLATFORM_CLASSES = frozenset(c for _, _, classes in CONSENT_PLATFORMS.values() for c in classes)
+
+
+def consent_platform_of(element_id: str, classes: Iterable[str]) -> Optional[str]:
+    """The consent platform whose dialog the element is the root of, if any."""
+    for platform, (ids, prefixes, platform_classes) in CONSENT_PLATFORMS.items():
+        if element_id in ids or (prefixes and element_id.startswith(prefixes)) \
+                or not set(platform_classes).isdisjoint(classes):
+            return platform
+    return None
+
+
+# Beyond the known platforms: an element named after cookies or consent (id or class)...
+CONSENT_NAME_REGEX = re.compile(r"cookie|consent|gdpr|dsgvo|rgpd|privacy-?(?:banner|notice|popup)",
+                                re.IGNORECASE)
+# ...that also talks about them, in any of the common languages
+CONSENT_TEXT_REGEX = re.compile(
+    r"cookie|consent|einwillig|zustimm|datenschutzeinstellung|privacy settings|"
+    r"consentement|traceurs|toestemming|consenso|consentimiento|zgod|gdpr|dsgvo|rgpd",
+    re.IGNORECASE)
+# The page's main content (#main, main, [role=main]), which is never removed along with
+# the chrome around it. Not <article>: related-article sidebars are full of <article>
+# teaser cards.
+def _is_main_content(element: Tag) -> bool:
+    return element.name == "main" or element.get("id") == "main" or element.get("role") == "main"
+
+
+def _holds_content(element: Tag) -> bool:
+    return element.name in ("article", "h1") or _is_main_content(element)
 
 
 def remove_ui_elements(html: str) -> str:
-    """Strips navigation, headers, footers, sidebars, banners and the like from the
-    HTML, keeping the page's content. Returns the HTML unchanged if nothing is left.
+    """Strips navigation, headers, footers, sidebars, cookie banners and the like from
+    the HTML, keeping the page's content. Returns the HTML unchanged if nothing is left.
     The result is re-serialized by BeautifulSoup (entities decoded, void tags closed),
     not the page's bytes as scraped."""
     return _remove_ui_elements(html)[0]
@@ -183,14 +241,20 @@ def _remove_ui_elements(html: str) -> tuple[str, list[str]]:
     elements removed."""
     soup = BeautifulSoup(html, "html.parser")
     has_body = soup.body is not None
+    elements = soup.find_all(True)  # In document order: ancestors before descendants
     # The main content and everything wrapping it, never removed as chrome
-    keep = {id(node) for main in soup.select(MAIN_CONTENT_SELECTORS)
+    keep = {id(node) for main in filter(_is_main_content, elements)
             for node in (main, *main.parents)}
+    # Cookie banners are looked for in the body only
+    in_body = {id(e) for e in soup.body.find_all(True)} if has_body else None
     removed_media: list[str] = []
     removed_any = False
-    for element in soup.select(UI_SELECTORS):
+    for element in elements:
         if element.decomposed:
             continue  # Gone with an ancestor already
+        if not (_is_ui_element(element) or (
+                (in_body is None or id(element) in in_body) and _is_consent_banner(element))):
+            continue
         if id(element) in keep:
             continue  # Is or wraps the main content
         if element.name == "header" and element.find_parent("article"):
@@ -206,6 +270,40 @@ def _remove_ui_elements(html: str) -> tuple[str, list[str]]:
     if body is None or not (body.get_text(strip=True) or body.find(["img", "video", "iframe"])):
         return html, []  # The heuristic misfired (e.g. <body class="side">)
     return str(soup), removed_media
+
+
+def _is_ui_element(element: Tag) -> bool:
+    return (element.name in UI_TAGS or element.get("id") in UI_IDS
+            or not UI_CLASSES.isdisjoint(element.get("class") or ()))
+
+
+def _is_consent_banner(element: Tag) -> bool:
+    """Whether the element is a cookie banner: one of a known platform, or else one
+    whose id or class names cookies or consent and whose text speaks of them. The
+    latter never holds an article, a headline or the main content: that is a page
+    wrapper telling its styles the consent was given (class="cookies-accepted")."""
+    if element.name in ("html", "body", "head"):
+        return False
+    if _is_consent_platform(element):
+        return True  # Known for sure, even when empty (a shadow root's host)
+    element_id = str(element.get("id") or "")
+    classes = element.get("class") or []
+    return (CONSENT_NAME_REGEX.search(" ".join([element_id, *classes])) is not None
+            and element.find(_holds_content) is None
+            and CONSENT_TEXT_REGEX.search(element.get_text(" ", strip=True)) is not None)
+
+
+def _is_consent_platform(element: Tag) -> bool:
+    """Whether the element is the root of a known consent platform's banner."""
+    element_id = str(element.get("id") or "")
+    return (element_id in CONSENT_PLATFORM_IDS or element_id.startswith(CONSENT_PLATFORM_ID_PREFIXES)
+            or not CONSENT_PLATFORM_CLASSES.isdisjoint(element.get("class") or ()))
+
+
+def _in_consent_platform(element: Tag) -> bool:
+    """Whether the element sits in a known consent platform's banner."""
+    return any(_is_consent_platform(parent) for parent in element.parents
+               if parent.name not in ("html", "body", "[document]"))
 
 
 def postprocess_markdown(text: str) -> str:
@@ -516,17 +614,18 @@ def _resolve_base64_media(
     """Resolves all base64-encoded media elements.
     Returns a list of (element, Item) for the resolved media and removes them from media_elements."""
     resolved = []
-    # Using a while loop or iterating over a copy to safely remove from the original list
+    # Pages repeat the same inline icon hundreds of times (a consent banner's vendor
+    # list); each is decoded and registered once
+    decoded: dict[str, Optional[Item]] = {}
     for element, uri in media_elements_uris:
+        medium = None
         if uri and is_data_uri(uri):
-            data_uri_info = decompose_data_uri(uri)
-            if data_uri_info:
-                mime_type, base64_encoding = data_uri_info
-                medium = from_base64(base64_encoding, mime_type=mime_type, url=source_url)
-                if medium:
-                    resolved.append(medium)
-                    continue
-        resolved.append(None)
+            if uri not in decoded:
+                data_uri_info = decompose_data_uri(uri)
+                decoded[uri] = from_base64(data_uri_info[1], mime_type=data_uri_info[0],
+                                           url=source_url) if data_uri_info else None
+            medium = decoded[uri]
+        resolved.append(medium)
     return resolved
 
 
@@ -537,12 +636,14 @@ async def download_embedded_video(
         **kwargs
 ) -> Optional[Video]:
     """Downloads the video behind an embedded player with yt-dlp. Returns None if that
-    fails: an embedded video is a bonus, so it must never fail the whole page."""
+    fails: an embedded video is a bonus, so it must never fail the whole page -- nor hold
+    it up: while YouTube is paused for this server, an embedded YouTube video fails at
+    once rather than going through the proxy."""
     from scrapemm.server.integrations.ytdlp import download_video_with_ytdlp
 
     try:
         video, _thumbnail, _metadata = await download_video_with_ytdlp(
-            url, session=session, max_video_size=max_video_size)
+            url, session=session, max_video_size=max_video_size, divert_when_paused=False)
         return video
     except Exception as e:
         logger.info(f"Could not download the video embedded from {url}: "
@@ -553,6 +654,19 @@ async def download_embedded_video(
 async def resolve_media(
         html: str,
         session: Union[aiohttp.ClientSession, "APIRequestContext"],
+        **kwargs
+) -> MultimodalSequence:
+    """Downloads all media contained in the HTML and returns it as a sequence, each
+    medium's element replaced by the item (see `_resolve_media_in()`)."""
+    soup = await _in_html_thread(BeautifulSoup, html, "html.parser")
+    if await _resolve_media_in(soup, session, **kwargs):
+        return MultimodalSequence(await _in_html_thread(str, soup))
+    return MultimodalSequence(html)
+
+
+async def _resolve_media_in(
+        soup: BeautifulSoup,
+        session: Union[aiohttp.ClientSession, "APIRequestContext"],
         url: str | None = None,
         source_element: Union[Frame, Page, None] = None,
         media: Optional[BrowserMedia] = None,
@@ -560,10 +674,11 @@ async def resolve_media(
         on_browser_done: Optional[Callable[[], Awaitable]] = None,
         known_media: Optional["KnownMedia"] = None,
         **kwargs
-) -> MultimodalSequence:
-    """Downloads all media that are contained in the provided HTML.
+) -> bool:
+    """Downloads all media that are contained in the parsed HTML.
     Removes images that are smaller than 256 x 256. Replaces the
-    respective HTML elements with their proper item reference.
+    respective HTML elements with their proper item reference, in place. Returns
+    whether the HTML had any media elements (and was changed).
 
     If the HTML comes from a browser page, `source_element` is the frame it was taken
     from and `media` the page's `BrowserMedia`: media are then taken from the browser,
@@ -590,16 +705,19 @@ async def resolve_media(
     # 1. Identify all potential media elements and their URLs. Parsing, decoding and
     # rewriting the HTML are CPU-bound -- a second and more for a page with hundreds
     # of images -- so they run in a thread, not on the event loop every retrieval shares.
-    def parse() -> tuple[BeautifulSoup, list[Tag]]:
-        parsed = BeautifulSoup(html, "html.parser")
-        return parsed, _extract_media_elements(parsed)
+    def extract() -> tuple[list[Tag], list[Optional[str]]]:
+        elements = _extract_media_elements(soup)
+        # Media in a consent banner are never content: its vendor list may carry
+        # thousands of logos, each to be decoded or fetched and registered. Left
+        # unresolved, they are dropped like any medium that could not be had; the
+        # banner's text stays (stripping it is up to `strip_content()`)
+        uris = [str(e.get("src")) if e.get("src") and not _in_consent_platform(e) else None
+                for e in elements]
+        return elements, uris
 
-    soup, media_elements = await _in_html_thread(parse)
+    media_elements, media_uris = await _in_html_thread(extract)
     if not media_elements:
-        return MultimodalSequence(html)
-
-    media_uris: list[Optional[str]] = [str(element.get("src")) if element.get("src") else None
-                                       for element in media_elements]
+        return False
 
     # 2. Resolve base64 media. Not when rebuilding from media resolved before: decoded
     # again, they would be registered anew (see `strip_content()`)
@@ -705,15 +823,14 @@ async def resolve_media(
             resolved_media[i] = medium
 
     # 6. Replace or remove elements in the SOUP
-    return MultimodalSequence(await _in_html_thread(
-        _replace_media_elements, soup, media_elements, media_uris, resolved_media))
+    await _in_html_thread(_replace_media_elements, media_elements, media_uris, resolved_media)
+    return True
 
 
-def _replace_media_elements(soup: BeautifulSoup, media_elements: list[Tag],
-                            media_uris: list[Optional[str]],
-                            resolved_media: list[Optional[Item]]) -> str:
-    """Puts each resolved medium's reference in place of its element, removes the
-    elements without one, and returns the resulting HTML."""
+def _replace_media_elements(media_elements: list[Tag], media_uris: list[Optional[str]],
+                            resolved_media: list[Optional[Item]]) -> None:
+    """Puts each resolved medium's reference in place of its element, and removes the
+    elements without one."""
     inserted_url_refs: set[str] = set()
     for i, (element, medium) in enumerate(zip(media_elements, resolved_media)):
         # Check if element is still in the tree
@@ -724,7 +841,7 @@ def _replace_media_elements(soup: BeautifulSoup, media_elements: list[Tag],
         has_child_tags = any(getattr(child, "name", None) for child in element.children)
 
         if medium:
-            too_small = isinstance(medium, Image) and min(image_size(medium)) < 256
+            too_small = isinstance(medium, Image) and min(image_size(medium)) < MIN_IMAGE_SIDE
 
             if not too_small:
                 if uri and uri in inserted_url_refs:
@@ -749,8 +866,6 @@ def _replace_media_elements(soup: BeautifulSoup, media_elements: list[Tag],
             _strip_background_image_style(element)
         else:
             element.decompose()
-
-    return str(soup)
 
 
 def is_url(href: str) -> bool:
@@ -814,22 +929,24 @@ async def to_scraped_content(
         content.markdown = await _in_html_thread(html2md, html)
         return content
 
-    content.multimodal = await to_multimodal_sequence(html, session=session, **kwargs)
-    # After the media: a browser page is closed by then (see `resolve_media()`)
-    content.markdown = await _in_html_thread(html2md, html)
+    content.multimodal, content.markdown = await _to_multimodal_and_markdown(
+        html, session=session, **kwargs)
     return content
 
 
 class KnownMedia:
-    """Media resolved before, by the URL they were retrieved from. Matches by path too:
+    """Media resolved before, by the URLs they were retrieved from. Matches by path too:
     the page's relative references may have resolved against a different document URL
-    (e.g. after a redirect) than they do now."""
+    (e.g. after a redirect) than they do now.
+
+    By every URL an item is known under, not just its first: ezMM merges identical files
+    into one item (the same picture under two addresses), which keeps all their URLs."""
 
     def __init__(self, items: list[Item]):
         self.by_url: dict[str, Item] = {}
         self.by_path: dict[str, Item] = {}
         for item in items:
-            if source := getattr(item, "source_url", None):
+            for source in _source_urls(item):
                 self.by_url.setdefault(source, item)
                 self.by_path.setdefault(_path_of(source), item)
 
@@ -837,6 +954,17 @@ class KnownMedia:
         if not uri:
             return None
         return self.by_url.get(uri) or self.by_path.get(_path_of(uri))
+
+
+def _source_urls(item: Item) -> list[str]:
+    """Every URL the item was retrieved from, as far as ezMM knows them."""
+    try:
+        urls = list(item.source_urls)
+    except Exception:  # A registry that cannot say: the item's own URL is still known
+        urls = []
+    if (own := getattr(item, "source_url", None)) and own not in urls:
+        urls.append(own)
+    return urls
 
 
 def _path_of(url: str) -> str:
@@ -883,23 +1011,39 @@ async def to_multimodal_sequence(
 ) -> MultimodalSequence:
     """Turns scraped HTML content into the corresponding MultimodalSequences
     by resolving media hyperlinks and Base64 encodings and converting to Markdown."""
-    # 0. Preprocess HTML
-    html = preprocess_html(html)
-    assert html is not None
+    return (await _to_multimodal_and_markdown(html, session, with_markdown=False, **kwargs))[0]
 
-    # 1. Resolve media in HTML
-    mms = await resolve_media(html, session=session, **kwargs)
 
-    # 2. Convert resulting (partially replaced) HTML to Markdown
-    text = await _in_html_thread(html2md, mms)
-
-    return MultimodalSequence(text)
+async def _to_multimodal_and_markdown(
+        html: str,
+        session: Union[aiohttp.ClientSession, "APIRequestContext"],
+        with_markdown: bool = True,
+        **kwargs
+) -> tuple[MultimodalSequence, Optional[str]]:
+    """The HTML as a multimodal sequence and, with `with_markdown`, as Markdown (the
+    media as hyperlinks, see `html2md()`). Parsed once for both: on a large page,
+    parsing takes longer than anything else done with it (1.6 s for 5 MB)."""
+    preprocessed = preprocess_html(html)
+    soup = await _in_html_thread(BeautifulSoup, preprocessed, "html.parser")
+    markdown = None
+    if with_markdown:
+        # Of the HTML as scraped, so before the media are put in. Preprocessing rarely
+        # changes it (only text data URIs); then it is parsed a second time
+        markdown = await (_in_html_thread(soup2md, soup) if preprocessed is html
+                          else _in_html_thread(html2md, html))
+    await _resolve_media_in(soup, session=session, **kwargs)
+    return MultimodalSequence(await _in_html_thread(soup2md, soup)), markdown
 
 
 def html2md(html: str | MultimodalSequence) -> str:
     """Converts HTML to Markdown."""
+    return soup2md(BeautifulSoup(str(html), "html.parser"))
+
+
+def soup2md(soup: BeautifulSoup) -> str:
+    """Converts parsed HTML to Markdown, leaving the tree as is."""
     try:
-        markdown = md(str(html), heading_style="ATX")
+        markdown = MarkdownConverter(heading_style="ATX").convert_soup(soup)
         return postprocess_markdown(markdown)
     except RecursionError:
         logger.debug("RecursionError while converting HTML to Markdown.")
@@ -919,8 +1063,15 @@ def from_base64(b64_data: str, mime_type: str = "image/jpeg", url: str | None = 
             if mime_type == "image/svg+xml":
                 return None  # We do not care about SVGs
             elif mime_type.startswith("image/"):
+                # Icons are left out before they are registered, by the rule the caller
+                # applies to all media (see `_replace_media_elements()`). An SVG has no
+                # size of its own; rasterizing it decides.
+                if not _is_svg(binary_data):
+                    with PIL.Image.open(BytesIO(binary_data)) as header:  # Reads the header only
+                        if min(header.size) < MIN_IMAGE_SIDE:
+                            return None
                 # Downscaled like any downloaded image: a huge inline one otherwise
-                # took hundreds of MB. Small ones are filtered by the caller.
+                # took hundreds of MB
                 return image_from_binary(binary_data, source_url=url, ignore_small_images=False)
             elif mime_type.startswith("video/"):
                 return Video(binary_data=binary_data, source_url=url)

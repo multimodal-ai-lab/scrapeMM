@@ -143,9 +143,6 @@ def restore_defaults() -> int:
 def _score(entry: dict, response) -> dict:
     """What happened to one URL, measured against its expectation."""
     sequence = response.content.multimodal if response.content else None
-    # TODO: Count PDFs too once ezMM supports them as items, like media (coming soon). Until
-    #  then, URLs that serve a PDF (e.g. the suite's eur-lex.europa.eu entry, expecting one
-    #  "pdf") count as missing it.
     found = {"image": len(sequence.images), "video": len(sequence.videos)} if sequence else {}
     expected = entry.get("expected") or {}
     expect = entry.get("expect")

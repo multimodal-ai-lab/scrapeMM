@@ -80,3 +80,43 @@ def test_svg_img_extracted_unless_shown_small():
     soup = BeautifulSoup('<img src="/chart.svg"><img src="/logo.svg" width="120">'
                          '<img src="/figure.eps">', "html.parser")
     assert [e["src"] for e in _extract_media_elements(soup)] == ["/chart.svg"]
+
+
+def _data_uri(width: int, height: int) -> str:
+    import base64
+    from io import BytesIO
+    from PIL import Image as PillowImage
+    buffer = BytesIO()
+    PillowImage.new("RGB", (width, height), "red").save(buffer, format="JPEG")
+    return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+
+def test_inline_images_are_decoded_once_and_icons_never():
+    """A consent banner's vendor list repeats one inline icon a thousand times (as on
+    borkenerzeitung.de): none of them may be registered, and a repeated large inline
+    image only once."""
+    from scrapemm.server.util import _resolve_base64_media
+    icon, photo = _data_uri(18, 18), _data_uri(400, 300)
+    resolved = _resolve_base64_media([(None, icon)] * 3 + [(None, photo)] * 2,
+                                     source_url="https://example.com/article")
+    assert resolved[:3] == [None, None, None]
+    assert resolved[3] is not None and resolved[3] is resolved[4]
+
+
+async def test_media_in_consent_banners_are_not_resolved(monkeypatch):
+    from scrapemm.server import util
+    fetched = []
+
+    async def fake_download_image(url, *args, **kwargs):
+        fetched.append(url)
+        return None
+
+    monkeypatch.setattr(util, "download_image", fake_download_image)
+    html = ('<html><body><div id="CybotCookiebotDialog"><p>Wir verwenden Cookies</p>'
+            '<img src="https://cdn.example.com/vendor-logo.png"></div>'
+            '<article><h1>Headline</h1><img src="https://example.com/photo.jpg"></article>'
+            '</body></html>')
+    sequence = await util.resolve_media(html, session=None, url="https://example.com/article")
+    assert fetched == ["https://example.com/photo.jpg"]
+    assert "vendor-logo.png" not in str(sequence)
+    assert "Wir verwenden Cookies" in str(sequence)

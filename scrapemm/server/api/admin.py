@@ -229,6 +229,8 @@ async def patch_config(body: dict[str, Any]) -> dict:
                 detail=f"'{name}' expects {expected.__name__}, got {value!r}.")
 
     update_config(**coerced)
+    if {"job_retention_days", "max_jobs"} & coerced.keys():
+        await asyncio.to_thread(jobs.prune)  # A lower limit applies at once
     return {"config": get_config()}
 
 
@@ -367,6 +369,16 @@ async def get_job(job_id: str) -> dict:
     if job is None:
         raise HTTPException(status_code=404, detail=f"No job '{job_id}'.")
     return job
+
+
+@router.get("/jobs/{job_id}/content")
+async def get_result_content(job_id: str, url: str = Query(...)) -> dict:
+    """One result's stored content: the job itself comes without, being megabytes for a
+    run of many URLs, and the UI fetches a result's content when it is opened."""
+    content = await asyncio.to_thread(jobs.get_content, job_id, url)
+    if content is None:
+        raise HTTPException(status_code=404, detail=f"No stored content for {url} in job '{job_id}'.")
+    return {"url": url, "content": content}
 
 
 @router.delete("/jobs/{job_id}")

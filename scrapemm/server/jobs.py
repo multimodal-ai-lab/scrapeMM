@@ -69,8 +69,12 @@ WAL_SIZE_LIMIT = 64 * 1024 * 1024  # Bytes the write-ahead log is cut back to
 SLOT = 15 * 60
 RECENT_SPAN = 25 * 60 * 60
 
+# How much job history is kept, unless the settings say otherwise (`job_retention_days`,
+# `max_jobs`; 0 for no limit). Each job keeps its content, ~110 KB a URL, so 10,000 jobs
+# of one URL already take about a gigabyte.
 DEFAULT_RETENTION_DAYS = 90
 DEFAULT_MAX_JOBS = 10_000
+PRUNE_INTERVAL = 3600  # Seconds between prunings while the server runs, see `app`
 
 
 class JobStore:
@@ -142,6 +146,7 @@ class JobStore:
                 CREATE INDEX IF NOT EXISTS searches_created_idx ON searches(created_at);
                 """
             )
+            self._start_counters()
             self._add_outcome_columns()
             self._split_off_content()
             self._connection.executescript(RESULTS_INDEXES)
@@ -175,6 +180,26 @@ class JobStore:
         self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE);")
         logger.warning(f"Moved the page content in {moved:.0f} s, compacted the database "
                        f"in {time.time() - started - moved:.0f} s.")
+
+    def _start_counters(self) -> None:
+        """All-time totals, which pruning the history never lowers (see `stats()`). A
+        database from before they existed starts them at what its history still holds:
+        what was pruned before is gone."""
+        exists = self._connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'counters'").fetchone()
+        if exists:
+            return
+        self._connection.execute(
+            "CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL)")
+        self._connection.execute(
+            "INSERT INTO counters (name, value) VALUES "
+            "('jobs', (SELECT COUNT(*) FROM jobs)), ('urls', (SELECT COUNT(*) FROM results)), "
+            "('since', CAST(COALESCE((SELECT MIN(created_at) FROM jobs), strftime('%s', 'now')) AS INTEGER))")
+
+    def _count(self, name: str, by: int = 1) -> None:
+        """Adds to an all-time counter. Called with the write lock held."""
+        self._connection.execute(
+            "UPDATE counters SET value = value + ? WHERE name = ?", (by, name))
 
     def _add_outcome_columns(self) -> None:
         """The outcome class of each result (see `scrapemm.common.outcome`), stored so
@@ -232,6 +257,7 @@ class JobStore:
                 "INSERT INTO jobs (id, created_at, status, params, url_count) "
                 "VALUES (?, ?, 'running', ?, ?)",
                 (job_id, time.time(), json.dumps(params, default=str), url_count))
+            self._count("jobs")
             self._connection.commit()
             self.version += 1
         return job_id
@@ -246,6 +272,10 @@ class JobStore:
             content = json.dumps(stored)
         outcome, kind = classify(success, payload.errors)
         with self._lock:
+            known = self._connection.execute(
+                "SELECT 1 FROM results WHERE job_id = ? AND url = ?", (job_id, payload.url)).fetchone()
+            if not known:  # A URL recorded again (a rerun) is still one URL
+                self._count("urls")
             self._connection.execute(
                 "INSERT OR REPLACE INTO results (job_id, url, success, method, errors, "
                 "retrieval_time, queue_time, from_cache, created_at, outcome, outcome_kind) "
@@ -386,8 +416,11 @@ class JobStore:
                 "SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
             if row is None:
                 return None
+            # Not the content itself, which runs to megabytes for a test run (see
+            # `get_content()`), only the figures a result's header shows, computed by
+            # SQLite where the content is
             results = self._reader.execute(
-                "SELECT results.*, result_content.content FROM results "
+                f"SELECT results.*, {_CONTENT_STATS} FROM results "
                 "LEFT JOIN result_content USING (job_id, url) "
                 "WHERE results.job_id = ? ORDER BY results.created_at", (job_id,)).fetchall()
         job = _job_row(row)
@@ -403,6 +436,14 @@ class JobStore:
         job["pending"] = [url for url in requested if url not in done]
         return job
 
+    def get_content(self, job_id: str, url: str) -> Optional[dict]:
+        """The stored content of one result of a job, None if there is none."""
+        with self._read_lock:
+            row = self._reader.execute(
+                "SELECT content FROM result_content WHERE job_id = ? AND url = ?",
+                (job_id, url)).fetchone()
+        return json.loads(row["content"]) if row and row["content"] else None
+
     def delete_job(self, job_id: str) -> bool:
         with self._lock:
             cursor = self._connection.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
@@ -414,22 +455,35 @@ class JobStore:
 
     # --- Housekeeping -------------------------------------------------------------
 
-    def prune(self, retention_days: float = DEFAULT_RETENTION_DAYS,
-              max_jobs: int = DEFAULT_MAX_JOBS) -> int:
-        """Drops job records that are too old or too many. Never touches media."""
-        deadline = time.time() - retention_days * 24 * 60 * 60
+    def prune(self, retention_days: Optional[float] = None,
+              max_jobs: Optional[int] = None) -> int:
+        """Drops job records that are too old or too many: by the settings
+        `job_retention_days` and `max_jobs` unless given, 0 meaning no limit. Never touches
+        media, nor the all-time counters."""
+        from .config import get_config_var
+        if retention_days is None:
+            retention_days = get_config_var("job_retention_days")
+            retention_days = DEFAULT_RETENTION_DAYS if retention_days is None else retention_days
+        if max_jobs is None:
+            max_jobs = get_config_var("max_jobs")
+            max_jobs = DEFAULT_MAX_JOBS if max_jobs is None else max_jobs
+        deadline = time.time() - retention_days * 24 * 60 * 60 if retention_days > 0 else None
         with self._lock:
-            removed = self._connection.execute(
-                "DELETE FROM jobs WHERE created_at < ?", (deadline,)).rowcount
-            removed += self._connection.execute(
-                "DELETE FROM jobs WHERE id NOT IN ("
-                "  SELECT id FROM jobs ORDER BY created_at DESC LIMIT ?)",
-                (max_jobs,)).rowcount
+            removed = 0
+            if deadline is not None:
+                removed += self._connection.execute(
+                    "DELETE FROM jobs WHERE created_at < ?", (deadline,)).rowcount
+            if max_jobs > 0:
+                removed += self._connection.execute(
+                    "DELETE FROM jobs WHERE id NOT IN ("
+                    "  SELECT id FROM jobs ORDER BY created_at DESC LIMIT ?)",
+                    (int(max_jobs),)).rowcount
             self._connection.execute(
                 "DELETE FROM results WHERE job_id NOT IN (SELECT id FROM jobs)")
             self._connection.execute(
                 "DELETE FROM result_content WHERE job_id NOT IN (SELECT id FROM jobs)")
-            self._connection.execute("DELETE FROM searches WHERE created_at < ?", (deadline,))
+            if deadline is not None:
+                self._connection.execute("DELETE FROM searches WHERE created_at < ?", (deadline,))
             self._connection.commit()
             self.version += 1
         if removed:
@@ -447,7 +501,11 @@ class JobStore:
             "COALESCE(SUM(outcome = 'unavailable'), 0), COALESCE(SUM(from_cache), 0) "
             "FROM results")[0]
         failed = results - retrieved - unavailable
+        counters = dict(self.query("SELECT name, value FROM counters"))
         return {"jobs": jobs, "urls": results, "succeeded": retrieved + unavailable,
+                # Since counting began, whatever the history still holds
+                "all_time": {"jobs": counters.get("jobs", jobs), "urls": counters.get("urls", results),
+                             "since": counters.get("since")},
                 "failed": failed, "from_cache": cached,
                 "outcomes": {OK: retrieved, UNAVAILABLE: unavailable, ERROR: failed},
                 "cache_hit_rate": cached / results if results else None}
@@ -618,10 +676,40 @@ def _job_row(row: sqlite3.Row) -> dict:
     return job
 
 
+# What a result's header shows of its content, without the content: how much text, HTML
+# and media came back. The text is the Markdown, or else the multimodal rendering.
+_CONTENT_STATS = """
+    result_content.content IS NOT NULL AS has_content,
+    LENGTH(COALESCE(json_extract(result_content.content, '$.markdown'),
+                    json_extract(result_content.content, '$.multimodal'), '')) AS stat_characters,
+    LENGTH(CAST(COALESCE(json_extract(result_content.content, '$.html'), '') AS BLOB)) AS stat_html_bytes,
+    (SELECT json_group_object(kind, n) FROM (
+        SELECT json_extract(value, '$.kind') AS kind, COUNT(*) AS n
+        FROM json_each(result_content.content, '$.items') GROUP BY kind)) AS stat_kinds,
+    (SELECT COALESCE(SUM(json_extract(value, '$.size')), 0)
+        FROM json_each(result_content.content, '$.items')) AS stat_bytes,
+    (SELECT COUNT(*) FROM json_each(result_content.content, '$.items')
+        WHERE json_extract(value, '$.size') IS NULL) AS stat_unsized
+"""
+
+
 def _result_row(row: sqlite3.Row) -> dict:
     result = dict(row)
     result["errors"] = json.loads(result["errors"]) if result["errors"] else {}
-    result["content"] = json.loads(result["content"]) if result["content"] else None
+    if "content" in result:
+        result["content"] = json.loads(result["content"]) if result["content"] else None
+    if "has_content" in result:
+        # Only the figures; the content itself comes with `get_content()`
+        kinds = json.loads(result.pop("stat_kinds") or "{}")
+        result["has_content"] = bool(result["has_content"])
+        result["stats"] = {
+            "kinds": kinds, "media": sum(kinds.values()),
+            "bytes": result.pop("stat_bytes") or 0, "unsized": result.pop("stat_unsized") or 0,
+            "characters": result.pop("stat_characters") or 0,
+            "html_bytes": result.pop("stat_html_bytes") or 0,
+        } if result["has_content"] else None
+        for key in ("stat_kinds", "stat_bytes", "stat_unsized", "stat_characters", "stat_html_bytes"):
+            result.pop(key, None)
     result["success"] = bool(result["success"])
     result["from_cache"] = bool(result["from_cache"])
     return result

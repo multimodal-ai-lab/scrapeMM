@@ -87,6 +87,27 @@ VERIFICATION_SNAPSHOT = "Ubqsd"
 GATE_MARKERS = ("security check", "captcha", "just a moment",
                 "performing security verification", "recaptcha")
 
+# Archive.today's own "not found" answers: "Not Found (yet?)" for a capture it does not
+# have, and a bare "Not Found (3)" (HTTP 404, ungated) for a path that is no capture at all,
+# e.g. two snapshot URLs run together (https://archive.ph/iUOsyhttps://archive.ph/eNsx3)
+_NOT_FOUND_PAGE = re.compile(r"^\s*not found\b", re.IGNORECASE)
+_TAGS = re.compile(r"<[^>]+>")
+
+
+def _is_not_found(body: str, status: Optional[int] = None) -> bool:
+    """Whether the page is Archive.today saying there is no such capture."""
+    if "not found (yet?)" in body.lower():
+        return True
+    # Only a short page that says nothing else: a capture's own text may well start so
+    return (status in (None, 404) and len(body) < 2000
+            and bool(_NOT_FOUND_PAGE.match(_TAGS.sub(" ", body))))
+
+
+# How many rounds a buffered URL may fail for no recognized reason (neither content, nor
+# the gate, nor "not found") before it is dropped, so that nothing stays in the buffer for
+# good. Rounds cut short by the gate do not count.
+MAX_DRAIN_FAILURES = 3
+
 # Snapshot ids are five alphanumeric characters, e.g. https://archive.ph/uTVE4
 SHORT_ID_REGEX = re.compile(r"^/([A-Za-z0-9]{5})(?:/.*)?$")
 
@@ -525,6 +546,7 @@ class _RequestBuffer:
 
 _pages = _PageCache()
 _buffer = _RequestBuffer()
+_drain_failures: dict[str, int] = {}  # Buffered URL -> rounds it failed in, see `_drain_buffer()`
 
 
 async def _fetch_text(url: str, session: Optional[aiohttp.ClientSession] = None) -> Optional[str]:
@@ -920,7 +942,7 @@ class ArchiveToday(HeadedBrowser):
             body_text = (await page.locator("body").inner_text()).lower()
         except Exception:
             body_text = ""
-        if "not found (yet?)" in body_text:
+        if _is_not_found(body_text):
             raise TargetUnavailableError("Archive.today has no capture at this URL.")
         if _looks_like_gate(body_text):
             raise CaptchaEncounteredError(GATE_HINT)
@@ -975,7 +997,8 @@ class ArchiveToday(HeadedBrowser):
 
         logger.info(f"📤 Retrieving {len(urls)} buffered Archive.today page(s)...")
         semaphore = asyncio.Semaphore(DRAIN_CONCURRENCY)
-        done: set[str] = set()
+        done: set[str] = set()  # Retrieved and cached
+        dropped: set[str] = set()  # Given up on: no such capture, or failing for good
         needs_browser: list[str] = []  # HTTP couldn't render these (JS-rendered captures)
         gated_again = False
 
@@ -999,8 +1022,8 @@ class ArchiveToday(HeadedBrowser):
                     gated_again = True
                 elif state == NOT_FOUND:
                     # No such capture -- retrying it in every future round is pointless
-                    logger.debug(f"Dropping {url} from the buffer: no such capture.")
-                    done.add(url)
+                    logger.info(f"Dropping {url} from the buffer: no such capture.")
+                    dropped.add(url)
                 else:  # BLOCKED: the HTTP path can't render this one; the browser can
                     needs_browser.append(url)
 
@@ -1020,7 +1043,8 @@ class ArchiveToday(HeadedBrowser):
             except CaptchaEncounteredError:
                 gated_again = True  # session expired mid-drain
             except TargetUnavailableError:
-                done.add(url)  # no such capture -- stop retrying it
+                logger.info(f"Dropping {url} from the buffer: no such capture.")
+                dropped.add(url)
             except Exception:
                 logger.debug(f"Buffered Archive.today page {url} could not be retrieved "
                              f"via the browser.", exc_info=True)
@@ -1029,15 +1053,29 @@ class ArchiveToday(HeadedBrowser):
                     _pages.put(url, content.html)
                     done.add(url)
 
-        _buffer.discard_many(done)
+        # What failed for no recognized reason, in a round the gate did not cut short:
+        # given up on after a few such rounds rather than retried for ever
+        if not gated_again:
+            for url in urls:
+                if url in done or url in dropped:
+                    _drain_failures.pop(url, None)
+                    continue
+                _drain_failures[url] = _drain_failures.get(url, 0) + 1
+                if _drain_failures[url] >= MAX_DRAIN_FAILURES:
+                    logger.warning(f"Dropping {url} from the Archive.today buffer: it could "
+                                   f"not be retrieved in {MAX_DRAIN_FAILURES} rounds.")
+                    _drain_failures.pop(url)
+                    dropped.add(url)
+        _buffer.discard_many(done | dropped)
 
+        gave_up = f", dropped {len(dropped)} that cannot be had" if dropped else ""
         if gated_again:
             logger.warning(f"⚠️ Archive.today asks for a captcha again after "
-                           f"{len(done)} page(s); {len(_buffer)} still buffered. Solve it "
-                           f"once more to continue.")
+                           f"{len(done)} page(s){gave_up}; {len(_buffer)} still buffered. "
+                           f"Solve it once more to continue.")
         else:
-            logger.info(f"✅ Cached {len(done)} Archive.today page(s). They are served "
-                        f"from the cache from now on, no session needed.")
+            logger.info(f"✅ Cached {len(done)} Archive.today page(s){gave_up}. Cached ones "
+                        f"are served from the cache from now on, no session needed.")
         return len(done)
 
     async def _try_fetch_content(self, session: aiohttp.ClientSession,
@@ -1056,7 +1094,7 @@ class ArchiveToday(HeadedBrowser):
         # Parsing a snapshot page is CPU-bound; in a thread, the event loop keeps going
         if content := await run_light(_extract_content_html, body):
             return content, CONTENT
-        if "not found (yet?)" in body.lower():
+        if _is_not_found(body, status):
             return None, NOT_FOUND
         if status == 429 or _looks_like_gate(body):
             return None, GATE

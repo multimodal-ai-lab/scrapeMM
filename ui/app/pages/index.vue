@@ -278,7 +278,8 @@ const tiles = computed(() => {
       to: env.throughput.success_rate.outcomes?.error ? '/jobs?outcome=error' : '/jobs' },
     { label: 'Retrieved today', icon: 'i-fa7-solid-gauge-high',
       value: `${retrievedToday.value}`, tone: 'neutral' as const,
-      detail: 'URLs since midnight', to: '/jobs?since=today' },
+      // Today, hour by hour: where it came from and how it went
+      detail: 'URLs since midnight', to: '/statistics?bucket=hour&periods=24' },
     { label: 'Search requests today', icon: 'i-fa7-solid-magnifying-glass',
       value: `${searchesToday.value.total}`,
       tone: searchesToday.value.failed ? 'warning' as const : 'neutral' as const,
@@ -303,9 +304,12 @@ const tiles = computed(() => {
       detail: env.blacklist.domains ? 'domains excluded from retrieval'
         : 'no domains excluded',
       to: '/blacklist' },
+    // All time: counted as they run, so pruning the history does not lower them
     { label: 'Jobs run', icon: 'i-fa7-solid-clock-rotate-left',
-      value: `${env.jobs.jobs}`, tone: 'neutral' as const,
-      detail: `${env.jobs.urls} URLs all time`, to: '/jobs' },
+      value: `${(env.jobs.all_time?.jobs ?? env.jobs.jobs).toLocaleString()}`, tone: 'neutral' as const,
+      detail: `${(env.jobs.all_time?.urls ?? env.jobs.urls).toLocaleString()} URLs all time · `
+        + `${env.jobs.jobs.toLocaleString()} jobs kept`,
+      to: '/jobs' },
     { label: 'Media stored', icon: 'i-fa7-solid-photo-film',
       // Null until the server's first background measurement is done
       value: env.media.bytes == null ? '…' : bytes(env.media.bytes),

@@ -66,11 +66,7 @@ class X(RetrievalIntegration):
         sequence = None
         try:
             if tweet_id:
-                sequence = await self._get_tweet(tweet_id, session, max_video_size)
-                if media_number is not None:
-                    # The URL points at one specific medium of the tweet
-                    media = list(sequence.unique_items())
-                    sequence = MultimodalSequence(media[media_number - 1])
+                sequence = await self._get_tweet(tweet_id, session, max_video_size, media_number)
             else:
                 username = extract_username_from_url(url)
                 if username:
@@ -82,7 +78,7 @@ class X(RetrievalIntegration):
                 raise QuotaExceededError(f"X API credits depleted. {e}")
             else:
                 raise RuntimeError(f"X API error: {e}")
-        except TargetUnavailableError as e:
+        except (TargetUnavailableError, RetrievalFailed) as e:
             raise e
         except Exception as e:
             logger.debug(f"Error retrieving X content from {url}: {e}", exc_info=True)
@@ -107,9 +103,14 @@ class X(RetrievalIntegration):
             return parse_qs(query).get("query", [])[0] or url
         return url
 
-    async def _get_tweet(self, tweet_id: int, session: aiohttp.ClientSession, max_video_size: int = None) -> MultimodalSequence:
+    async def _get_tweet(self, tweet_id: int, session: aiohttp.ClientSession,
+                         max_video_size: int = None,
+                         media_number: Optional[int] = None) -> MultimodalSequence:
         """Returns a MultimodalSequence containing the tweet's text and media
-        along with information like metrics, etc."""
+        along with information like metrics, etc. With `media_number` (from a URL ending
+        in /photo/<n> or /video/<n>), only the tweet's n-th medium, counted over all its
+        media in the tweet's order as X does (a photo then three videos: /video/2 is the
+        first video)."""
 
         response = await self.client.get_tweet(
             id=tweet_id,
@@ -131,11 +132,25 @@ class X(RetrievalIntegration):
         text = tweet.text
         text = re.sub(r"https?://t\.co/\S+", "", text).strip()
 
+        # In the tweet's order: the API's `includes` need not follow it
+        if media_raw:
+            keys = list((tweet.attachments or {}).get("media_keys") or [])
+            media_raw = sorted(media_raw, key=lambda m: keys.index(m.media_key)
+                               if m.media_key in keys else len(keys))
+        if media_number is not None:
+            if not media_raw or not 1 <= media_number <= len(media_raw):
+                raise TargetUnavailableError(
+                    f"Tweet {tweet_id} has no medium number {media_number} "
+                    f"({len(media_raw or [])} in all).")
+            media_raw = [media_raw[media_number - 1]]
+
         # Download the media
         media = []
+        failed = []
         if media_raw:
             for medium_raw in media_raw:
                 medium = None
+                oversized = False
                 if medium_raw.type == "photo":
                     url = medium_raw.url
                     medium = await download_image(url, session=session)
@@ -147,11 +162,23 @@ class X(RetrievalIntegration):
                         if medium and max_video_size and medium.size > max_video_size:
                             logger.info(f"Removing video {medium.reference} because it exceeds the maximum size "
                                         f"of {max_video_size / 1024 / 1024:.2f} MB.")
-                            medium = None
+                            medium, oversized = None, True
                 else:
                     raise ValueError(f"Unsupported media type: {medium_raw.type}")
                 if medium:
                     media.append(medium)
+                elif not oversized:  # Not dropped on purpose
+                    failed.append(medium_raw.type)
+
+        if failed and media_number is not None:
+            # The URL asks for this one medium: without it, there is nothing to return
+            raise RetrievalFailed(f"The {failed[0]} of tweet {tweet_id} (number {media_number}) "
+                                  f"could not be downloaded.")
+        if failed:
+            logger.warning(f"Tweet {tweet_id}: {len(failed)} of {len(media_raw)} media could "
+                           f"not be downloaded ({', '.join(failed)}).")
+        if media_number is not None:
+            return MultimodalSequence(media)
 
         tweet_str = f"""**Post on X**
 Author: {author.name}, @{author.username}
@@ -159,6 +186,9 @@ Posted on: {tweet.created_at.strftime("%B %d, %Y at %H:%M")}
 Likes: {metrics['like_count']} - Retweets: {metrics['retweet_count']} - Replies: {metrics['reply_count']} - Views: {metrics['impression_count']}
 
 {text}"""  # TODO: Add edit history
+        if failed:
+            tweet_str += (f"\n\n[{len(failed)} of the post's {len(media_raw)} media could not "
+                          f"be downloaded: {', '.join(failed)}]")
         return MultimodalSequence([tweet_str, *media])
 
     async def _get_user(self, username: str, session: aiohttp.ClientSession) -> MultimodalSequence:

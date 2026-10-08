@@ -233,8 +233,16 @@ async def test_retrieve_records_a_job(client, stub_engine):
     job = (await client.get(f"/v1/jobs/{job_id}", headers=AUTH)).json()
     assert job["status"] == "completed"
     assert job["succeeded"] == 1
-    assert job["results"][0]["url"] == "https://example.com/recorded"
-    assert job["results"][0]["content"]["markdown"] == "# Hi"
+    result = job["results"][0]
+    assert result["url"] == "https://example.com/recorded"
+    # The job carries only what a result's header shows; the content comes on its own
+    assert "content" not in result and result["stats"]["characters"] == len("# Hi")
+    content = (await client.get(f"/v1/jobs/{job_id}/content", headers=AUTH,
+                                params={"url": result["url"]})).json()["content"]
+    assert content["markdown"] == "# Hi"
+    missing = await client.get(f"/v1/jobs/{job_id}/content", headers=AUTH,
+                               params={"url": "https://example.com/other"})
+    assert missing.status_code == 404
 
 
 # --- Search -----------------------------------------------------------------------

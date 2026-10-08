@@ -105,3 +105,67 @@ async def test_resolve_snapshot_is_cached_permanently():
     assert first is not None
     cached = archive_today._snapshots.get("uTVE4")
     assert cached is not None and cached.original_url == first.original_url
+
+
+# --- The buffer: what it gives up on ------------------------------------------------------
+
+@pytest.mark.parametrize("body, status, expected", [
+    ("Not Found (3)", 404, True),  # Two snapshot URLs run together: no capture path at all
+    ("<html><body><h1>Not Found (yet?)</h1></body></html>", 200, True),
+    ("<html><body>Not found, they said: an archived article</body></html>" + "x" * 3000, 200, False),
+    ("<html><title>Security check</title></html>", 429, False),
+])
+def test_recognizes_not_found_pages(body, status, expected):
+    assert archive_today._is_not_found(body, status) is expected
+
+
+@pytest.fixture
+def buffer(tmp_path, monkeypatch):
+    buffer = archive_today._RequestBuffer(tmp_path / "buffer.json")
+    monkeypatch.setattr(archive_today, "_buffer", buffer)
+    monkeypatch.setattr(archive_today, "_drain_failures", {})
+    monkeypatch.setattr(archive_today._pages, "put", lambda url, content: None)
+    return buffer
+
+
+def _integration(monkeypatch, states: dict, browser_fails: bool = True):
+    integration = archive_today.ArchiveToday()
+
+    async def fetch(session, url):
+        state = states[url]
+        return ("<div id='CONTENT'>x</div>", state) if state == archive_today.CONTENT else (None, state)
+
+    async def browser_get(self, url, **kwargs):
+        raise RuntimeError("no content div")
+
+    monkeypatch.setattr(integration, "_try_fetch_content", fetch)
+    monkeypatch.setattr(archive_today.HeadedBrowser, "_get", browser_get)
+    return integration
+
+
+async def test_drain_drops_missing_captures(buffer, monkeypatch):
+    missing, fine = "https://archive.ph/iUOsyhttps://archive.ph/eNsx3", "https://archive.ph/uTVE4"
+    buffer.add(missing)
+    buffer.add(fine)
+    integration = _integration(monkeypatch, {missing: archive_today.NOT_FOUND,
+                                             fine: archive_today.CONTENT})
+    # Only the one it got counts as retrieved; the missing one is dropped all the same
+    assert await integration._drain_buffer(session=None) == 1
+    assert buffer.urls() == []
+
+
+async def test_drain_gives_up_on_what_keeps_failing(buffer, monkeypatch):
+    stuck = "https://archive.ph/AbCdE"
+    buffer.add(stuck)
+    states = {stuck: archive_today.BLOCKED}
+    integration = _integration(monkeypatch, states)
+    for _ in range(archive_today.MAX_DRAIN_FAILURES - 1):
+        await integration._drain_buffer(session=None)
+        assert buffer.urls() == [stuck]
+    # A round the gate cuts short does not count
+    states[stuck] = archive_today.GATE
+    await integration._drain_buffer(session=None)
+    assert buffer.urls() == [stuck]
+    states[stuck] = archive_today.BLOCKED
+    await integration._drain_buffer(session=None)
+    assert buffer.urls() == []

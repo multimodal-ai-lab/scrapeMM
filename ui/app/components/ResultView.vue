@@ -17,6 +17,10 @@ const props = defineProps<{
   success?: boolean
   // A screenshot's media descriptor; stored results keep it with their content
   screenshot?: any | null
+  // For a stored result: the figures of its content, and how to get the content itself,
+  // which then comes only once the card is opened (a job's results run to megabytes)
+  stats?: any | null
+  loadContent?: () => Promise<any>
   // The server's classification (see useOutcome.ts); derived here when absent
   outcome?: string | null
   outcomeKind?: string | null
@@ -33,11 +37,31 @@ function toggle() {
   if (props.collapsible) open.value = !open.value
 }
 
+// The content as given, or as fetched on opening
+const loaded = ref<any>(null)
+const loadingContent = ref(false)
+const loadError = ref('')
+const shown = computed(() => props.content ?? loaded.value)
+
+async function ensureContent() {
+  if (!open.value || shown.value || !props.loadContent || loadingContent.value) return
+  loadingContent.value = true
+  loadError.value = ''
+  try {
+    loaded.value = await props.loadContent()
+  } catch (e: any) {
+    loadError.value = e.message
+  } finally {
+    loadingContent.value = false
+  }
+}
+watch(open, ensureContent, { immediate: true })
+
 /** Splits the sequence into text runs and media items, in order. */
 const parts = computed(() => {
-  const text: string = props.content?.multimodal || ''
+  const text: string = shown.value?.multimodal || ''
   if (!text) return []
-  const items: any[] = props.content?.items || []
+  const items: any[] = shown.value?.items || []
   const byRef = new Map(items.map((item) => [item.ref, item]))
   const result: Array<{ kind: 'text', value: string } | { kind: 'media', item: any }> = []
 
@@ -67,13 +91,13 @@ function mediaUrl(item: any) {
   return `${apiBase()}${item.media_url}?token=${encodeURIComponent(token.value || '')}`
 }
 
-const screenshotItem = computed(() => props.screenshot || props.content?.screenshot || null)
+const screenshotItem = computed(() => props.screenshot || shown.value?.screenshot || null)
 
 const tabs = computed(() => {
   const available = []
-  if (props.content?.multimodal) available.push({ label: 'Multimodal', slot: 'multimodal', icon: 'i-fa7-solid-photo-film' })
-  if (props.content?.markdown) available.push({ label: 'Markdown', slot: 'markdown', icon: 'i-fa7-solid-align-left' })
-  if (props.content?.html) available.push({ label: 'HTML', slot: 'html', icon: 'i-fa7-solid-code' })
+  if (shown.value?.multimodal) available.push({ label: 'Multimodal', slot: 'multimodal', icon: 'i-fa7-solid-photo-film' })
+  if (shown.value?.markdown) available.push({ label: 'Markdown', slot: 'markdown', icon: 'i-fa7-solid-align-left' })
+  if (shown.value?.html) available.push({ label: 'HTML', slot: 'html', icon: 'i-fa7-solid-code' })
   if (screenshotItem.value) available.push({ label: 'Screenshot', slot: 'screenshot', icon: 'i-fa7-solid-camera' })
   return available
 })
@@ -95,8 +119,28 @@ const look = computed(() => {
  * opened the playground. The media manifest already carries a size per item, so this
  * costs nothing to compute.
  */
+const ICONS: Record<string, string> = {
+  image: 'i-fa7-solid-image',
+  video: 'i-fa7-solid-film',
+  audio: 'i-fa7-solid-volume-high',
+}
+
 const stats = computed(() => {
-  const items: any[] = props.content?.items || []
+  // Not loaded (yet): the figures the server worked out for the header
+  if (!shown.value && props.stats) {
+    return {
+      media: props.stats.media,
+      bytes: props.stats.bytes,
+      unsized: props.stats.unsized,
+      characters: props.stats.characters,
+      words: null as number | null,
+      kinds: Object.entries(props.stats.kinds as Record<string, number>).map(([kind, count]) => ({
+        kind, count, icon: ICONS[kind] || 'i-fa7-solid-file',
+      })),
+      htmlBytes: props.stats.html_bytes,
+    }
+  }
+  const items: any[] = shown.value?.items || []
 
   const byKind: Record<string, number> = {}
   let bytes = 0
@@ -109,24 +153,18 @@ const stats = computed(() => {
 
   // The longest format present stands in for "how much text": markdown and the
   // multimodal rendering are the same prose, and HTML inflates it with markup.
-  const text = props.content?.markdown || props.content?.multimodal || ''
-
-  const ICONS: Record<string, string> = {
-    image: 'i-fa7-solid-image',
-    video: 'i-fa7-solid-film',
-    audio: 'i-fa7-solid-volume-high',
-  }
+  const text = shown.value?.markdown || shown.value?.multimodal || ''
 
   return {
     media: items.length,
     bytes,
     unsized,
     characters: text.length,
-    words: text ? text.trim().split(/\s+/).length : 0,
+    words: (text ? text.trim().split(/\s+/).length : 0) as number | null,
     kinds: Object.entries(byKind).map(([kind, count]) => ({
       kind, count, icon: ICONS[kind] || 'i-fa7-solid-file',
     })),
-    htmlBytes: props.content?.html ? new Blob([props.content.html]).size : 0,
+    htmlBytes: shown.value?.html ? new Blob([shown.value.html]).size : 0,
   }
 })
 
@@ -203,7 +241,7 @@ function compact(n: number): string {
 
             <span
               v-if="stats.characters" class="inline-flex items-center gap-1 tabular-nums"
-              :title="`${stats.characters.toLocaleString()} characters, ${stats.words.toLocaleString()} words`"
+              :title="`${stats.characters.toLocaleString()} characters${stats.words != null ? `, ${stats.words.toLocaleString()} words` : ''}`"
             >
               <UIcon name="i-fa7-solid-align-left" class="size-3" />
               {{ compact(stats.characters) }} chars
@@ -235,6 +273,9 @@ function compact(n: number): string {
       </div>
     </template>
 
+    <!-- Rendered only while open: a job of many results renders none of their text until
+         somebody looks at one -->
+    <template v-if="open">
     <div v-if="errorList.length" class="space-y-2 mb-4">
       <!-- Yellow where the target was to blame, red where scrapeMM was. A method's error
            that did not decide the outcome -- another method retrieved the page, or found
@@ -249,8 +290,8 @@ function compact(n: number): string {
       />
     </div>
 
-    <p v-if="content?.truncated?.length" class="text-xs text-dimmed mb-3">
-      Stored content was truncated ({{ content.truncated.join(', ') }}) to keep the job
+    <p v-if="shown?.truncated?.length" class="text-xs text-dimmed mb-3">
+      Stored content was truncated ({{ shown.truncated.join(', ') }}) to keep the job
       history small. Retrieve the URL again for the full version.
     </p>
 
@@ -276,11 +317,11 @@ function compact(n: number): string {
       </template>
       <template #markdown>
         <div class="pt-3 max-w-prose">
-          <MarkdownView :source="content.markdown" />
+          <MarkdownView :source="shown.markdown" />
         </div>
       </template>
       <template #html>
-        <pre class="whitespace-pre-wrap text-xs pt-3 overflow-x-auto">{{ content.html }}</pre>
+        <pre class="whitespace-pre-wrap text-xs pt-3 overflow-x-auto">{{ shown.html }}</pre>
       </template>
       <template #screenshot>
         <!-- No link to open it on its own: its address carries the API key, which would
@@ -294,6 +335,13 @@ function compact(n: number): string {
       </template>
     </UTabs>
 
+    <div v-else-if="loadingContent" class="space-y-2">
+      <USkeleton class="h-8 w-64" />
+      <USkeleton class="h-4 w-full" />
+      <USkeleton class="h-4 w-5/6" />
+    </div>
+    <UAlert v-else-if="loadError" color="error" variant="subtle" :description="loadError" />
     <p v-else-if="!errorList.length" class="text-sm text-muted">No content.</p>
+    </template>
   </UCard>
 </template>

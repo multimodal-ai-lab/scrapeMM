@@ -50,6 +50,15 @@ if HOST_DIR and not re.match(r"^([A-Za-z]:)?[\\/]", HOST_DIR):
 _fingerprint: Optional[str] = None
 
 
+def open_registry() -> None:
+    """Connects to the media registry, migrating it first if an older ezMM made it."""
+    if item_registry.conn is None:
+        started = time.time()
+        item_registry.connect()
+        if (took := time.time() - started) > 5:
+            logger.info(f"Opened the media registry in {took:.0f} s (migrated, presumably).")
+
+
 def registry_root() -> Path:
     return Path(item_registry.path)
 

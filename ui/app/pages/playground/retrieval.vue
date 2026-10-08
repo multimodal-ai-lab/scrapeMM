@@ -7,7 +7,7 @@ const route = useRoute()
 // Prefilled when arriving from elsewhere, e.g. a search result's "Retrieve"
 const input = ref((route.query.url as string) || '')
 const outputFormat = ref('multimodal')
-const useCache = ref(true)
+const useCache = ref(false)
 const strip = ref(false)
 const screenshot = ref(false)
 const prioritize = ref('completeness')

@@ -78,18 +78,39 @@ def test_explicit_preference_wins(monkeypatch, server_registry):
     assert media_module.resolve_mode(info, preference="download") == "download"
 
 
-async def test_shared_mode_keeps_references_untouched(monkeypatch, server_registry):
-    monkeypatch.setattr(item_registry, "path", server_registry, raising=False)
+@pytest.fixture
+def own_registry(tmp_path):
+    """This process' ezMM registry, for the test, in a directory of its own -- shared with
+    the "server", whose fingerprint it carries. ezMM resolves the paths it stores against
+    the registry's root, so the registry has to really be there, not just be pointed at."""
+    previous = item_registry.path
+    root = tmp_path / "shared_media"
+    (root / "image").mkdir(parents=True)
+    (root / media_module.FINGERPRINT_FILENAME).write_text(FINGERPRINT, encoding="utf-8")
+    item_registry.close()
+    item_registry.set_path(root)
+    yield root
+    item_registry.close()
+    item_registry.set_path(previous)
+
+
+async def test_shared_mode_keeps_references_untouched(own_registry):
+    from ezmm import Image
+    from PIL import Image as PillowImage
+    image = Image(pillow_image=PillowImage.new("RGB", (300, 300), "purple"),
+                  source_url="https://example.com/a.jpg")
+    image.relocate(move_not_copy=True)  # Where the server keeps its media
     content = ContentPayload(
-        multimodal="before <image:7> after",
-        items=[ItemDescriptor(ref="<image:7>", kind="image", id=7)])
+        multimodal=f"before {image.reference} after",
+        items=[ItemDescriptor(ref=image.reference, kind="image", id=image.id,
+                              path=str(image.file_path))])
 
     # No session or base URL is needed: shared mode must not touch the network
     sequence = await media_module.resolve_content(
-        content, RegistryInfo(root=str(server_registry), fingerprint=FINGERPRINT,
+        content, RegistryInfo(root=str(own_registry), fingerprint=FINGERPRINT,
                               writable_by_client=True),
         session=None, base_url="", headers={}, preference="shared")
-    assert "<image:7>" in str(sequence)
+    assert image.reference in str(sequence)
 
 
 def test_remap_rewrites_every_reference_once():

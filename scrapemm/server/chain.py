@@ -42,6 +42,10 @@ Semantics, as `resolve()` and the engine apply them
   integration's own verdict (unavailable, blocked, ...) stands. The archive methods of a
   platform URL also share a time budget (`engine.PLATFORM_ARCHIVE_BUDGET`), so that they
   add seconds to a URL the platform already refused, not minutes.
+* **No archives for platforms they do not preserve.** The archive methods are skipped
+  for the platforms in `ARCHIVES_USELESS_FOR`: neither the Wayback Machine nor Perma.cc
+  keeps YouTube's videos (their captures hold the player page, thumbnails and comments),
+  so looking there only delays the platform's own verdict.
 * **Archive URLs are not looked up in archives.** For a URL of an archive service itself
   (web.archive.org, perma.cc, archive.today, ...) the archive methods are skipped.
 * **Outcomes.** The first method whose result passes the checks (not empty, no CAPTCHA,
@@ -282,6 +286,10 @@ def match_exception(host: str, exceptions: list[DomainRule]) -> Optional[DomainR
 # Integrations whose URLs are archives themselves, which the archive stage skips
 ARCHIVE_INTEGRATIONS = {"internet archive", "perma.cc", "archive.today", "ghostarchive"}
 
+# Platforms whose content the archive services do not preserve: their URLs skip the
+# archive stage. Not TikTok: Wayback captures of TikTok videos do hold the video.
+ARCHIVES_USELESS_FOR = {"YouTube"}
+
 # Platform URLs whose content is a video: an archived copy of one counts only if it holds
 # the video (see `engine._unusable_platform_copy()`). A Wayback capture of a YouTube watch
 # page has the thumbnails and the comments, never the video.
@@ -445,6 +453,7 @@ def resolve(url: str, methods: Literal["auto"] | list[str] = "auto",
     domain = get_domain(url) or ""
     plan = Plan(domain=domain, integrations=get_integrations_for_url(url))
     archive_url = any(name.lower() in ARCHIVE_INTEGRATIONS for name in plan.integrations)
+    unarchived = next((n for n in plan.integrations if n in ARCHIVES_USELESS_FOR), None)
 
     if chain is not None:
         order = normalize_order([canonical(s["method"]) for s in chain])
@@ -490,6 +499,8 @@ def resolve(url: str, methods: Literal["auto"] | list[str] = "auto",
                 plan.skipped.append((key, "not available yet"))
             elif archive_url:
                 plan.skipped.append((key, "the URL is an archive itself"))
+            elif unarchived:
+                plan.skipped.append((key, f"archives do not preserve {unarchived}'s videos"))
             elif key == "wayback" and not is_enabled("Internet Archive"):
                 plan.skipped.append((key, "needs the Internet Archive integration, which is off"))
             elif key == "perma_cc" and not is_enabled("Perma.cc"):

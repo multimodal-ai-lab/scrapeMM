@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import atexit
 import json
 import logging
@@ -70,6 +71,8 @@ def _browser_args() -> list[str]:
         "--disable-infobars",
         "--no-first-run",
         "--no-default-browser-check",
+        # The HTTP cache, bounded: archive replays and media pages fill it fast
+        f"--disk-cache-size={DISK_CACHE_BYTES}",
         *_fill_screen_args(),
     ]
 
@@ -191,6 +194,179 @@ def _forget_open_tabs(path: Path) -> None:
     import shutil
     with suppress(OSError):
         shutil.rmtree(path / "Default" / "Sessions")
+
+
+# --- Bounded storage of archive replays --------------------------------------------------
+# ReplayWeb.page (Perma.cc's rejouer.perma.cc, Ghostarchive) keeps every archive it
+# replays in its origin's IndexedDB and never lets go of it: on the production server,
+# rejouer.perma.cc's had grown to 50 GB of a 52 GB profile. A replay fetches its archive
+# again when the store is gone, and the scrapeMM cache keeps finished results for good,
+# so emptying it costs one slower first retrieval per capture.
+DISK_CACHE_BYTES = 1024 ** 3
+REPLAY_ORIGINS = ("https://rejouer.perma.cc", "https://ghostarchive.org", "https://replayweb.page")
+# An origin storing more than this in IndexedDB is emptied too, replay or not
+ORIGIN_STORAGE_CAP = 2 * 1024 ** 3
+# How often the running browser's replay storage is looked at, see `_watch_replay_storage()`
+STORAGE_CHECK_INTERVAL = 45 * 60
+# The pages through which each replay origin is used (its frames sit inside them)
+_REPLAY_PAGE_HOSTS = {"https://rejouer.perma.cc": ("perma.cc", "rejouer.perma.cc"),
+                      "https://ghostarchive.org": ("ghostarchive.org",),
+                      "https://replayweb.page": ("replayweb.page",)}
+
+
+def _indexeddb_entries(profile: Path, origin: str) -> list[Path]:
+    """The exact IndexedDB paths of an origin in a profile: Chromium names them after
+    the origin ("https_rejouer.perma.cc_0", with ".indexeddb.leveldb" and
+    ".indexeddb.blob" in older layouts)."""
+    scheme, host = origin.split("://", 1)
+    base = profile / "Default" / "IndexedDB" / f"{scheme}_{host}_0"
+    return [base, base.with_name(base.name + ".indexeddb.leveldb"),
+            base.with_name(base.name + ".indexeddb.blob")]
+
+
+def _size(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            with suppress(OSError):
+                total += os.path.getsize(os.path.join(root, name))
+    return total
+
+
+def _gb(size: int) -> str:
+    return f"{size / 1024 ** 3:.1f} GB" if size >= 1024 ** 3 else f"{size / 1024 ** 2:.0f} MB"
+
+
+def _forget_replay_storage(profile: Path) -> None:
+    """Deletes, before the browser opens the profile, the IndexedDB of the replay origins
+    and of any origin above `ORIGIN_STORAGE_CAP`. Exactly those directories: cookies,
+    logins and every other origin's storage stay."""
+    import shutil
+    directory = profile / "Default" / "IndexedDB"
+    if not directory.is_dir():
+        return
+    doomed = [entry for origin in REPLAY_ORIGINS for entry in _indexeddb_entries(profile, origin)
+              if entry.exists()]
+    with suppress(OSError):
+        for entry in directory.iterdir():
+            if entry not in doomed and entry.is_dir() and _size(entry) > ORIGIN_STORAGE_CAP:
+                doomed.append(entry)
+    freed = 0
+    for entry in doomed:
+        size = _size(entry)
+        try:
+            shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
+            freed += size
+        except OSError:
+            logger.warning(f"Could not delete the browser storage {entry}.", exc_info=True)
+    if freed:
+        logger.info(f"Freed {_gb(freed)} of archive replay storage in the "
+                    f"browser profile ({', '.join(e.name for e in doomed)}).")
+
+
+async def _clear_origin_storage(browser: Browser, origin: str) -> None:
+    """Empties an origin's IndexedDB, CacheStorage and service workers in the running
+    browser (CDP Storage.clearDataForOrigin), so it never finds files deleted under it.
+    The browser target has no storage partition to clear (it answers "Internal error"),
+    so the call goes through a blank tab opened for it."""
+    port = urlparse(browser.get_endpoint_url()).port
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"http://127.0.0.1:{port}/json/version",
+                               timeout=aiohttp.ClientTimeout(total=5)) as response:
+            ws_url = (await response.json(content_type=None))["webSocketDebuggerUrl"]
+        async with session.ws_connect(ws_url, max_msg_size=0) as ws:
+            ids = iter(range(1, 1000))
+
+            async def call(method: str, params: dict, session_id: str = None) -> dict:
+                message_id = next(ids)
+                await ws.send_json({"id": message_id, "method": method, "params": params,
+                                    **({"sessionId": session_id} if session_id else {})})
+                async for message in ws:
+                    data = message.json()
+                    if data.get("id") == message_id:
+                        if "error" in data:
+                            raise RuntimeError(f"{method}: {data['error'].get('message')}")
+                        return data.get("result", {})
+                raise ConnectionError("The browser closed the DevTools connection.")
+
+            async with asyncio.timeout(60):
+                target = (await call("Target.createTarget",
+                                     {"url": "about:blank", "background": True}))["targetId"]
+                try:
+                    attached = await call("Target.attachToTarget",
+                                          {"targetId": target, "flatten": True})
+                    await call("Storage.clearDataForOrigin", {
+                        "origin": origin,
+                        "storageTypes": "indexeddb,cache_storage,service_workers",
+                    }, attached["sessionId"])
+                finally:
+                    with suppress(Exception):
+                        await call("Target.closeTarget", {"targetId": target})
+
+
+async def _origin_in_use(browser: Browser, origin: str) -> bool:
+    """Whether a tab shows a page through which the origin is used (a replay running)."""
+    port = urlparse(browser.get_endpoint_url()).port
+    hosts = _REPLAY_PAGE_HOSTS.get(origin, (urlparse(origin).hostname,))
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"http://127.0.0.1:{port}/json/list",
+                               timeout=aiohttp.ClientTimeout(total=5)) as response:
+            targets = await response.json(content_type=None)
+    # Pages only: the origin's service worker is a target of its own, and stays listed
+    # long after the last replay closed
+    return any(t.get("type") == "page"
+               and (urlparse(t.get("url", "")).hostname or "").removeprefix("www.") in hosts
+               for t in targets)
+
+
+async def _watch_replay_storage() -> None:
+    """While the server runs: every `STORAGE_CHECK_INTERVAL`, empties the storage of each
+    replay origin above `ORIGIN_STORAGE_CAP`, once no tab uses it."""
+    while True:
+        await asyncio.sleep(STORAGE_CHECK_INTERVAL)
+        with suppress(Exception):
+            await check_replay_storage()
+
+
+async def check_replay_storage() -> dict[str, int]:
+    """One round of `_watch_replay_storage()`. Returns the bytes freed per origin."""
+    browser, profile = HeadedBrowser._browser, _resolve_profile_dir()
+    freed: dict[str, int] = {}
+    if browser is None or browser.stopped or not profile:
+        return freed
+    for origin in REPLAY_ORIGINS:
+        entries = _indexeddb_entries(Path(profile), origin)
+        size = sum(await asyncio.gather(*(asyncio.to_thread(_size, e) for e in entries
+                                          if e.exists())))
+        if size <= ORIGIN_STORAGE_CAP:
+            continue
+        try:
+            if await _origin_in_use(browser, origin):
+                logger.info(f"{origin} stores {_gb(size)} in the browser; a "
+                            f"replay is open, so it is emptied at the next check.")
+                continue
+            await _clear_origin_storage(browser, origin)
+        except Exception as e:
+            logger.warning(f"Could not empty the browser storage of {origin}: "
+                           f"{type(e).__name__}: {e}")
+            continue
+        after = sum(await asyncio.gather(*(asyncio.to_thread(_size, e) for e in entries
+                                           if e.exists())))
+        freed[origin] = size - after
+        logger.info(f"Emptied the browser storage of {origin}: {_gb(size)}, "
+                    f"{_gb(size - after)} freed.")
+    return freed
+
+
+_storage_watch: Optional[asyncio.Task] = None
+
+
+def _start_storage_watch() -> None:
+    global _storage_watch
+    if _storage_watch is None or _storage_watch.done():
+        _storage_watch = asyncio.ensure_future(_watch_replay_storage())
 
 
 def _process_alive(pid: int) -> bool:
@@ -671,6 +847,73 @@ _wait_for_first_target_on_create()
 DOCUMENT_WAIT = 60
 # Seconds after which a page that shows no bot check is taken for what it is
 DOCUMENT_SETTLE = 5
+# Seconds a file the browser was served (a spreadsheet) gets to turn into its download
+DOWNLOAD_AFTER_RESPONSE_WAIT = 15
+
+
+async def _fetch_in_browser(page: Page, url: str) -> tuple[Optional[bytes], Optional[str], str]:
+    """`url` fetched through the browser's network stack (Network.loadNetworkResource),
+    from a frame on its site, see `HeadedBrowser._document_bytes()`. Returns (bytes or
+    None, content type, what happened)."""
+    site = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+    try:
+        if not page.url.startswith(site + "/"):
+            with suppress(PlaywrightError):
+                await page.goto(site + "/", wait_until="domcontentloaded",
+                                timeout=DOCUMENT_WAIT * 1000)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + DOCUMENT_WAIT
+            while await _shows_bot_check(page) and loop.time() < deadline:
+                await asyncio.sleep(1)  # Its check passes by the same JavaScript
+        session = await page.context.new_cdp_session(page)
+    except Exception as e:
+        return None, None, f"{type(e).__name__}: {str(e).splitlines()[0][:100]}"
+    stream = None
+    try:
+        frame_id = (await session.send("Page.getFrameTree"))["frameTree"]["frame"]["id"]
+        resource = (await asyncio.wait_for(session.send("Network.loadNetworkResource", {
+            "frameId": frame_id, "url": url,
+            "options": {"disableCache": False, "includeCredentials": True}}),
+            timeout=DOCUMENT_WAIT))["resource"]
+        stream = resource.get("stream")
+        if not resource.get("success") or not stream:
+            reason = f"HTTP {resource.get('httpStatusCode')} {resource.get('netErrorName', '')}"
+            return None, None, reason.strip()
+        headers = {k.lower(): v for k, v in (resource.get("headers") or {}).items()}
+        chunks = []
+        while True:
+            chunk = await asyncio.wait_for(
+                session.send("IO.read", {"handle": stream, "size": 1 << 20}), timeout=60)
+            piece = chunk.get("data", "")
+            chunks.append(base64.b64decode(piece) if chunk.get("base64Encoded")
+                          else piece.encode("latin-1"))
+            if chunk.get("eof"):
+                break
+        return b"".join(chunks), headers.get("content-type"), "read"
+    except Exception as e:
+        return None, None, f"{type(e).__name__}: {str(e).splitlines()[0][:100]}"
+    finally:
+        if stream:
+            with suppress(Exception):
+                await session.send("IO.close", {"handle": stream})
+        with suppress(Exception):
+            await session.detach()
+
+
+class _BotCheckAgain(RetrievalFailed):
+    """A document, asked for again outside the page, was answered with its bot check."""
+
+
+def _complete_file(data: Optional[bytes], headers: dict) -> bool:
+    """Whether `data` is the whole file the headers announce (a PDF ends with %%EOF)."""
+    if not data:
+        return False
+    length = headers.get("content-length", "")
+    if length.isdigit():
+        return len(data) == int(length)
+    if "pdf" in headers.get("content-type", ""):
+        return data.rstrip().endswith(b"%%EOF")
+    return False
 
 
 async def _shows_bot_check(page: Page) -> bool:
@@ -684,7 +927,11 @@ async def _shows_bot_check(page: Page) -> bool:
 
 # Statuses of a page's final document that mean the site's server (or its CDN) failed
 # rather than answered. Not 503: bot checks answer with it (insse.ro, older Cloudflare).
-GATEWAY_ERRORS = (502, 504)
+# Server errors whose page is never content: the server's own (500, 503), a gateway's
+# (502, 504) and Cloudflare's when the server behind it fails (520-526, 530, e.g. "error
+# code: 522" when the origin times out). A 503 may also be Cloudflare's challenge, which
+# is told apart (see `_failed_server()`).
+GATEWAY_ERRORS = (500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 530)
 
 
 def _note_served_document(response, page: Page, served: list[str],
@@ -700,6 +947,7 @@ def _note_served_document(response, page: Page, served: list[str],
         if (not served and response.ok
                 and is_document_content_type(response.headers.get("content-type"))):
             served.append(response.headers.get("content-type"))
+            page._scrapemm_served_response = response  # Its body may hold the whole file
     except Exception:
         pass  # Observing only; never the reason a retrieval fails
 
@@ -975,6 +1223,7 @@ class HeadedBrowser(RetrievalIntegration):
                     self._cleanup_resources()
                 await self._start_browser_locked(playwright)
                 HeadedBrowser._generation += 1
+                _start_storage_watch()
             return HeadedBrowser._browser, HeadedBrowser._generation
 
     async def _start_browser_locked(self, playwright: Optional[Playwright] = None):
@@ -1005,6 +1254,7 @@ class HeadedBrowser(RetrievalIntegration):
         persistent = _resolve_profile_dir()
         if persistent:
             _forget_open_tabs(Path(persistent))
+            _forget_replay_storage(Path(persistent))
         attempts = [persistent, persistent, None] if persistent else [None, None]
         for i, profile in enumerate(attempts):
             existing = _chromium_pids()
@@ -1291,13 +1541,21 @@ class HeadedBrowser(RetrievalIntegration):
                         return document
                 await self._pass_cloudflare(page)
                 await self._settle_after_goto(page)
-                if (self.fails_on_not_found and statuses
-                        and statuses[-1] in GATEWAY_ERRORS and not served):
-                    # The site (or its CDN) failed: its error page is no content
-                    raise RetrievalFailed(f"{url} answered HTTP {statuses[-1]}.")
+                if (statuses and statuses[-1] in GATEWAY_ERRORS and not served
+                        and not await _shows_cloudflare_challenge(page)):
+                    # The server (or its CDN) failed: its error page is no content. For
+                    # an archive, it is the archive that is down, not the capture gone.
+                    if self.fails_on_not_found:
+                        raise RetrievalFailed(f"{url} answered HTTP {statuses[-1]}.")
+                    raise RetrievalFailed(f"{self.name} is unavailable right now: it answered "
+                                          f"HTTP {statuses[-1]} for {url}.")
 
                 if target := await self._extract_content(page):
                     shown_url = getattr(page, "url", "") or ""  # What the content came from
+                    # Before reading and before any screenshot: never content, and on
+                    # some pages nearly all of the HTML (see `remove_consent_dialogs()`)
+                    if get_config_var("remove_consent_dialogs", True) is not False:
+                        await remove_consent_dialogs(page)
                     await annotate_rendered_media(target)
                     html, source = await self._html_and_source(target, page)
                     if html:
@@ -1377,17 +1635,45 @@ class HeadedBrowser(RetrievalIntegration):
         from scrapemm.server.download import documents
         from scrapemm.common import UnsupportedDomainError
         loop = asyncio.get_running_loop()
-        start = loop.time()
-        while not downloads and not served and loop.time() < start + DOCUMENT_WAIT:
-            await asyncio.sleep(0.5)
-            if loop.time() - start >= DOCUMENT_SETTLE and not await _shows_bot_check(page):
-                break  # A page and no file: asked for directly, below
         name = urlparse(url).path.rstrip("/").rsplit("/", 1)[-1] or urlparse(url).netloc
-        if downloads:
-            name = downloads[0].suggested_filename or name
-            data, content_type = await self._document_bytes(page, url, download=downloads[0])
-        elif served:
-            data, content_type = await self._document_bytes(page, url)
+        for attempt in range(2):
+            start = loop.time()
+            while not downloads and not served and loop.time() < start + DOCUMENT_WAIT:
+                await asyncio.sleep(0.5)
+                if loop.time() - start >= DOCUMENT_SETTLE and not await _shows_bot_check(page):
+                    break  # A page and no file: asked for directly, below
+            # A file the browser does not show (a spreadsheet) arrives as a download just
+            # after its response: under load, seconds after. Its download beats asking again.
+            if served and not downloads and "pdf" not in served[0]:
+                settle = loop.time() + DOWNLOAD_AFTER_RESPONSE_WAIT
+                while not downloads and loop.time() < settle:
+                    await asyncio.sleep(0.5)
+            if not downloads and not served:
+                break
+            try:
+                download = downloads[0] if downloads else None
+                if download is not None:
+                    name = download.suggested_filename or name
+                data, content_type = await self._document_bytes(page, url, download=download)
+                break
+            except _BotCheckAgain as e:
+                if attempt:
+                    raise RetrievalFailed(f"The document at {url} could not be downloaded: "
+                                          f"the bot check in front of it answered again "
+                                          f"({e}).") from e
+                # Asked for outside the page, the file met the bot check once more. In the
+                # browser the check passes (by its JavaScript): loaded once more, the file
+                # arrives as a download or in the viewer
+                logger.info(f"Asked for again, {url} answered with its bot check ({e}); "
+                            f"loading it in the browser once more.")
+                downloads.clear()
+                served.clear()
+                with suppress(AttributeError):
+                    del page._scrapemm_served_response
+                with suppress(PlaywrightError):
+                    await page.goto(url, wait_until="commit", timeout=DOCUMENT_WAIT * 1000)
+        if downloads or served:
+            pass  # Read above
         elif await _shows_bot_check(page):
             raise RetrievalFailed(f"{url} should deliver a document, but the bot check in "
                                   f"front of it did not let the browser through.")
@@ -1417,38 +1703,87 @@ class HeadedBrowser(RetrievalIntegration):
 
     @staticmethod
     async def _document_bytes(page: Page, url: str, download=None) -> tuple[bytes, Optional[str]]:
-        """The bytes of the document `url`, taken from the browser. A download's file is
-        copied out at once: Playwright removes its temporary file when the connection that
-        saw the download is replaced, which under load happened before the file was read
-        (FileNotFoundError, and the suite's spreadsheet came out unread). Failing that,
-        the file is requested again with the browser's cookies, which got past the bot
-        check by now. Returns (bytes, content type, if known)."""
-        # A PDF shown in the viewer is not taken from `response`: the viewer loads it in
-        # ranges, and the body the browser keeps was cut short. Requested again instead.
+        """The bytes of the document `url`, taken from the browser, from the first source
+        that holds the actual file (see `documents.is_file_of_type()`):
+
+        * the download, copied out at once -- Playwright removes its temporary file when
+          the connection that saw the download is replaced, which under load happened
+          before the file was read;
+        * what the viewer was served, whole unless the viewer cut it short to load ranges;
+        * the file fetched by the browser's own network stack, from a frame on the file's
+          site: the page itself if it shows the site, else the site's home page, loaded
+          for it (from about:blank, where a download leaves the page, the site's cookies
+          are not sent). The browser's TLS fingerprint and its clearance get through where
+          Playwright's request context meets the check again (insse.ro: HTTP 503 every
+          time, while the browser got the file);
+        * the file asked for again with the browser's cookies and user agent.
+
+        Under load, any of them turned out to hold the bot check's page instead of the
+        file ("File is not a zip file"). If none holds the file but one met the bot check,
+        `_BotCheckAgain` lets the caller load the URL in the browser once more. Returns
+        (bytes, content type, if known)."""
+        from scrapemm.server.download import documents
+        kind = documents.document_extension(url)
+        failures = []
+
+        def usable(data, content_type, source) -> bool:
+            if data and documents.is_file_of_type(data, kind, content_type):
+                return True
+            failures.append(f"{source}: {documents.describe(data, content_type)}")
+            return False
+
         if download is not None:
             target = Path(tempfile.mkdtemp(prefix="scrapemm-document-")) / "file"
             try:
                 await asyncio.wait_for(download.save_as(target), DOCUMENT_WAIT)
-                return await asyncio.to_thread(target.read_bytes), None
+                data = await asyncio.to_thread(target.read_bytes)
+                if usable(data, None, "the download"):
+                    return data, None
             except Exception as e:
-                logger.info(f"Could not take the download of {url} from the browser "
-                            f"({type(e).__name__}); requesting it again.")
+                failures.append(f"the download: {type(e).__name__}")
             finally:
                 with suppress(Exception):
                     await download.delete()
                 with suppress(OSError):
                     target.unlink()
                     target.parent.rmdir()
+        if response := getattr(page, "_scrapemm_served_response", None):
+            content_type = response.headers.get("content-type")
+            try:
+                data = await asyncio.wait_for(response.body(), DOCUMENT_WAIT)
+                if _complete_file(data, response.headers) and usable(data, content_type,
+                                                                      "the viewer"):
+                    return data, content_type
+            except Exception as e:
+                failures.append(f"the viewer: {type(e).__name__}: {str(e).splitlines()[0][:100]}")
+        data, content_type, outcome = await _fetch_in_browser(page, url)
+        if data is not None and usable(data, content_type, "the browser's network"):
+            return data, content_type
+        if data is None:
+            failures.append(f"the browser's network: {outcome}")
         try:
             # Certificate errors ignored, as the browser itself ignores them (see
-            # `_browser_args()`): insse.ro serves an incomplete chain
+            # `_browser_args()`): insse.ro serves an incomplete chain. With the browser's
+            # own user agent: a bot check's clearance may hold only for the agent that
+            # earned it.
+            headers = {}
+            with suppress(Exception):
+                headers["User-Agent"] = await page.evaluate("navigator.userAgent")
             again = await page.context.request.get(url, timeout=DOCUMENT_WAIT * 1000,
-                                                   ignore_https_errors=True)
-            if again.ok and "html" not in again.headers.get("content-type", ""):
-                return await again.body(), again.headers.get("content-type")
-            status = f"HTTP {again.status}, {again.headers.get('content-type')}"
+                                                   ignore_https_errors=True, headers=headers)
+            content_type = again.headers.get("content-type", "")
+            data = await again.body() if again.ok else b""
+            if again.ok and usable(data, content_type, "asked for again"):
+                return data, content_type
+            if not again.ok:
+                failures.append(f"asked for again: HTTP {again.status}, {content_type}")
         except Exception as e:
-            status = f"{type(e).__name__}: {e}"
+            failures.append(f"asked for again: {type(e).__name__}: {e}")
+        status = "; ".join(failures)
+        logger.info(f"No source held the document {url}: {status}.")
+        if any("html" in f or "HTTP 403" in f or "HTTP 429" in f or "HTTP 503" in f
+               for f in failures):
+            raise _BotCheckAgain(status)
         raise RetrievalFailed(f"The document at {url} could not be downloaded ({status}).")
 
     def _after_renderer_crash(self, url: str) -> str:
@@ -1626,6 +1961,61 @@ async def settle_dom(target: Page | Frame, min_text: int = 0) -> None:
                 return
             since = now  # Look again after another stable window
         await asyncio.sleep(DOM_SETTLE_INTERVAL)
+
+
+# Removes the dialogs of known consent platforms (see `util.CONSENT_PLATFORMS`) from a
+# document, and the scroll lock they put on it. Returns [bytes removed, [[id, classes]]].
+_REMOVE_CONSENT_JS = """({ids, prefixes, classes}) => {
+    const roots = new Set();
+    for (const id of ids) { const e = document.getElementById(id); if (e) roots.add(e); }
+    for (const p of prefixes) document.querySelectorAll(`[id^="${p}"]`).forEach(e => roots.add(e));
+    for (const c of classes) for (const e of document.getElementsByClassName(c)) roots.add(e);
+    let bytes = 0;
+    const removed = [];
+    for (const e of roots) {
+        if (!e.isConnected || e === document.documentElement || e === document.body) continue;
+        if (e.querySelector("main, article, [role=main]")) continue;  // Never the content
+        bytes += e.outerHTML.length;
+        removed.push([e.id || "", Array.from(e.classList)]);
+        e.remove();
+    }
+    if (removed.length) {
+        // The scroll lock the platforms put on the document while their dialog shows
+        for (const el of [document.documentElement, document.body]) {
+            if (!el) continue;
+            el.classList.remove("CybotCookiebotDialogActive", "ot-overflow-hidden",
+                                "sp-message-open", "didomi-popup-open", "qc-cmp-ui-showing");
+            if (el.style.overflow === "hidden") el.style.overflow = "";
+            if (el.style.overflowY === "hidden") el.style.overflowY = "";
+        }
+    }
+    return [bytes, removed];
+}"""
+
+
+async def remove_consent_dialogs(page: Page) -> None:
+    """Removes the dialogs of known consent platforms (Cookiebot, OneTrust, Sourcepoint,
+    ...) from the page and its frames (archive replays show the captured page in one),
+    and lifts the scroll lock they put on it. Such a dialog is never content (decided
+    2026-10-08), but may be nearly all of the page: Cookiebot's lists over a thousand
+    vendors, 4.9 of borkenerzeitung.de's 5 MB, which cost seconds to read, parse and
+    convert. Gone, it also no longer covers the screenshot. Only the platforms' exact
+    roots; looser matches are left to `strip`. Best-effort: a frame that fails is skipped."""
+    from scrapemm.server.util import (CONSENT_PLATFORM_CLASSES, CONSENT_PLATFORM_IDS,
+                                      CONSENT_PLATFORM_ID_PREFIXES, consent_platform_of)
+    config = {"ids": sorted(CONSENT_PLATFORM_IDS), "prefixes": list(CONSENT_PLATFORM_ID_PREFIXES),
+              "classes": sorted(CONSENT_PLATFORM_CLASSES)}
+    for frame in getattr(page, "frames", None) or [page]:
+        try:
+            removed_bytes, removed = await frame.evaluate(_REMOVE_CONSENT_JS, config)
+        except Exception:  # Detached or navigating (or a test double): nothing to remove
+            logger.debug(f"Could not look for consent dialogs in {getattr(frame, 'url', '?')}.",
+                         exc_info=True)
+            continue
+        if removed:
+            platforms = sorted({consent_platform_of(i, c) or "?" for i, c in removed})
+            logger.info(f"🍪 Removed the consent dialog of {', '.join(platforms)} "
+                        f"({removed_bytes / 1e6:.2f} MB) from {frame.url[:120]}.")
 
 
 class Browser(HeadedBrowser):

@@ -49,6 +49,11 @@ async def lifespan(app: FastAPI):
     log_api_key()  # Generates one first if the deployment did not set it
     log_summary()
     registry.fingerprint()  # Stamp the media registry so clients can recognise it
+    # Open the media registry now rather than on the first retrieval: a registry from an
+    # older ezMM is migrated on opening (it hashes every file, which takes hours for a
+    # large one). Here that is a startup that says so, not a retrieval that hangs holding
+    # the registry's lock. Run `python -m ezmm migrate` beforehand to keep it short.
+    await asyncio.to_thread(registry.open_registry)
     _warn_if_exposed()
     jobs.prune()
     if stale := jobs.interrupt_unfinished():
@@ -58,12 +63,26 @@ async def lifespan(app: FastAPI):
     # is no reason for the first person to open the dashboard to be the one who pays it.
     warmup = asyncio.create_task(_warm_caches())
     lag_watch = asyncio.create_task(looplag.watch())
+    pruning = asyncio.create_task(_prune_regularly())
     yield
     warmup.cancel()
     lag_watch.cancel()
+    pruning.cancel()
     await close_search_sessions()
     jobs.close()
     logger.info("scrapeMM server stopped.")
+
+
+async def _prune_regularly() -> None:
+    """Keeps the job history within its limits while the server runs, not only at
+    startup: a busy server otherwise grew well past them between restarts."""
+    from .jobs import PRUNE_INTERVAL
+    while True:
+        await asyncio.sleep(PRUNE_INTERVAL)
+        try:
+            await asyncio.to_thread(jobs.prune)
+        except Exception:
+            logger.warning("Could not prune the job history.", exc_info=True)
 
 
 async def _warm_caches() -> None:

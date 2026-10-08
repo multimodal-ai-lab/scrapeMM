@@ -35,6 +35,12 @@ async function load() {
   }
 }
 
+/** One result's content: the job comes without, and a card fetches its own on opening */
+async function loadContent(url: string) {
+  const query = new URLSearchParams({ url })
+  return (await api.get<any>(`/v1/jobs/${route.params.id}/content?${query}`)).content
+}
+
 /** Back to the overview as it was left -- the browser's back, when that is where we
  *  came from; a fresh navigation would start the list over at the top. */
 function backToJobs() {
@@ -195,7 +201,9 @@ onBeforeUnmount(stopFollowing)
           <!-- Collapsed when there are several, so the page is an overview first -->
           <ResultView
             v-if="entry.result" :id="`result-${index}`"
-            :url="entry.url" :content="entry.result.content" :method="entry.result.method"
+            :url="entry.url" :content="null" :stats="entry.result.stats"
+            :load-content="entry.result.has_content ? () => loadContent(entry.url) : undefined"
+            :method="entry.result.method"
             :errors="entry.result.errors" :retrieval-time="entry.result.retrieval_time" :queue-time="entry.result.queue_time"
             :from-cache="entry.result.from_cache" :success="entry.result.success"
             :outcome="entry.result.outcome" :outcome-kind="entry.result.outcome_kind"
