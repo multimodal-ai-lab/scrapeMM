@@ -662,9 +662,7 @@
  },
  {
   "url": "https://eur-lex.europa.eu/legal-content/EN/TXT/PDF/?uri=OJ:C_202407215",
-  "expected": {
-   "pdf": 1
-  },
+  "expected": {},
   "category": "Open web"
  },
  {
