@@ -927,7 +927,11 @@ async def _shows_bot_check(page: Page) -> bool:
 
 # Statuses of a page's final document that mean the site's server (or its CDN) failed
 # rather than answered. Not 503: bot checks answer with it (insse.ro, older Cloudflare).
-GATEWAY_ERRORS = (502, 504)
+# Server errors whose page is never content: the server's own (500, 503), a gateway's
+# (502, 504) and Cloudflare's when the server behind it fails (520-526, 530, e.g. "error
+# code: 522" when the origin times out). A 503 may also be Cloudflare's challenge, which
+# is told apart (see `_failed_server()`).
+GATEWAY_ERRORS = (500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 530)
 
 
 def _note_served_document(response, page: Page, served: list[str],
@@ -1537,10 +1541,14 @@ class HeadedBrowser(RetrievalIntegration):
                         return document
                 await self._pass_cloudflare(page)
                 await self._settle_after_goto(page)
-                if (self.fails_on_not_found and statuses
-                        and statuses[-1] in GATEWAY_ERRORS and not served):
-                    # The site (or its CDN) failed: its error page is no content
-                    raise RetrievalFailed(f"{url} answered HTTP {statuses[-1]}.")
+                if (statuses and statuses[-1] in GATEWAY_ERRORS and not served
+                        and not await _shows_cloudflare_challenge(page)):
+                    # The server (or its CDN) failed: its error page is no content. For
+                    # an archive, it is the archive that is down, not the capture gone.
+                    if self.fails_on_not_found:
+                        raise RetrievalFailed(f"{url} answered HTTP {statuses[-1]}.")
+                    raise RetrievalFailed(f"{self.name} is unavailable right now: it answered "
+                                          f"HTTP {statuses[-1]} for {url}.")
 
                 if target := await self._extract_content(page):
                     shown_url = getattr(page, "url", "") or ""  # What the content came from
