@@ -22,7 +22,7 @@ import PIL.Image
 from PIL import UnidentifiedImageError
 from bs4 import BeautifulSoup, Tag
 from ezmm import MultimodalSequence, Item, Image, Video
-from markdownify import markdownify as md
+from markdownify import MarkdownConverter
 from playwright.async_api import APIRequestContext, Page, Frame
 
 from scrapemm.server.download import download_video, download_image
@@ -640,6 +640,19 @@ async def download_embedded_video(
 async def resolve_media(
         html: str,
         session: Union[aiohttp.ClientSession, "APIRequestContext"],
+        **kwargs
+) -> MultimodalSequence:
+    """Downloads all media contained in the HTML and returns it as a sequence, each
+    medium's element replaced by the item (see `_resolve_media_in()`)."""
+    soup = await _in_html_thread(BeautifulSoup, html, "html.parser")
+    if await _resolve_media_in(soup, session, **kwargs):
+        return MultimodalSequence(await _in_html_thread(str, soup))
+    return MultimodalSequence(html)
+
+
+async def _resolve_media_in(
+        soup: BeautifulSoup,
+        session: Union[aiohttp.ClientSession, "APIRequestContext"],
         url: str | None = None,
         source_element: Union[Frame, Page, None] = None,
         media: Optional[BrowserMedia] = None,
@@ -647,10 +660,11 @@ async def resolve_media(
         on_browser_done: Optional[Callable[[], Awaitable]] = None,
         known_media: Optional["KnownMedia"] = None,
         **kwargs
-) -> MultimodalSequence:
-    """Downloads all media that are contained in the provided HTML.
+) -> bool:
+    """Downloads all media that are contained in the parsed HTML.
     Removes images that are smaller than 256 x 256. Replaces the
-    respective HTML elements with their proper item reference.
+    respective HTML elements with their proper item reference, in place. Returns
+    whether the HTML had any media elements (and was changed).
 
     If the HTML comes from a browser page, `source_element` is the frame it was taken
     from and `media` the page's `BrowserMedia`: media are then taken from the browser,
@@ -677,20 +691,19 @@ async def resolve_media(
     # 1. Identify all potential media elements and their URLs. Parsing, decoding and
     # rewriting the HTML are CPU-bound -- a second and more for a page with hundreds
     # of images -- so they run in a thread, not on the event loop every retrieval shares.
-    def parse() -> tuple[BeautifulSoup, list[Tag], list[Optional[str]]]:
-        parsed = BeautifulSoup(html, "html.parser")
-        elements = _extract_media_elements(parsed)
+    def extract() -> tuple[list[Tag], list[Optional[str]]]:
+        elements = _extract_media_elements(soup)
         # Media in a consent banner are never content: its vendor list may carry
         # thousands of logos, each to be decoded or fetched and registered. Left
         # unresolved, they are dropped like any medium that could not be had; the
         # banner's text stays (stripping it is up to `strip_content()`)
         uris = [str(e.get("src")) if e.get("src") and not _in_consent_platform(e) else None
                 for e in elements]
-        return parsed, elements, uris
+        return elements, uris
 
-    soup, media_elements, media_uris = await _in_html_thread(parse)
+    media_elements, media_uris = await _in_html_thread(extract)
     if not media_elements:
-        return MultimodalSequence(html)
+        return False
 
     # 2. Resolve base64 media. Not when rebuilding from media resolved before: decoded
     # again, they would be registered anew (see `strip_content()`)
@@ -796,15 +809,14 @@ async def resolve_media(
             resolved_media[i] = medium
 
     # 6. Replace or remove elements in the SOUP
-    return MultimodalSequence(await _in_html_thread(
-        _replace_media_elements, soup, media_elements, media_uris, resolved_media))
+    await _in_html_thread(_replace_media_elements, media_elements, media_uris, resolved_media)
+    return True
 
 
-def _replace_media_elements(soup: BeautifulSoup, media_elements: list[Tag],
-                            media_uris: list[Optional[str]],
-                            resolved_media: list[Optional[Item]]) -> str:
-    """Puts each resolved medium's reference in place of its element, removes the
-    elements without one, and returns the resulting HTML."""
+def _replace_media_elements(media_elements: list[Tag], media_uris: list[Optional[str]],
+                            resolved_media: list[Optional[Item]]) -> None:
+    """Puts each resolved medium's reference in place of its element, and removes the
+    elements without one."""
     inserted_url_refs: set[str] = set()
     for i, (element, medium) in enumerate(zip(media_elements, resolved_media)):
         # Check if element is still in the tree
@@ -840,8 +852,6 @@ def _replace_media_elements(soup: BeautifulSoup, media_elements: list[Tag],
             _strip_background_image_style(element)
         else:
             element.decompose()
-
-    return str(soup)
 
 
 def is_url(href: str) -> bool:
@@ -905,9 +915,8 @@ async def to_scraped_content(
         content.markdown = await _in_html_thread(html2md, html)
         return content
 
-    content.multimodal = await to_multimodal_sequence(html, session=session, **kwargs)
-    # After the media: a browser page is closed by then (see `resolve_media()`)
-    content.markdown = await _in_html_thread(html2md, html)
+    content.multimodal, content.markdown = await _to_multimodal_and_markdown(
+        html, session=session, **kwargs)
     return content
 
 
@@ -988,23 +997,39 @@ async def to_multimodal_sequence(
 ) -> MultimodalSequence:
     """Turns scraped HTML content into the corresponding MultimodalSequences
     by resolving media hyperlinks and Base64 encodings and converting to Markdown."""
-    # 0. Preprocess HTML
-    html = preprocess_html(html)
-    assert html is not None
+    return (await _to_multimodal_and_markdown(html, session, with_markdown=False, **kwargs))[0]
 
-    # 1. Resolve media in HTML
-    mms = await resolve_media(html, session=session, **kwargs)
 
-    # 2. Convert resulting (partially replaced) HTML to Markdown
-    text = await _in_html_thread(html2md, mms)
-
-    return MultimodalSequence(text)
+async def _to_multimodal_and_markdown(
+        html: str,
+        session: Union[aiohttp.ClientSession, "APIRequestContext"],
+        with_markdown: bool = True,
+        **kwargs
+) -> tuple[MultimodalSequence, Optional[str]]:
+    """The HTML as a multimodal sequence and, with `with_markdown`, as Markdown (the
+    media as hyperlinks, see `html2md()`). Parsed once for both: on a large page,
+    parsing takes longer than anything else done with it (1.6 s for 5 MB)."""
+    preprocessed = preprocess_html(html)
+    soup = await _in_html_thread(BeautifulSoup, preprocessed, "html.parser")
+    markdown = None
+    if with_markdown:
+        # Of the HTML as scraped, so before the media are put in. Preprocessing rarely
+        # changes it (only text data URIs); then it is parsed a second time
+        markdown = await (_in_html_thread(soup2md, soup) if preprocessed is html
+                          else _in_html_thread(html2md, html))
+    await _resolve_media_in(soup, session=session, **kwargs)
+    return MultimodalSequence(await _in_html_thread(soup2md, soup)), markdown
 
 
 def html2md(html: str | MultimodalSequence) -> str:
     """Converts HTML to Markdown."""
+    return soup2md(BeautifulSoup(str(html), "html.parser"))
+
+
+def soup2md(soup: BeautifulSoup) -> str:
+    """Converts parsed HTML to Markdown, leaving the tree as is."""
     try:
-        markdown = md(str(html), heading_style="ATX")
+        markdown = MarkdownConverter(heading_style="ATX").convert_soup(soup)
         return postprocess_markdown(markdown)
     except RecursionError:
         logger.debug("RecursionError while converting HTML to Markdown.")
