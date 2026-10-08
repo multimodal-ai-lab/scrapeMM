@@ -20,7 +20,7 @@ pytestmark = pytest.mark.server
     ("https://bingekulture.com/wp-content/uploads/2021/08/cropped-cropped-logo.fw-removebg-preview.png?w=48", False),
     # this URL redirects to a webpage
     ("https://www.popularmechanics.com/_assets/design-tokens/fre/static/icons/play.db7c035.svg?primary=%2523ffffff%20%22Play%22",
-     False),  # this is a vector graphic
+     True),  # A vector graphic: rasterized, so it counts as an image
     ("https://pixum-cms.imgix.net/7wL8j3wldZEONCSZB9Up6B/d033b7b6280687ce2e4dfe2d4147ff93/fab_mix_kv_perspektive_foto_liegend_desktop__3_.png?auto=compress,format&trim=false&w=2000",
      True),
     ("https://cdn.pixabay.com/photo/2017/11/08/22/28/camera-2931883_1280.jpg", True),

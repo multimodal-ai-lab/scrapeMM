@@ -49,6 +49,11 @@ async def lifespan(app: FastAPI):
     log_api_key()  # Generates one first if the deployment did not set it
     log_summary()
     registry.fingerprint()  # Stamp the media registry so clients can recognise it
+    # Open the media registry now rather than on the first retrieval: a registry from an
+    # older ezMM is migrated on opening (it hashes every file, which takes hours for a
+    # large one). Here that is a startup that says so, not a retrieval that hangs holding
+    # the registry's lock. Run `python -m ezmm migrate` beforehand to keep it short.
+    await asyncio.to_thread(registry.open_registry)
     _warn_if_exposed()
     jobs.prune()
     if stale := jobs.interrupt_unfinished():

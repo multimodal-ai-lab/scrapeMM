@@ -891,15 +891,18 @@ async def to_scraped_content(
 
 
 class KnownMedia:
-    """Media resolved before, by the URL they were retrieved from. Matches by path too:
+    """Media resolved before, by the URLs they were retrieved from. Matches by path too:
     the page's relative references may have resolved against a different document URL
-    (e.g. after a redirect) than they do now."""
+    (e.g. after a redirect) than they do now.
+
+    By every URL an item is known under, not just its first: ezMM merges identical files
+    into one item (the same picture under two addresses), which keeps all their URLs."""
 
     def __init__(self, items: list[Item]):
         self.by_url: dict[str, Item] = {}
         self.by_path: dict[str, Item] = {}
         for item in items:
-            if source := getattr(item, "source_url", None):
+            for source in _source_urls(item):
                 self.by_url.setdefault(source, item)
                 self.by_path.setdefault(_path_of(source), item)
 
@@ -907,6 +910,17 @@ class KnownMedia:
         if not uri:
             return None
         return self.by_url.get(uri) or self.by_path.get(_path_of(uri))
+
+
+def _source_urls(item: Item) -> list[str]:
+    """Every URL the item was retrieved from, as far as ezMM knows them."""
+    try:
+        urls = list(item.source_urls)
+    except Exception:  # A registry that cannot say: the item's own URL is still known
+        urls = []
+    if (own := getattr(item, "source_url", None)) and own not in urls:
+        urls.append(own)
+    return urls
 
 
 def _path_of(url: str) -> str:

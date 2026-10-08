@@ -121,14 +121,15 @@ async def test_strip_content_without_html_is_unchanged():
     assert await strip_content(content) is content
 
 
-def _image(url: str) -> Image:
-    return Image(pillow_image=PillowImage.new("RGB", (300, 300), "red"), source_url=url)
+def _image(url: str, color: str = "red") -> Image:
+    return Image(pillow_image=PillowImage.new("RGB", (300, 300), color), source_url=url)
 
 
 async def test_strip_content_reuses_media_without_fetching():
     """The stripped sequence takes its media from the original one; a session of None
     would fail on any download."""
-    logo, photo = _image("https://example.com/logo.png"), _image("https://example.com/photo.jpg")
+    logo = _image("https://example.com/logo.png", "navy")
+    photo = _image("https://example.com/photo.jpg", "teal")
     html = ('<html><body><header><img src="/logo.png"></header>'
             '<main><p>Text</p><img src="photo.jpg"></main></body></html>')
     original = ScrapedContent(html=html, markdown="Text",
@@ -138,6 +139,19 @@ async def test_strip_content_reuses_media_without_fetching():
     assert logo.reference not in str(stripped.multimodal)
     assert "Text" in str(stripped.multimodal)
 
+
+
+async def test_strip_content_finds_a_picture_under_its_second_address():
+    """ezMM merges identical files into one item: the photo, retrieved again under
+    another address, is that same item, found by either address."""
+    first = _image("https://cdn.example.com/a/photo.jpg", "olive")
+    again = _image("https://example.com/photo.jpg", "olive")
+    assert again.reference == first.reference  # One item
+    html = '<html><body><nav>Menu</nav><main><p>Text</p><img src="photo.jpg"></main></body></html>'
+    original = ScrapedContent(html=html, multimodal=MultimodalSequence(f"Text {again.reference}"))
+    stripped = await strip_content(original, url=URL)
+    assert first.reference in str(stripped.multimodal)
+    assert "Menu" not in str(stripped.multimodal)
 
 async def test_strip_content_keeps_media_it_cannot_place():
     """A medium not traceable to an element (here: a video the browser collected from
