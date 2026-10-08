@@ -3,7 +3,7 @@ name = "scrapeMM"
 version = "1.5.0"
 description = "Multimodal scraper for social media, internet archives, and the open web."
 readme = "README.md"
-requires-python = "<3.15,>=3.10"
+requires-python = "<3.15,>=3.11"
 license = "Apache-2.0"
 authors = [{name = "Mark Rothermel", email = "mark.rothermel@tu-darmstadt.de"}]
 
