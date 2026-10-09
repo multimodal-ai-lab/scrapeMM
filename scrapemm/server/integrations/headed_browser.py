@@ -4,6 +4,7 @@ import atexit
 import json
 import logging
 import os
+import shutil
 import socket
 import sys
 import tempfile
@@ -14,6 +15,7 @@ from contextlib import suppress, contextmanager
 from contextvars import ContextVar
 
 import aiohttp
+import psutil
 from pathlib import Path
 from typing import Optional, ClassVar
 from urllib.parse import urlparse
@@ -210,6 +212,8 @@ REPLAY_ORIGINS = ("https://rejouer.perma.cc", "https://ghostarchive.org", "https
 ORIGIN_STORAGE_CAP = 2 * 1024 ** 3
 # How often the running browser's replay storage is looked at, see `_watch_replay_storage()`
 STORAGE_CHECK_INTERVAL = 45 * 60
+# How often browsers left behind by other processes are looked for, see `_reap_orphaned_browsers()`
+ORPHAN_CHECK_INTERVAL = 5 * 60
 # The pages through which each replay origin is used (its frames sit inside them)
 _REPLAY_PAGE_HOSTS = {"https://rejouer.perma.cc": ("perma.cc", "rejouer.perma.cc"),
                       "https://ghostarchive.org": ("ghostarchive.org",),
@@ -362,13 +366,76 @@ async def check_replay_storage() -> dict[str, int]:
     return freed
 
 
+async def _watch_orphaned_browsers() -> None:
+    """While the server runs: every `ORPHAN_CHECK_INTERVAL`, reaps the browsers that
+    other processes left behind (see `_reap_orphaned_browsers()`)."""
+    while True:
+        with suppress(Exception):
+            await asyncio.to_thread(_reap_orphaned_browsers)
+        await asyncio.sleep(ORPHAN_CHECK_INTERVAL)
+
+
 _storage_watch: Optional[asyncio.Task] = None
+_orphan_watch: Optional[asyncio.Task] = None
 
 
 def _start_storage_watch() -> None:
-    global _storage_watch
+    global _storage_watch, _orphan_watch
     if _storage_watch is None or _storage_watch.done():
         _storage_watch = asyncio.ensure_future(_watch_replay_storage())
+    if _orphan_watch is None or _orphan_watch.done():
+        _orphan_watch = asyncio.ensure_future(_watch_orphaned_browsers())
+
+
+def _kill_process_tree(pid: int) -> None:
+    """Kills a browser process and everything it spawned (renderers, GPU process, ...)."""
+    try:
+        parent = psutil.Process(pid)
+        processes = parent.children(recursive=True) + [parent]
+    except psutil.Error:
+        return  # Gone already
+    for process in processes:
+        with suppress(psutil.Error):
+            process.kill()
+    psutil.wait_procs(processes, timeout=5)
+
+
+def _is_throwaway_profile(path: Optional[str]) -> bool:
+    """Whether `path` is a profile SeleniumBase made up for one browser (`uc_*` in the
+    temp directory), as opposed to a persistent one."""
+    return bool(path) and Path(path).name.startswith("uc_")         and Path(path).parent == Path(tempfile.gettempdir())
+
+
+def _reap_orphaned_browsers() -> int:
+    """Kills the browsers whose launching process is gone, and deletes their profiles.
+    Returns how many there were.
+
+    A process that ends without closing its browser -- killed, or a script that never
+    got to its exit handler -- leaves Chromium running, reparented to PID 1. Every
+    `podman exec ... python` that retrieved something while the server held the
+    persistent profile did so: each left a browser on a throwaway profile behind, 14 of
+    them within 20 minutes, holding gigabytes. Only throwaway profiles are touched: a
+    browser on a persistent one may be someone's on purpose."""
+    own = getattr(HeadedBrowser._browser, "_process_pid", None)
+    reaped = 0
+    for process in psutil.process_iter(["pid", "ppid", "cmdline"]):
+        try:
+            args = process.info["cmdline"] or []
+            if process.info["ppid"] != 1 or process.info["pid"] == own:
+                continue
+            if "--remote-debugging-port" not in " ".join(args) or any(a.startswith("--type=") for a in args):
+                continue  # Not a browser's main process
+            profile = next((a.split("=", 1)[1] for a in args if a.startswith("--user-data-dir=")), None)
+            if not _is_throwaway_profile(profile):
+                continue
+        except psutil.Error:
+            continue
+        _kill_process_tree(process.info["pid"])
+        shutil.rmtree(profile, ignore_errors=True)
+        reaped += 1
+    if reaped:
+        logger.info(f"Killed {reaped} browser(s) that processes ending without closing them left behind.")
+    return reaped
 
 
 def _process_alive(pid: int) -> bool:
@@ -1122,6 +1189,14 @@ def _persist_browser_profile_at_exit() -> None:
         asyncio.run(_close_browser_gracefully(browser))
     except Exception:
         pass  # Interpreter shutdown is no place to raise
+    # Whether or not the request to close got through (at exit, it often cannot): a
+    # browser that outlives its process runs on forever, orphaned
+    if pid := getattr(browser, "_process_pid", None):
+        with suppress(Exception):
+            _kill_process_tree(pid)
+    profile = getattr(getattr(browser, "config", None), "user_data_dir", None)
+    if _is_throwaway_profile(profile):
+        shutil.rmtree(profile, ignore_errors=True)
 
 
 class HeadedBrowser(RetrievalIntegration):

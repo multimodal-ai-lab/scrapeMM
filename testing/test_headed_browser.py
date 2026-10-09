@@ -314,3 +314,36 @@ async def test_remove_consent_dialogs_keeps_the_article():
     for kept in ("Headline", "Checkpoint Charlie", "Chocolate cookies"):
         assert kept in html
     assert overflow == ""
+
+
+def test_reap_orphaned_browsers_kills_only_orphans_on_throwaway_profiles(monkeypatch, tmp_path):
+    """A browser whose process is gone (reparented to PID 1) on a throwaway profile is
+    killed and its profile deleted. A browser whose process still runs, the server's own
+    one and one on a persistent profile stay."""
+    import tempfile
+    from types import SimpleNamespace
+    from scrapemm.server.integrations import headed_browser
+
+    throwaway = tmp_path / "uc_orphan"
+    throwaway.mkdir()
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def browser(pid, ppid, profile, *extra):
+        return SimpleNamespace(info={"pid": pid, "ppid": ppid, "cmdline": [
+            "chrome", "--remote-debugging-port=9222", f"--user-data-dir={profile}", *extra]})
+
+    processes = [
+        browser(10, 1, throwaway),  # Orphaned: reaped
+        browser(11, 1, throwaway, "--type=renderer"),  # Its renderer: goes with it
+        browser(20, 4242, tmp_path / "uc_alive"),  # Its process still runs
+        browser(30, 1, "/data/config/browser_profile"),  # Persistent profile
+        browser(40, 1, tmp_path / "uc_own"),  # The server's own browser
+    ]
+    monkeypatch.setattr(headed_browser.psutil, "process_iter", lambda attrs: processes)
+    monkeypatch.setattr(HeadedBrowser, "_browser", SimpleNamespace(_process_pid=40))
+    killed = []
+    monkeypatch.setattr(headed_browser, "_kill_process_tree", killed.append)
+
+    assert headed_browser._reap_orphaned_browsers() == 1
+    assert killed == [10]
+    assert not throwaway.exists()
