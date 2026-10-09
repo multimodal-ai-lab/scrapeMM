@@ -179,7 +179,7 @@ function compact(n: number): string {
 <template>
   <!-- No divider between header and body: the spacing separates them well enough -->
   <UCard
-    :ui="{ root: `divide-y-0 transition-[background-color,transform,box-shadow] duration-200
+    :ui="{ root: `group/result divide-y-0 transition-[background-color,transform,box-shadow] duration-200
                   ${collapsible ? 'hover:bg-elevated hover:-translate-y-px hover:shadow-md' : ''}`,
            header: open ? 'pb-0 sm:pb-0' : '',
            body: open ? '' : 'hidden' }"
@@ -262,14 +262,18 @@ function compact(n: number): string {
           </div>
         </div>
 
-        <UButton
-          v-if="collapsible" color="neutral" variant="ghost" size="sm" square
-          class="shrink-0" :aria-expanded="open"
-          :aria-label="open ? 'Collapse this result' : 'Expand this result'"
-          icon="i-fa7-solid-chevron-down"
-          :ui="{ leadingIcon: `transition-transform duration-200 ${open ? 'rotate-180' : ''}` }"
-          @click.stop="toggle"
-        />
+        <div class="flex items-center gap-1 shrink-0">
+          <!-- For the page that shows the result: icons that appear on hovering the card -->
+          <slot name="actions" />
+          <UButton
+            v-if="collapsible" color="neutral" variant="ghost" size="sm" square
+            class="shrink-0" :aria-expanded="open"
+            :aria-label="open ? 'Collapse this result' : 'Expand this result'"
+            icon="i-fa7-solid-chevron-down"
+            :ui="{ leadingIcon: `transition-transform duration-200 ${open ? 'rotate-180' : ''}` }"
+            @click.stop="toggle"
+          />
+        </div>
       </div>
     </template>
 

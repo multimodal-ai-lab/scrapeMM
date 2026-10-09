@@ -335,12 +335,13 @@ class JobStore:
         return bool(changed)
 
     def job_state(self, job_id: str) -> Optional[dict]:
-        """The status and the key of a job, without its results: None if there is none."""
+        """The status, the key and the parameters of a job, without its results: None if
+        there is none."""
         rows = self.query("SELECT status, params FROM jobs WHERE id = ?", (job_id,))
         if not rows:
             return None
         params = json.loads(rows[0]["params"]) if rows[0]["params"] else {}
-        return {"status": rows[0]["status"], "api_key": params.get("api_key")}
+        return {"status": rows[0]["status"], "api_key": params.get("api_key"), "params": params}
 
     # --- Reading ------------------------------------------------------------------
 

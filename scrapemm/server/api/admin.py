@@ -381,11 +381,18 @@ async def get_result_content(job_id: str, url: str = Query(...)) -> dict:
     return {"url": url, "content": content}
 
 
+class InterruptRequest(BaseModel):
+    url: Optional[str] = None  # Only this URL; the job goes on with the others
+
+
 @router.post("/jobs/{job_id}/interrupt")
-async def interrupt_job(job_id: str, principal: Principal = Depends(require_api_key)) -> dict:
+async def interrupt_job(job_id: str, body: Optional[InterruptRequest] = None,
+                        principal: Principal = Depends(require_api_key)) -> dict:
     """Interrupts a running job, on behalf of the user: its retrievals stop, what was
-    retrieved so far stays, and the job shows as interrupted by the user. Its own key and
-    admins may do so."""
+    retrieved so far stays, and the job shows as interrupted by the user. With a `url`,
+    only that URL's retrieval is stopped (it fails as interrupted) and the job goes on.
+    Its own key and admins may do so."""
+    url = body.url if body else None
     state = await asyncio.to_thread(jobs.job_state, job_id)
     if state is None:
         raise HTTPException(status_code=404, detail=f"No job '{job_id}'.")
@@ -394,8 +401,10 @@ async def interrupt_job(job_id: str, principal: Principal = Depends(require_api_
     if state["status"] != "running":
         raise HTTPException(status_code=409, detail=f"The job is no longer running "
                                                      f"({state['status']}).")
-    if interrupts.interrupt(job_id):
-        return {"job_id": job_id, "interrupted": True}
+    if interrupts.interrupt(job_id, url):
+        return {"job_id": job_id, "interrupted": True, **({"url": url} if url else {})}
+    if url is not None and interrupts.is_live(job_id):
+        raise HTTPException(status_code=409, detail="That URL is not being retrieved (any more).")
     # Running in the history, but nothing on this server works on it: an orphaned job
     closed = await asyncio.to_thread(jobs.interrupt_stale, job_id, interrupts.USER)
     return {"job_id": job_id, "interrupted": closed, "orphaned": True}

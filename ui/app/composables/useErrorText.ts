@@ -12,6 +12,7 @@ const DESCRIPTIONS: Record<string, string> = {
   QuotaExceededError: 'A service quota is used up.',
   DomainBlacklistedError: 'The domain is blacklisted.',
   UnsupportedDomainError: 'This URL is not supported.',
+  RetrievalInterrupted: 'A user stopped this retrieval.',
   RetrievalFailed: 'The content could not be retrieved.',
   TimeoutError: 'The retrieval timed out.',
   DiskFull: 'The server ran out of disk space.',

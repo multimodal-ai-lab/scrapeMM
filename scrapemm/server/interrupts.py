@@ -13,6 +13,7 @@ Jobs that run on this server register how they are cancelled, so that a user can
 import asyncio
 import logging
 import signal
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 logger = logging.getLogger("scrapeMM")
@@ -20,28 +21,45 @@ logger = logging.getLogger("scrapeMM")
 USER, CLIENT, SERVER = "user", "client", "server"
 CAUSES = (USER, CLIENT, SERVER)
 
-_cancellers: dict[str, Callable[[], None]] = {}
+@dataclass
+class _Live:
+    cancel: Callable[[], None]
+    cancel_url: Optional[Callable[[str], bool]] = None
+
+
+_live: dict[str, _Live] = {}
 _shutting_down = False
 
 
-def register(job_id: str, cancel: Callable[[], None]) -> None:
-    """Makes the job interruptible by a user: `cancel` stops its work, and the job's own
-    code closes it as interrupted (by the user) from there."""
-    _cancellers[job_id] = cancel
+def register(job_id: str, cancel: Callable[[], None],
+             cancel_url: Optional[Callable[[str], bool]] = None) -> None:
+    """Makes the job interruptible by a user: `cancel` stops all its work, and the job's
+    own code closes it as interrupted (by the user) from there. `cancel_url` stops the
+    retrieval of one URL (True if that URL was being retrieved), the job going on with
+    the others."""
+    _live[job_id] = _Live(cancel, cancel_url)
 
 
 def unregister(job_id: Optional[str]) -> None:
-    _cancellers.pop(job_id, None)
+    _live.pop(job_id, None)
 
 
-def interrupt(job_id: str) -> bool:
-    """Interrupts the job on behalf of a user. False if no job of that id is being worked
-    on by this server."""
-    cancel = _cancellers.get(job_id)
-    if cancel is None:
+def is_live(job_id: str) -> bool:
+    """Whether this server is working on the job."""
+    return job_id in _live
+
+
+def interrupt(job_id: str, url: Optional[str] = None) -> bool:
+    """Interrupts the job, or just its retrieval of `url`, on behalf of a user. False if
+    no job of that id is being worked on by this server, or if the URL is not being
+    retrieved (any more)."""
+    live = _live.get(job_id)
+    if live is None:
         return False
-    cancel()
-    return True
+    if url is None:
+        live.cancel()
+        return True
+    return bool(live.cancel_url and live.cancel_url(url))
 
 
 def begin_shutdown() -> None:

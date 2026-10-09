@@ -28,11 +28,12 @@ import time
 from typing import Any, AsyncIterator, Literal, Optional
 
 import aiohttp
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from scrapemm.common import OutputFormat
+from scrapemm.common import OutputFormat, ScrapingResponse
+from scrapemm.common.exceptions import RetrievalInterrupted
 from scrapemm.common.paths import APP_NAME
 from scrapemm.common.wire import (ContentPayload, PROTOCOL_VERSION, ResponsePayload,
                                   errors_to_wire)
@@ -72,7 +73,10 @@ async def retrieve(request: RetrieveRequest,
     return StreamingResponse(_stream(request, principal), media_type="application/x-ndjson")
 
 
-async def _stream(request: RetrieveRequest, principal: Principal) -> AsyncIterator[bytes]:
+async def _stream(request: RetrieveRequest, principal: Principal,
+                  quiet: bool = False) -> AsyncIterator[bytes]:
+    """The retrieval as the lines its client reads. `quiet` leaves the (large) results
+    out of them, for a job that nobody is reading (see `start_in_background()`)."""
     started = time.time()
 
     # Duplicates in the batch are retrieved once; the client maps results back onto its
@@ -94,6 +98,8 @@ async def _stream(request: RetrieveRequest, principal: Principal) -> AsyncIterat
     finished = False
     interrupted_by_user = False
 
+    stopped: set[str] = set()  # URLs a user stopped one by one
+
     def interrupt() -> None:
         """A user interrupts the job (see `scrapemm.server.interrupts`): its retrievals
         stop, and the stream below closes it and tells the client."""
@@ -102,9 +108,19 @@ async def _stream(request: RetrieveRequest, principal: Principal) -> AsyncIterat
         for task in tasks:
             task.cancel()
 
+    def interrupt_url(url: str) -> bool:
+        """A user stops the retrieval of one URL: it fails as interrupted, and the job
+        goes on with the others."""
+        for task, task_url in tasks.items():
+            if task_url == url and not task.done():
+                stopped.add(url)
+                task.cancel()
+                return True
+        return False
+
     try:
         job_id = await asyncio.shield(opening)
-        interrupts.register(job_id, interrupt)
+        interrupts.register(job_id, interrupt, interrupt_url)
         yield _line({
             "type": "header",
             "protocol": PROTOCOL_VERSION,
@@ -131,6 +147,10 @@ async def _stream(request: RetrieveRequest, principal: Principal) -> AsyncIterat
                     enable_archives_fallback=request.enable_archives_fallback,
                 )): url for url in urls
             }
+            if interrupted_by_user:
+                # Interrupted between the job being opened and its retrievals being started
+                for task in tasks:
+                    task.cancel()
             pending = set(tasks)
             while pending:
                 done, pending = await asyncio.wait(pending, timeout=HEARTBEAT_INTERVAL,
@@ -141,16 +161,24 @@ async def _stream(request: RetrieveRequest, principal: Principal) -> AsyncIterat
                     continue
                 for completed in done:
                     if completed.cancelled():
-                        continue  # Interrupted by a user: nothing came of it
-                    response = completed.result()
+                        if tasks[completed] not in stopped:
+                            continue  # The whole job was interrupted: nothing came of it
+                        response = ScrapingResponse(
+                            url=tasks[completed], content=None,
+                            output_format=request.output_format,
+                            errors={"scrapemm": RetrievalInterrupted("A user stopped this retrieval.")},
+                            retrieval_time=time.time() - started)
+                    else:
+                        response = completed.result()
                     payload = _to_payload(response)
                     await jobs.arecord(job_id, payload, response.success)
                     if response.success:
                         succeeded += 1
                     else:
                         failed += 1
-                    # Serialised in a thread: a result carries a whole page, megabytes
-                    yield await run_light(_line, {"type": "result", "payload": payload.to_dict()})
+                    if not quiet:
+                        # Serialised in a thread: a result carries a whole page, megabytes
+                        yield await run_light(_line, {"type": "result", "payload": payload.to_dict()})
         if interrupted_by_user:
             await jobs.afinish(job_id, succeeded, failed, status="interrupted",
                                interrupted_by=interrupts.USER)
@@ -192,6 +220,59 @@ async def _stream(request: RetrieveRequest, principal: Principal) -> AsyncIterat
         "failed": failed,
         "duration": time.time() - started,
     })
+
+
+# The tasks that run jobs nobody is streaming, held so that they are not collected
+_background: set[asyncio.Task] = set()
+
+
+async def start_in_background(request: RetrieveRequest, principal: Principal) -> str:
+    """Runs the retrieval as a job of the server's own, with no client reading it, and
+    returns the job's id once the job exists. It records its results like any job, and a
+    user can interrupt it like any job; if the server stops, it is interrupted by the
+    server."""
+    stream = _stream(request, principal, quiet=True)
+    first = json.loads(await anext(stream))
+    if first.get("type") != "header":
+        raise RuntimeError(first.get("message", "The job could not be started."))
+
+    async def drain() -> None:
+        async for _ in stream:
+            pass
+
+    task = asyncio.create_task(drain())
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+    return first["job_id"]
+
+
+# What a retried URL is retrieved with, of the original job's parameters. The cache is no
+# part of it: a retry is a new scrape.
+_RETRY_FIELDS = ("actions", "output_format", "max_video_size", "prioritize", "hedging_delay",
+                 "strip", "screenshot", "enable_archives_fallback")
+
+
+class RetryRequest(BaseModel):
+    url: str
+
+
+@router.post("/jobs/{job_id}/retry")
+async def retry_url(job_id: str, body: RetryRequest,
+                    principal: Principal = Depends(require_api_key)) -> dict:
+    """Retrieves a URL of a job again, without the cache and with the job's settings, as a
+    new job under the caller's key. Returns the new job's id; the job runs on the server."""
+    state = await asyncio.to_thread(jobs.job_state, job_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"No job '{job_id}'.")
+    params = state["params"]
+    urls = params.get("urls") or []
+    if body.url not in urls:
+        raise HTTPException(status_code=404, detail="That URL is not part of the job.")
+    request = RetrieveRequest(
+        urls=[body.url], use_cache=False,
+        methods=_per_url_methods(list(dict.fromkeys(urls)), params.get("methods", "auto"))[body.url],
+        **{field: params[field] for field in _RETRY_FIELDS if field in params})
+    return {"job_id": await start_in_background(request, principal), "url": body.url}
 
 
 def _per_url_methods(urls: list[str], methods: Any) -> dict[str, Any]:

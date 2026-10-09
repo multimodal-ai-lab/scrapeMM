@@ -49,6 +49,23 @@ function backToJobs() {
   else router.push('/jobs')
 }
 
+const { acting, urlAction, runUrlAction } = useUrlActions()
+
+/** Stops a URL that is being retrieved, or retrieves one again: a retry is a new job, and
+ *  the page moves to it, which it then follows while it runs. */
+async function runAction(url: string, done: boolean) {
+  const action = urlAction(done, running.value)
+  if (!action) return
+  error.value = ''
+  try {
+    const newJob = await runUrlAction(String(route.params.id), url, action.kind)
+    if (newJob) router.push(`/jobs/${newJob}`)
+    else setTimeout(async () => { job.value = await api.get<any>(`/v1/jobs/${route.params.id}`) }, 600)
+  } catch (e: any) {
+    error.value = e.message
+  }
+}
+
 const interrupting = ref(false)
 /** Asks the server to interrupt this job; the page follows it until it shows as interrupted */
 async function interrupt() {
@@ -126,6 +143,14 @@ function stopFollowing() {
 }
 
 onMounted(load)
+// The page is reused when it moves to another job (after a retry): start over with that one
+watch(() => route.params.id, (id, previous) => {
+  if (!id || id === previous || route.path.split('/')[1] !== 'jobs') return
+  stopFollowing()
+  job.value = null
+  loading.value = true
+  load()
+})
 onBeforeUnmount(stopFollowing)
 </script>
 
@@ -230,11 +255,22 @@ onBeforeUnmount(stopFollowing)
             :outcome="entry.result.outcome" :outcome-kind="entry.result.outcome_kind"
             collapsible :collapsed="entries.length > 1 && entry.url !== focus"
             class="scroll-mt-6"
-          />
+          >
+            <template #actions>
+              <UButton
+                v-if="urlAction(true, running)" color="neutral" variant="ghost" size="sm" square
+                :icon="urlAction(true, running)!.icon" :aria-label="urlAction(true, running)!.title"
+                :title="urlAction(true, running)!.title"
+                :loading="acting === `${job.id}|${entry.url}`"
+                class="opacity-0 group-hover/result:opacity-100 focus-visible:opacity-100 transition-opacity"
+                @click.stop="runAction(entry.url, true)"
+              />
+            </template>
+          </ResultView>
           <!-- Not done: still being retrieved, or never will be -->
           <div
             v-else :id="`result-${index}`"
-            class="scroll-mt-6 rounded-lg bg-elevated/50 px-4 py-3 sm:px-6 flex items-center gap-3
+            class="group/url scroll-mt-6 rounded-lg bg-elevated/50 px-4 py-3 sm:px-6 flex items-center gap-3
                    transition-[background-color,transform] duration-200
                    hover:bg-elevated hover:-translate-y-px"
           >
@@ -249,6 +285,15 @@ onBeforeUnmount(stopFollowing)
             <span class="ml-auto shrink-0 text-xs" :class="running ? 'text-info' : 'text-dimmed'">
               {{ running ? 'Retrieving…' : 'Not retrieved' }}
             </span>
+            <UButton
+              v-if="urlAction(false, running)" color="neutral" variant="ghost" size="sm" square
+              :icon="urlAction(false, running)!.icon" :aria-label="urlAction(false, running)!.title"
+              :title="urlAction(false, running)!.title"
+              :loading="acting === `${job.id}|${entry.url}`"
+              class="-my-1 -mr-2 shrink-0 hover:text-error opacity-0 group-hover/url:opacity-100
+                     focus-visible:opacity-100 transition-opacity"
+              @click="runAction(entry.url, false)"
+            />
           </div>
         </template>
       </div>
