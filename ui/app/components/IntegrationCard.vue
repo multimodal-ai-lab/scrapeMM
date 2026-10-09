@@ -64,12 +64,23 @@ const retrievals = computed(() => {
 
 /** What the chip's tooltip says. Falls back to the state's own label. */
 const explanation = computed(() => props.item.detail || tone.value.label)
+
+// Retrieval methods are recorded in the history under their lower-case name; search
+// providers retrieve nothing, so they have no jobs to show
+const historyLink = computed(() => props.item.kind === 'search' ? undefined
+  : `/jobs?method=${encodeURIComponent(props.item.name.toLowerCase())}`)
+
+function open() {
+  if (historyLink.value) navigateTo(historyLink.value)
+}
 </script>
 
 <template>
   <div
     class="group relative surface-card rounded-xl p-3.5 flex flex-col h-full"
-    :class="tone.surface"
+    :class="[tone.surface, historyLink ? 'cursor-pointer' : '']"
+    :title="historyLink ? 'Show the jobs that used this method' : undefined"
+    @click="open"
   >
     <div class="flex items-start gap-3.5">
       <div class="icon-plate shrink-0 size-10 rounded-lg grid place-items-center">
@@ -85,7 +96,7 @@ const explanation = computed(() => props.item.detail || tone.value.label)
           <UDropdownMenu :items="menuItems" :content="{ align: 'end' }">
             <UButton
               icon="i-fa7-solid-ellipsis-vertical" color="neutral" variant="link"
-              size="xs" square :loading="busy" aria-label="Actions"
+              size="xs" square :loading="busy" aria-label="Actions" @click.stop
               class="reveal-on-hover -mr-1 -my-1 opacity-0 text-dimmed
                      transition-[opacity,color] duration-150
                      hover:text-highlighted group-hover:opacity-100

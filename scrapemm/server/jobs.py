@@ -16,6 +16,7 @@ files would break sequences that were handed out long ago.
 import asyncio
 import json
 import logging
+import math
 import sqlite3
 import threading
 import time
@@ -573,6 +574,19 @@ class JobStore:
             # The share that actually yielded content
             "retrieved_rate": (outcomes[OK] / total) if total else None,
         }
+
+    def recent_scrape_times(self, limit: int = 1000) -> dict:
+        """The median and 95th percentile of the retrieval time over the most recent
+        `limit` actual scrapes (answers from the cache took no scraping and are left out)."""
+        times = sorted(row[0] for row in self.query(
+            "SELECT retrieval_time FROM results WHERE from_cache = 0 "
+            "AND retrieval_time IS NOT NULL ORDER BY created_at DESC LIMIT ?", (limit,)))
+        if not times:
+            return {"window": limit, "total": 0, "median": None, "p95": None}
+        return {"window": limit, "total": len(times),
+                "median": times[len(times) // 2] if len(times) % 2
+                else (times[len(times) // 2 - 1] + times[len(times) // 2]) / 2,
+                "p95": times[min(len(times) - 1, math.ceil(0.95 * len(times)) - 1)]}
 
     def recent_counts(self, seconds: float = RECENT_SPAN) -> list[list]:
         """The URLs retrieved in the last `seconds`, as [slot start, count] per slot of

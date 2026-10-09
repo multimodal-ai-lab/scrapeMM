@@ -261,6 +261,7 @@ const tiles = computed(() => {
   const env = environment.value
   if (!env) return []
   const rate = rateTone(env.throughput.success_rate.rate)
+  const times = env.throughput.scrape_times
   return [
     { label: 'Success rate', icon: 'i-fa7-solid-check',
       value: rate.value, tone: rate.tone,
@@ -276,6 +277,12 @@ const tiles = computed(() => {
           : `of the last ${env.throughput.success_rate.total} retrievals`)
         : 'nothing retrieved yet',
       to: env.throughput.success_rate.outcomes?.error ? '/jobs?outcome=error' : '/jobs' },
+    { label: 'Scraping time', icon: 'i-fa7-solid-stopwatch',
+      value: times?.median == null ? '—' : `${times.median.toFixed(1)} s`,
+      tone: 'neutral' as const,
+      detail: times?.total
+        ? `median · 95th percentile ${times.p95.toFixed(1)} s, of the last ${times.total} scrapes`
+        : 'nothing scraped yet' },
     { label: 'Retrieved today', icon: 'i-fa7-solid-gauge-high',
       value: `${retrievedToday.value}`, tone: 'neutral' as const,
       // Today, hour by hour: where it came from and how it went
