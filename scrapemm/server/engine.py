@@ -189,8 +189,9 @@ async def retrieve(
             results = [await _strip(response) for response in results]
         _release_media_memory()
 
-        # Reconstruct output list
-        results = dict(zip(urls_unique, results))
+        # Reconstruct output list, each result under the URL as requested, not as
+        # preprocessed (percent-decoded, or its host fixed)
+        results = {url: replace(response, url=url) for url, response in zip(urls_unique, results)}
         if single_url:
             return results[urls]
         else:
@@ -355,16 +356,7 @@ async def _retrieve_single(url: str, session: aiohttp.ClientSession, *args) -> S
     if clock is None:
         clock = timing.start_clock()
     clock.admit()
-    # A host whose redirect leads to a host that does not exist: its URL is retrieved from
-    # the host the redirect meant, if that is plain, and else fails at once (see
-    # `reachability.redirect_rewrite()`). Reported under the URL as requested.
-    repaired = None
-    if get_domain(preprocess_url(url)) not in DOMAIN_TO_INTEGRATION:
-        repaired = await reachability.redirect_rewrite(preprocess_url(url), session, HEADERS)
-    response = await _retrieve(repaired or url, session, *args)
-    if repaired:
-        response = replace(response, url=url)
-    return clock.stamp(response)
+    return clock.stamp(await _retrieve(url, session, *args))
 
 
 async def _retrieve(

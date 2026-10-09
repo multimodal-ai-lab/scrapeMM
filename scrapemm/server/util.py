@@ -44,10 +44,22 @@ logger = logging.getLogger("scrapeMM")
 DOMAIN_REGEX = r"(?:https?:\/\/)?(?:www\.)?([-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6})/?"
 
 
+# Hosts whose URLs only work in another form, by host. www.malayalam.factcrescendo.com
+# answers every URL with a redirect to a host that does not exist
+# (https://malayalam.factcrescendo.comslug: the slash lost); without the www. the page
+# is served. Retrieving it as given sent every method after the dead end in turn.
+HOST_FIXES = {"www.malayalam.factcrescendo.com": "malayalam.factcrescendo.com"}
+_HOST_FIX_REGEX = re.compile(
+    r"^(https?://)(" + "|".join(re.escape(host) for host in HOST_FIXES) + r")(?=[/:?#]|$)",
+    re.IGNORECASE)
+
+
 def preprocess_url(url: str) -> str:
     """Decodes a URL and removes unwanted symbols from it such
-    as surrounding whitespace, non-breaking spaces, etc."""
-    return unquote(str(url)).strip()
+    as surrounding whitespace, non-breaking spaces, etc. A host that is known to need
+    another form is given it (see `HOST_FIXES`)."""
+    url = unquote(str(url)).strip()
+    return _HOST_FIX_REGEX.sub(lambda m: m.group(1) + HOST_FIXES[m.group(2).lower()], url, count=1)
 
 
 def get_domain(url: str, keep_subdomain: bool = False) -> Optional[str]:
