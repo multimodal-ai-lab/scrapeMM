@@ -11,6 +11,7 @@ import tempfile
 import time
 import urllib.request
 import uuid
+from collections import Counter
 from contextlib import suppress, contextmanager
 from contextvars import ContextVar
 
@@ -1199,6 +1200,30 @@ def _persist_browser_profile_at_exit() -> None:
         shutil.rmtree(profile, ignore_errors=True)
 
 
+# A browser retrieval taking at least this long logs how its time was spent
+SLOW_BROWSE_LOG_AFTER = 30
+
+
+class _Phases:
+    """How long each step of a browser retrieval took, for the log. A step runs from its
+    `enter()` to the next one's, so the step a retrieval was cut off in is known too."""
+
+    def __init__(self):
+        self.start = self._since = time.monotonic()
+        self._current: Optional[str] = None
+        self.done: list[tuple[str, float]] = []
+
+    def enter(self, name: Optional[str]) -> None:
+        now = time.monotonic()
+        if self._current is not None:
+            self.done.append((self._current, now - self._since))
+        self._current, self._since = name, now
+
+    def summary(self) -> str:
+        self.enter(None)
+        return ", ".join(f"{name} {seconds:.1f} s" for name, seconds in self.done)
+
+
 class HeadedBrowser(RetrievalIntegration):
     """Base class for retrieval integrations that need a headed browser to avoid bot blocking
      mechanisms (e.g., Cloudflare) when retrieving web content. See `Browser` for the
@@ -1519,9 +1544,28 @@ class HeadedBrowser(RetrievalIntegration):
                       **kwargs) -> ScrapedContent:
         """Opens `url` in a tab of its own and extracts it. The tab is closed, and `slot`
         released, as soon as the page is no longer needed -- before media downloads that
-        do not need it (see `resolve_media()`)."""
+        do not need it (see `resolve_media()`). A slow retrieval logs its steps' times,
+        a cut-off one too (see `_browse_page()`)."""
+        phases, media_stats = _Phases(), Counter()
+        outcome = "failed"
+        try:
+            content = await self._browse_page(url, slot, phases, media_stats, **kwargs)
+            outcome = "done"
+            return content
+        except asyncio.CancelledError:
+            outcome = "cut off"
+            raise
+        finally:
+            took = time.monotonic() - phases.start
+            if took >= SLOW_BROWSE_LOG_AFTER:
+                logger.info(f"⏱️ {url} took {took:.0f} s in the browser ({outcome}): "
+                            f"{phases.summary()}; media: {dict(media_stats) or 'none'}.")
+
+    async def _browse_page(self, url: str, slot: Optional[_BrowserSlot], phases: _Phases,
+                           media_stats: Counter, **kwargs) -> ScrapedContent:
         target_url = url  # What is loaded; after a renderer crash, maybe a lighter page
         for attempt in range(2):  # one try + one crash-triggered retry
+            phases.enter("tab")
             page, generation = await self._new_page(None)
             media: Optional[BrowserMedia] = None
             page_open = True
@@ -1558,11 +1602,13 @@ class HeadedBrowser(RetrievalIntegration):
             try:
                 # Before navigating, so it sees every medium the page loads
                 media = BrowserMedia(page)
+                media.stats = media_stats  # Counted where `_browse()` can log them
                 self._watch_page(page)
                 await page.set_viewport_size({"width": 1920, "height": 1080})
 
                 # domcontentloaded: return as soon as the DOM is parseable. Waiting for "load"
                 # often burns many seconds on archive/analytics assets after content is ready.
+                phases.enter("load")
                 try:
                     response = await page.goto(target_url,
                                                timeout=self.navigation_timeout * 1000,
@@ -1620,6 +1666,7 @@ class HeadedBrowser(RetrievalIntegration):
                                                 or document_extension(url)):
                     if (document := await self._document(page, downloads, url, served)) is not None:
                         return document
+                phases.enter("settle")
                 await self._pass_cloudflare(page)
                 await self._settle_after_goto(page)
                 if (statuses and statuses[-1] in GATEWAY_ERRORS and not served
@@ -1631,6 +1678,7 @@ class HeadedBrowser(RetrievalIntegration):
                     raise RetrievalFailed(f"{self.name} is unavailable right now: it answered "
                                           f"HTTP {statuses[-1]} for {url}.")
 
+                phases.enter("read")
                 if target := await self._extract_content(page):
                     shown_url = getattr(page, "url", "") or ""  # What the content came from
                     # Before reading and before any screenshot: never content, and on
@@ -1642,10 +1690,13 @@ class HeadedBrowser(RetrievalIntegration):
                     if html:
                         # On request, the page as it is shown, now that it is loaded and
                         # before resolving the media may close it: no second load
+                        if screenshot.wanted():
+                            phases.enter("screenshot")
                         png = await screenshot.capture(page) if screenshot.wanted() else None
                         # Media that need the page are resolved while it is open;
                         # `done_with_page` is called once only the others are left
                         from scrapemm.server.util import to_scraped_content
+                        phases.enter("media")
                         content = await to_scraped_content(
                             html, session=page.context.request,
                             output_format=kwargs.get("output_format", "multimodal"),

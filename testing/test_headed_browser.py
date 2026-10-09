@@ -347,3 +347,16 @@ def test_reap_orphaned_browsers_kills_only_orphans_on_throwaway_profiles(monkeyp
     assert headed_browser._reap_orphaned_browsers() == 1
     assert killed == [10]
     assert not throwaway.exists()
+
+
+def test_phases_count_each_step_until_the_next_one(monkeypatch):
+    """The step a retrieval is in when it ends -- cut off, say -- is counted as well."""
+    from scrapemm.server.integrations import headed_browser
+    now = [100.0]
+    monkeypatch.setattr(headed_browser.time, "monotonic", lambda: now[0])
+    phases = headed_browser._Phases()
+    phases.enter("load")
+    now[0] += 4
+    phases.enter("media")
+    now[0] += 110.5
+    assert phases.summary() == "load 4.0 s, media 110.5 s"
