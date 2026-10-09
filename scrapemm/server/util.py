@@ -193,7 +193,10 @@ CONSENT_PLATFORMS: dict[str, tuple[tuple[str, ...], tuple[str, ...], tuple[str, 
     "iubenda": (("iubenda-cs-banner",), (), ()),
     "Klaro": (("klaro",), (), ("klaro",)),
     "CookieFirst": ((), (), ("cookiefirst-root",)),
-    "WordPress plugins": (("cookie-law-info-bar", "cookie-notice", "gdpr-cookie-message"), (), ()),
+    "Tarteaucitron": (("tarteaucitronRoot", "tarteaucitronAlertBig", "tarteaucitronIcon"), (), ()),
+    "Google Funding Choices": ((), (), ("fc-consent-root", "fc-dialog-overlay")),
+    "WordPress plugins": (("cookie-law-info-bar", "cookie-notice", "gdpr-cookie-message"), (),
+                          ("perfecty-push-dialog-container", "perfecty-push-settings-container")),
 }
 CONSENT_PLATFORM_IDS = frozenset(i for ids, _, _ in CONSENT_PLATFORMS.values() for i in ids)
 CONSENT_PLATFORM_ID_PREFIXES = tuple(p for _, prefixes, _ in CONSENT_PLATFORMS.values() for p in prefixes)

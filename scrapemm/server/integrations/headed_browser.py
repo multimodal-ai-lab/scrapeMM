@@ -1963,6 +1963,7 @@ async def settle_dom(target: Page | Frame, min_text: int = 0) -> None:
         await asyncio.sleep(DOM_SETTLE_INTERVAL)
 
 
+CONSENT_FRAME_TIMEOUT = 1.0 # Seconds a frame has to answer the removal
 # Removes the dialogs of known consent platforms (see `util.CONSENT_PLATFORMS`) from a
 # document, and the scroll lock they put on it. Returns [bytes removed, [[id, classes]]].
 _REMOVE_CONSENT_JS = """({ids, prefixes, classes}) => {
@@ -2005,17 +2006,24 @@ async def remove_consent_dialogs(page: Page) -> None:
                                       CONSENT_PLATFORM_ID_PREFIXES, consent_platform_of)
     config = {"ids": sorted(CONSENT_PLATFORM_IDS), "prefixes": list(CONSENT_PLATFORM_ID_PREFIXES),
               "classes": sorted(CONSENT_PLATFORM_CLASSES)}
-    for frame in getattr(page, "frames", None) or [page]:
+    async def clean(frame) -> None:
         try:
-            removed_bytes, removed = await frame.evaluate(_REMOVE_CONSENT_JS, config)
-        except Exception:  # Detached or navigating (or a test double): nothing to remove
+            # Timed: a frame that is still loading (an embedded YouTube player, say) may
+            # never answer, and the whole retrieval would wait with it (aosfatos.org)
+            removed_bytes, removed = await asyncio.wait_for(
+                frame.evaluate(_REMOVE_CONSENT_JS, config), CONSENT_FRAME_TIMEOUT)
+        except Exception:  # Detached, navigating or silent (or a test double): nothing to remove
             logger.debug(f"Could not look for consent dialogs in {getattr(frame, 'url', '?')}.",
                          exc_info=True)
-            continue
+            return
         if removed:
             platforms = sorted({consent_platform_of(i, c) or "?" for i, c in removed})
             logger.info(f"🍪 Removed the consent dialog of {', '.join(platforms)} "
                         f"({removed_bytes / 1e6:.2f} MB) from {frame.url[:120]}.")
+
+    # A frame without an address has not navigated anywhere yet and never answers
+    frames = [f for f in getattr(page, "frames", None) or [page] if getattr(f, "url", "?") != ""]
+    await asyncio.gather(*(clean(frame) for frame in frames))
 
 
 class Browser(HeadedBrowser):

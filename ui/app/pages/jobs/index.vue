@@ -39,6 +39,7 @@ const filters = reactive({
     || ({ ok: 'ok', failed: 'error' } as Record<string, string>)[route.query.success as string]
     || ANY,
   since: (route.query.since as string) || ANY,
+  status: (route.query.status as string) || ANY,
 })
 const sort = ref((route.query.sort as string) || 'newest')
 
@@ -63,6 +64,13 @@ const PERIODS = [
   { label: 'Last 24 hours', value: '24h' },
   { label: 'Last 7 days', value: '7d' },
   { label: 'Last 30 days', value: '30d' },
+]
+const STATUSES = [
+  { label: 'Any status', value: ANY },
+  { label: 'Running', value: 'running' },
+  { label: 'Completed', value: 'completed' },
+  { label: 'Failed', value: 'failed' },
+  { label: 'Interrupted', value: 'interrupted' },
 ]
 const SORTS = [
   { label: 'Newest first', value: 'newest', icon: 'i-fa7-solid-arrow-down-wide-short' },
@@ -112,6 +120,10 @@ const activeChips = computed(() => {
     chips.push({ key: 'since', icon: 'i-fa7-solid-clock',
                  text: label(PERIODS, filters.since) })
   }
+  if (isSet(filters.status)) {
+    chips.push({ key: 'status', icon: 'i-fa7-solid-circle-notch',
+                 text: label(STATUSES, filters.status) })
+  }
   return chips
 })
 
@@ -120,7 +132,7 @@ function clearFilter(key: keyof typeof filters) {
 }
 
 function reset() {
-  Object.assign(filters, { url: '', method: ANY, format: ANY, outcome: ANY, since: ANY })
+  Object.assign(filters, { url: '', method: ANY, format: ANY, outcome: ANY, since: ANY, status: ANY })
 }
 
 function sinceTimestamp(period: string): number | null {
@@ -138,6 +150,7 @@ function query(offset: number, limit: number, withVersion = false) {
   if (isSet(filters.method)) q.set('method', filters.method)
   if (isSet(filters.format)) q.set('output_format', filters.format)
   if (isSet(filters.outcome)) q.set('outcome', filters.outcome)
+  if (isSet(filters.status)) q.set('status', filters.status)
   const since = isSet(filters.since) ? sinceTimestamp(filters.since) : null
   if (since) q.set('since', String(since))
   if (withVersion && version !== null) q.set('version', String(version))
@@ -347,6 +360,9 @@ async function copy(id: string) {
         </template>
       </USelect>
       <USelect v-model="filters.since" :items="PERIODS" class="w-40" />
+      <USelect
+        v-model="filters.status" :items="STATUSES" class="w-40" aria-label="Filter by status"
+      />
       <USelect
         v-model="sort" :items="SORTS" class="w-48" aria-label="Sort the jobs"
         :icon="SORTS.find((s) => s.value === sort)?.icon"

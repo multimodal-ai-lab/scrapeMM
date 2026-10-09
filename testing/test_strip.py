@@ -76,6 +76,14 @@ CONSENT_BANNERS = [
     '<iframe src="https://cmp.example.com/index.html"></iframe></div>',
     '<div class="site-consent-layer"><p>Nous utilisons des traceurs. Votre consentement ?</p>'
     '<button>Tout accepter</button></div>',
+    # Tarteaucitron (science.feedback.org)
+    '<div id="tarteaucitronRoot"><div id="tarteaucitronAlertBig">Cookies management panel '
+    '<button>Allow all cookies</button></div></div>',
+    # Google Funding Choices (boatos.org), with a push-notification prompt beside it
+    '<div class="fc-consent-root"><div class="fc-dialog-container">boatos.org solicita o seu '
+    'consentimento. <button>Consentir</button></div></div>'
+    '<div id="perfecty-push-dialog-container" class="site perfecty-push-dialog-container">'
+    'Se inscreva para receber nossas atualizações <button>Permitir</button></div>',
 ]
 
 
