@@ -355,7 +355,16 @@ async def _retrieve_single(url: str, session: aiohttp.ClientSession, *args) -> S
     if clock is None:
         clock = timing.start_clock()
     clock.admit()
-    return clock.stamp(await _retrieve(url, session, *args))
+    # A host whose redirect leads to a host that does not exist: its URL is retrieved from
+    # the host the redirect meant, if that is plain, and else fails at once (see
+    # `reachability.redirect_rewrite()`). Reported under the URL as requested.
+    repaired = None
+    if get_domain(preprocess_url(url)) not in DOMAIN_TO_INTEGRATION:
+        repaired = await reachability.redirect_rewrite(preprocess_url(url), session, HEADERS)
+    response = await _retrieve(repaired or url, session, *args)
+    if repaired:
+        response = replace(response, url=url)
+    return clock.stamp(response)
 
 
 async def _retrieve(
