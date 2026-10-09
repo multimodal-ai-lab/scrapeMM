@@ -82,21 +82,28 @@ async def _stream(request: RetrieveRequest, principal: Principal) -> AsyncIterat
 
     # The key the job runs under, by id: its name may change (see `retrieval_stats`)
     params = request.model_dump() | {"api_key": principal.id}
-    job_id = await jobs.astart(params, len(urls))
-    yield _line({
-        "type": "header",
-        "protocol": PROTOCOL_VERSION,
-        "server_version": __version__,
-        "job_id": job_id,
-        "total": len(urls),
-        "registry": registry.info().to_dict(),
-        "heartbeat": HEARTBEAT_INTERVAL,
-    })
+    # Opened by a task of its own, as the write runs in a thread: a client that goes away
+    # meanwhile cancels this stream, but the write goes on and the job exists all the same
+    # (found as jobs that stayed "running" for good, created in the very moment their
+    # client disconnected). So the job is closed below however far this got.
+    opening = asyncio.ensure_future(jobs.astart(params, len(urls)))
 
+    job_id = None
     succeeded = failed = 0
     tasks: dict[asyncio.Task, str] = {}
     finished = False
     try:
+        job_id = await asyncio.shield(opening)
+        yield _line({
+            "type": "header",
+            "protocol": PROTOCOL_VERSION,
+            "server_version": __version__,
+            "job_id": job_id,
+            "total": len(urls),
+            "registry": registry.info().to_dict(),
+            "heartbeat": HEARTBEAT_INTERVAL,
+        })
+
         async with aiohttp.ClientSession() as session:
             tasks = {
                 asyncio.create_task(retrieve_one(
@@ -135,7 +142,8 @@ async def _stream(request: RetrieveRequest, principal: Principal) -> AsyncIterat
         finished = True
     except Exception as e:
         logger.error("Retrieval batch failed.", exc_info=True)
-        await jobs.afinish(job_id, succeeded, failed, status="failed")
+        if job_id is not None:
+            await jobs.afinish(job_id, succeeded, failed, status="failed")
         finished = True
         yield _line({"type": "error", "message": f"{type(e).__name__}: {e}"})
         return
@@ -146,7 +154,11 @@ async def _stream(request: RetrieveRequest, principal: Principal) -> AsyncIterat
             # otherwise the job would show as running forever.
             for task in tasks:
                 task.cancel()
-            jobs.finish(job_id, succeeded, failed, status="interrupted")
+            if job_id is not None:
+                jobs.finish(job_id, succeeded, failed, status="interrupted")
+            else:
+                # Gone while the job was still being opened: closed as soon as it is
+                opening.add_done_callback(_close_unseen_job)
 
     yield _line({
         "type": "summary",
@@ -155,6 +167,12 @@ async def _stream(request: RetrieveRequest, principal: Principal) -> AsyncIterat
         "failed": failed,
         "duration": time.time() - started,
     })
+
+
+def _close_unseen_job(opening: asyncio.Future) -> None:
+    """Marks a job interrupted whose client went away before it knew the job's id."""
+    if not opening.cancelled() and opening.exception() is None:
+        jobs.finish(opening.result(), 0, 0, status="interrupted")
 
 
 def _per_url_methods(urls: list[str], methods: Any) -> dict[str, Any]:
