@@ -13,6 +13,7 @@ throw away a perfectly good article.
 """
 
 import json
+import re
 from typing import Optional
 
 from bs4 import BeautifulSoup
@@ -21,6 +22,11 @@ from scrapemm.common.scraping_response import ScrapedContent
 
 # Fewer words than this in the paywalled part means only a teaser (or nothing) arrived
 MIN_UNLOCKED_WORDS = 100
+# A page that declares itself not free and shows a paywall, but names no paywalled part
+# (see `_gated_reason()`), is one if its article, headline and byline included, has fewer
+# words than this: Fast Check CL's teaser has 107, the shortest real articles more
+MAX_GATED_WORDS = 150
+GATE_REGEX = re.compile(r"paywall|gated", re.IGNORECASE)
 
 
 def detect_paywall(content: ScrapedContent) -> Optional[str]:
@@ -33,7 +39,7 @@ def detect_paywall(content: ScrapedContent) -> Optional[str]:
     soup = BeautifulSoup(html, "html.parser")
     selectors = _paywalled_selectors(soup)
     if not selectors:
-        return None
+        return _gated_reason(soup)
 
     words = 0
     for selector in selectors:
@@ -47,6 +53,37 @@ def detect_paywall(content: ScrapedContent) -> Optional[str]:
         return None
     return (f"the page declares its content paywalled ({', '.join(selectors)}), and that "
             f"part carries only {words} words")
+
+
+def _gated_reason(soup: BeautifulSoup) -> Optional[str]:
+    """For a page that declares itself not free but names no paywalled part (Fast Check
+    CL): the declaration plus a paywall element in the page (a login or subscribe prompt)
+    plus little article text around it. Each alone proves nothing -- the prompt may only
+    overlay a full article -- but all three do."""
+    if not any(_is_false(node.get("isAccessibleForFree")) for script in
+               soup.find_all("script", type="application/ld+json")
+               for node in _walk(_load(script))):
+        return None
+    walls = soup.find_all(lambda e: GATE_REGEX.search(" ".join([str(e.get("id") or ""),
+                                                                *(e.get("class") or [])])))
+    if not walls:
+        return None
+    region = walls[0].find_parent(["article", "main"]) or soup.body or soup
+    for element in [*walls, *region.find_all(["script", "style", "noscript"])]:
+        if not element.decomposed:
+            element.decompose()
+    words = len(region.get_text(" ", strip=True).split())
+    if words >= MAX_GATED_WORDS:
+        return None
+    return (f"the page declares itself not free and shows a paywall, with only {words} "
+            f"words of article around it")
+
+
+def _load(script):
+    try:
+        return json.loads(script.string or "")
+    except ValueError:
+        return None
 
 
 def _paywalled_selectors(soup: BeautifulSoup) -> list[str]:

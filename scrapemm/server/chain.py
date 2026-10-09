@@ -186,7 +186,6 @@ DOMAIN_ROUTES: dict[str, list[str]] = {
     # Miscellaneous:
     "washingtonpost.com": ["decodo", "plain_http"],
     "verafiles.org": ["decodo", "firecrawl", "plain_http"],
-    "youturn.in": ["decodo", "plain_http"],
 }
 
 EXCEPTIONS_KEY = "retrieval_exceptions"

@@ -63,6 +63,7 @@ class RetrieveRequest(BaseModel):
     hedging_delay: Optional[float] = None
     strip: bool = False
     screenshot: bool = False
+    enable_archives_fallback: Optional[bool] = None
 
 
 @router.post("/retrieve")
@@ -109,6 +110,7 @@ async def _stream(request: RetrieveRequest, principal: Principal) -> AsyncIterat
                     hedging_delay=request.hedging_delay,
                     strip=request.strip,
                     screenshot=request.screenshot,
+                    enable_archives_fallback=request.enable_archives_fallback,
                 )): url for url in urls
             }
             pending = set(tasks)

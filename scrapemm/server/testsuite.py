@@ -253,15 +253,21 @@ class TestRun:
         self.results: list[dict] = []
         # The API key the run was started with, its id and name: the run is its job
         self.started_by: Optional[dict] = None
+        # "completeness" or "speed": how the run retrieves (speed does not fall back
+        # to archives, for one)
+        self.prioritize = "completeness"
 
     @property
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
 
-    def start(self, started_by: dict) -> dict:
-        """Starts a run of the suite under the API key `started_by` ({"id", "name"})."""
+    def start(self, started_by: dict, prioritize: str = "completeness") -> dict:
+        """Starts a run of the suite under the API key `started_by` ({"id", "name"}), retrieving
+        with the given priority (completeness or speed)."""
         if self.running:
             return self.status()
+        if prioritize not in ("completeness", "speed"):
+            raise ValueError("The priority is either completeness or speed.")
         if not (started_by or {}).get("id"):
             raise ValueError("A test run runs under the API key of whoever starts it.")
         entries = suite()
@@ -269,6 +275,7 @@ class TestRun:
             raise ValueError("The suite is empty; add URLs first.")
         self.id = uuid.uuid4().hex[:10]
         self.started_by = started_by
+        self.prioritize = prioritize
         self.entries, self.results = entries, []
         self.started, self.finished, self.state = time.time(), None, "running"
         self._task = asyncio.create_task(self._run())
@@ -291,6 +298,7 @@ class TestRun:
         urls = [e["url"] for e in self.entries]
         self.job_id = await jobs.astart({"urls": urls, "output_format": OUTPUT_FORMAT,
                                          "strip": STRIP, "use_cache": False, "test_run": self.id,
+                                         "prioritize": self.prioritize,
                                          "api_key": self.started_by["id"]}, len(urls))
         passed = failed = 0
         tasks: list[asyncio.Task] = []
@@ -300,7 +308,8 @@ class TestRun:
                     try:
                         return entry, await retrieve_one(entry["url"], session,
                                                          output_format=OUTPUT_FORMAT,
-                                                         use_cache=False, strip=STRIP)
+                                                         use_cache=False, strip=STRIP,
+                                                         prioritize=self.prioritize)
                     except Exception as e:
                         # One URL must not end the run; it counts as failed, with why
                         logger.warning(f"Test retrieval of {entry['url']} raised.", exc_info=True)
@@ -355,6 +364,7 @@ class TestRun:
                         for r in base["results"]]
         final_state = base.get("state", "completed")
         self.started_by = base.get("started_by")  # The run's; the rerun's own key is its job's
+        self.prioritize = base.get("prioritize") or "completeness"  # As the run retrieved
         self.state = "running"
         self._task = asyncio.create_task(self._rerun(gated, final_state, started_by))
         return self.status()
@@ -366,7 +376,7 @@ class TestRun:
 
         urls = [r["url"] for r in gated]
         job_id = await jobs.astart({"urls": urls, "output_format": OUTPUT_FORMAT, "strip": STRIP,
-                             "use_cache": True,
+                             "use_cache": True, "prioritize": self.prioritize,
                              "test_run": self.id, "rerun": "captcha",
                              "api_key": started_by["id"]}, len(urls))
         passed = failed = 0
@@ -376,7 +386,8 @@ class TestRun:
                     try:
                         return entry, await retrieve_one(entry["url"], session,
                                                          output_format=OUTPUT_FORMAT,
-                                                         use_cache=True, strip=STRIP)
+                                                         use_cache=True, strip=STRIP,
+                                                         prioritize=self.prioritize)
                     except Exception as e:
                         logger.warning(f"Test rerun of {entry['url']} raised.", exc_info=True)
                         return entry, ScrapingResponse(url=entry["url"], content=None,
@@ -406,6 +417,7 @@ class TestRun:
         return {
             "id": self.id, "job_id": self.job_id, "state": self.state,
             "started": self.started, "finished": self.finished, "started_by": self.started_by,
+            "prioritize": self.prioritize,
             "summary": summarize(self.results, len(self.entries), self.started or time.time(),
                                  self.finished),
             "results": sorted(self.results, key=lambda r: (r["category"], r["url"])),

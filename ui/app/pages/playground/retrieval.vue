@@ -11,6 +11,7 @@ const useCache = ref(false)
 const strip = ref(false)
 const screenshot = ref(false)
 const prioritize = ref('completeness')
+const archivesFallback = ref('default')
 const running = ref(false)
 const error = ref('')
 const results = ref<any[]>([])
@@ -25,6 +26,13 @@ const formats = [
 const priorities = [
   { label: 'Completeness', value: 'completeness' },
   { label: 'Speed', value: 'speed' },
+]
+// Falling back to archives when the live page fails: by default on for completeness and
+// off for speed (the server decides, hence null)
+const archiveOptions = [
+  { label: 'Default (by priority)', value: 'default' },
+  { label: 'On', value: 'on' },
+  { label: 'Off', value: 'off' },
 ]
 
 const urls = computed(() =>
@@ -46,6 +54,7 @@ async function run() {
       strip: strip.value,
       screenshot: screenshot.value,
       prioritize: prioritize.value,
+      enable_archives_fallback: { on: true, off: false }[archivesFallback.value] ?? null,
     }, (message) => {
       if (message.type === 'header') progress.value.total = message.total
       else if (message.type === 'result') {
@@ -87,6 +96,12 @@ function succeeded(payload: any) {
           </UFormField>
           <UFormField label="Prioritize">
             <USelect v-model="prioritize" :items="priorities" class="w-40" />
+          </UFormField>
+          <UFormField label="Archives fallback">
+            <USelect
+              v-model="archivesFallback" :items="archiveOptions" class="w-48"
+              title="Fall back to archived copies (Perma.cc, Wayback Machine) when the live page cannot be retrieved"
+            />
           </UFormField>
           <UCheckbox v-model="useCache" label="Use cache" class="mb-2" />
           <UCheckbox v-model="strip" label="Strip UI elements" class="mb-2" />

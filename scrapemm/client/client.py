@@ -45,6 +45,7 @@ async def retrieve(  # type: ignore[overload-overlap]  # str is a Collection[str
         hedging_delay: float | None = None,
         strip: bool = False,
         screenshot: bool = False,
+        enable_archives_fallback: bool | None = None,
         config: Optional[Settings] = None,
 ) -> ScrapingResponse: ...
 
@@ -63,6 +64,7 @@ async def retrieve(
         hedging_delay: float | None = None,
         strip: bool = False,
         screenshot: bool = False,
+        enable_archives_fallback: bool | None = None,
         config: Optional[Settings] = None,
 ) -> list[ScrapingResponse]: ...
 
@@ -80,6 +82,7 @@ async def retrieve(
         hedging_delay: float | None = None,
         strip: bool = False,
         screenshot: bool = False,
+        enable_archives_fallback: bool | None = None,
         config: Optional[Settings] = None,
 ) -> ScrapingResponse | list[ScrapingResponse]:
     """Retrieves the contents present at the given URL(s) through a scrapeMM server.
@@ -121,6 +124,10 @@ async def retrieve(
     :param screenshot: Whether to also capture each retrieved page in the server's browser,
         as it looks to a visitor (`ScrapingResponse.screenshot`, an ezMM Image). Costs the
         server a page load per URL.
+    :param enable_archives_fallback: Whether to fall back to archiving services (Perma.cc, the Wayback Machine)
+        when the live page cannot be retrieved. None (the default) decides by `prioritize`: on for
+        "completeness", off for "speed". Archives named in an explicit `methods` list are tried
+        regardless. The result is then a copy of the page as it was captured, which may be old.
     :param config: Connection settings to use instead of the global ones.
     """
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
@@ -151,6 +158,7 @@ async def retrieve(
         "hedging_delay": hedging_delay,
         "strip": strip,
         "screenshot": screenshot,
+        "enable_archives_fallback": enable_archives_fallback,
     }
 
     by_url: dict[str, ScrapingResponse] = {}

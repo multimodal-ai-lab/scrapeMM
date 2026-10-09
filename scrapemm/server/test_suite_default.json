@@ -802,5 +802,13 @@
   "url": "https://insse.ro/cms/sites/default/files/com_presa/com_pdf/pib_tr4r2025.pdf",
   "expected": {},
   "category": "Open web"
+ },
+ {
+  "url": "https://youturn.in/factcheck/the-video-claiming-bangladeshi-fans-are-upset-over-indias-win-in-the-t20-world-cup-final-is-false.html",
+  "expected": {
+   "image": 2,
+   "video": 1
+  },
+  "category": "Open web"
  }
 ]

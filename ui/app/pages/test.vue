@@ -16,6 +16,12 @@ const history = ref<any[]>([])
 const viewing = ref<any>(null)  // A past report chosen from the history, if any
 const error = ref('')
 const starting = ref(false)
+// How the run retrieves: speed has lower timeouts and no fallback to archives
+const prioritize = ref('completeness')
+const PRIORITIES = [
+  { label: 'Completeness', value: 'completeness' },
+  { label: 'Speed', value: 'speed' },
+]
 const outcomeFilter = ref<'all' | 'running' | 'failed' | 'partial' | 'passed'>('all')
 
 // `unavailable`: the entry expects the target to be unavailable instead of content
@@ -69,7 +75,7 @@ async function start() {
   error.value = ''
   viewing.value = null
   try {
-    run.value = await api.post<any>('/v1/test/run')
+    run.value = await api.post<any>('/v1/test/run', { prioritize: prioritize.value })
     startPolling()
   } catch (e: any) {
     error.value = e.message
@@ -415,9 +421,14 @@ function media(record: Record<string, number> | undefined) {
           v-if="running" size="xl" color="error" variant="soft"
           icon="i-fa7-solid-stop" label="Stop the run" @click="cancel"
         />
+        <USelect
+          v-if="!running" v-model="prioritize" :items="PRIORITIES" size="xl" class="w-44"
+          aria-label="Prioritize"
+          title="Completeness: full timeouts, falls back to archives. Speed: lower timeouts, no archives."
+        />
         <!-- Neutral at rest, the accent on hover: it invites without shouting -->
         <UButton
-          v-else size="xl" color="neutral" variant="subtle" icon="i-fa7-solid-flask"
+          v-if="!running" size="xl" color="neutral" variant="subtle" icon="i-fa7-solid-flask"
           :loading="starting" :disabled="!suite.length"
           class="px-8 py-4 text-lg transition-colors duration-200
                  hover:bg-primary! hover:text-inverted! hover:ring-primary!"
@@ -447,6 +458,12 @@ function media(record: Record<string, number> | undefined) {
           {{ viewing && viewing.id !== history[0]?.id ? 'Past run' : 'Last run' }} ·
           <span :title="absoluteTime(report.started)">{{ timeAgo(report.started) }}</span>
           <template v-if="report.state !== 'completed'"> · {{ report.state }}</template>
+        </span>
+        <span v-if="report.prioritize" class="inline-flex items-center gap-1" title="How the run retrieved">
+          <UIcon
+            :name="report.prioritize === 'speed' ? 'i-fa7-solid-gauge-high' : 'i-fa7-solid-bullseye'"
+            class="size-3"
+          /> {{ report.prioritize }}
         </span>
         <!-- Whose run it is: it runs under the API key of whoever started it -->
         <span v-if="report.started_by" class="inline-flex items-center gap-1" title="Runs under this API key">
