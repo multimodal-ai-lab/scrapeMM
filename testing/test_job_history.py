@@ -66,3 +66,26 @@ def test_counters_start_from_an_existing_history(tmp_path, monkeypatch):
     store.close()
     reopened = JobStore(path=path)
     assert reopened.stats()["all_time"]["jobs"] == 3
+
+
+def test_jobs_found_running_at_startup_were_interrupted_by_the_server(tmp_path):
+    from scrapemm.server.jobs import JobStore
+    store = JobStore(path=tmp_path / "jobs.db")
+    left_running = store.start({"urls": ["https://a.example"], "api_key": "k"}, 1)
+    done = store.start({"urls": ["https://b.example"], "api_key": "k"}, 1)
+    store.finish(done, 1, 0)
+    assert store.interrupt_unfinished() == 1
+    assert store.get_job(left_running)["interrupted_by"] == "server"
+    assert store.get_job(done)["interrupted_by"] is None
+
+
+def test_a_job_interrupted_says_by_whom(tmp_path):
+    from scrapemm.server.jobs import JobStore
+    store = JobStore(path=tmp_path / "jobs.db")
+    by_user = store.start({"urls": ["https://a.example"], "api_key": "k"}, 1)
+    store.finish(by_user, 0, 0, status="interrupted", interrupted_by="user")
+    finished = store.start({"urls": ["https://b.example"], "api_key": "k"}, 1)
+    store.finish(finished, 1, 0, status="completed", interrupted_by="user")  # Only if interrupted
+    assert store.get_job(by_user)["interrupted_by"] == "user"
+    assert store.get_job(finished)["interrupted_by"] is None
+    assert store.interrupt_stale(by_user, "user") is False  # No longer running

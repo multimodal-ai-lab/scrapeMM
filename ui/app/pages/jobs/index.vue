@@ -299,11 +299,28 @@ function urlLook(entry: any, job: any) {
     return { icon: 'i-fa7-solid-circle-notch', color: 'text-info animate-spin', title: 'In progress' }
   }
   // Pending in a job that has ended: it was never retrieved
-  return { icon: 'i-fa7-solid-circle-stop', color: 'text-dimmed', title: 'Not retrieved: the job was interrupted' }
+  return { icon: 'i-fa7-solid-circle-stop', color: 'text-dimmed',
+           title: `Not retrieved: ${interruption(job.interrupted_by).short}` }
 }
 
 function resultLink(job: any, url: string) {
   return { path: `/jobs/${job.id}`, query: { result: url } }
+}
+
+/** Asks the server to interrupt a running job: its retrievals stop, what was retrieved so
+ *  far stays. The job shows as interrupted once the server has closed it. */
+const interrupting = ref('')
+async function interrupt(job: any) {
+  interrupting.value = job.id
+  error.value = ''
+  try {
+    await api.post(`/v1/jobs/${job.id}/interrupt`)
+    setTimeout(refresh, 600)  // It closes within moments; the next poll would see it anyway
+  } catch (e: any) {
+    error.value = e.message
+  } finally {
+    interrupting.value = ''
+  }
 }
 
 const copied = ref('')
@@ -473,8 +490,15 @@ async function copy(id: string) {
             <span v-if="job.status === 'running'" class="text-info">
               running · {{ job.done }} of {{ job.url_count }} done
             </span>
-            <span v-else-if="job.status === 'interrupted'">interrupted</span>
+            <span v-else-if="job.status === 'interrupted'">{{ interruption(job.interrupted_by).short }}</span>
           </NuxtLink>
+
+          <UButton
+            v-if="job.status === 'running'" size="xs" color="error" variant="soft"
+            icon="i-fa7-solid-stop" label="Interrupt" class="shrink-0"
+            :loading="interrupting === job.id" title="Stop this job; what was retrieved so far stays"
+            @click="interrupt(job)"
+          />
 
           <!-- For support and debugging: quiet until the job is hovered -->
           <button

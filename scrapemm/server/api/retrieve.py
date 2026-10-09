@@ -36,7 +36,7 @@ from scrapemm.common import OutputFormat
 from scrapemm.common.paths import APP_NAME
 from scrapemm.common.wire import (ContentPayload, PROTOCOL_VERSION, ResponsePayload,
                                   errors_to_wire)
-from .. import registry
+from .. import interrupts, registry
 from ..auth import Principal, require_api_key
 from ..engine import retrieve_one
 from ..jobs import jobs
@@ -92,8 +92,19 @@ async def _stream(request: RetrieveRequest, principal: Principal) -> AsyncIterat
     succeeded = failed = 0
     tasks: dict[asyncio.Task, str] = {}
     finished = False
+    interrupted_by_user = False
+
+    def interrupt() -> None:
+        """A user interrupts the job (see `scrapemm.server.interrupts`): its retrievals
+        stop, and the stream below closes it and tells the client."""
+        nonlocal interrupted_by_user
+        interrupted_by_user = True
+        for task in tasks:
+            task.cancel()
+
     try:
         job_id = await asyncio.shield(opening)
+        interrupts.register(job_id, interrupt)
         yield _line({
             "type": "header",
             "protocol": PROTOCOL_VERSION,
@@ -129,6 +140,8 @@ async def _stream(request: RetrieveRequest, principal: Principal) -> AsyncIterat
                                  "total": len(urls), "elapsed": round(time.time() - started, 1)})
                     continue
                 for completed in done:
+                    if completed.cancelled():
+                        continue  # Interrupted by a user: nothing came of it
                     response = completed.result()
                     payload = _to_payload(response)
                     await jobs.arecord(job_id, payload, response.success)
@@ -138,6 +151,15 @@ async def _stream(request: RetrieveRequest, principal: Principal) -> AsyncIterat
                         failed += 1
                     # Serialised in a thread: a result carries a whole page, megabytes
                     yield await run_light(_line, {"type": "result", "payload": payload.to_dict()})
+        if interrupted_by_user:
+            await jobs.afinish(job_id, succeeded, failed, status="interrupted",
+                               interrupted_by=interrupts.USER)
+            finished = True
+            # The client gets what was retrieved so far; the rest it counts as missing
+            yield _line({"type": "summary", "job_id": job_id, "succeeded": succeeded,
+                         "failed": failed, "duration": time.time() - started,
+                         "interrupted_by": interrupts.USER})
+            return
         await jobs.afinish(job_id, succeeded, failed)
         finished = True
     except Exception as e:
@@ -148,17 +170,20 @@ async def _stream(request: RetrieveRequest, principal: Principal) -> AsyncIterat
         yield _line({"type": "error", "message": f"{type(e).__name__}: {e}"})
         return
     finally:
+        interrupts.unregister(job_id)
         if not finished:
             # The client went away mid-batch (the stream was closed under us). Nobody is
             # left to receive the rest, so stop scraping it and say what happened --
             # otherwise the job would show as running forever.
             for task in tasks:
                 task.cancel()
+            by = interrupts.cancelled_by()  # The server, if it is stopping; else the client
             if job_id is not None:
-                jobs.finish(job_id, succeeded, failed, status="interrupted")
+                jobs.finish(job_id, succeeded, failed, status="interrupted", interrupted_by=by)
             else:
                 # Gone while the job was still being opened: closed as soon as it is
-                opening.add_done_callback(_close_unseen_job)
+                opening.add_done_callback(
+                    lambda future: interrupts.close_when_opened(jobs, future, by))
 
     yield _line({
         "type": "summary",
@@ -167,12 +192,6 @@ async def _stream(request: RetrieveRequest, principal: Principal) -> AsyncIterat
         "failed": failed,
         "duration": time.time() - started,
     })
-
-
-def _close_unseen_job(opening: asyncio.Future) -> None:
-    """Marks a job interrupted whose client went away before it knew the job's id."""
-    if not opening.cancelled() and opening.exception() is None:
-        jobs.finish(opening.result(), 0, 0, status="interrupted")
 
 
 def _per_url_methods(urls: list[str], methods: Any) -> dict[str, Any]:

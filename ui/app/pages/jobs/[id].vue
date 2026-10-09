@@ -49,6 +49,22 @@ function backToJobs() {
   else router.push('/jobs')
 }
 
+const interrupting = ref(false)
+/** Asks the server to interrupt this job; the page follows it until it shows as interrupted */
+async function interrupt() {
+  interrupting.value = true
+  try {
+    await api.post(`/v1/jobs/${route.params.id}/interrupt`)
+    setTimeout(async () => {
+      job.value = await api.get<any>(`/v1/jobs/${route.params.id}`)
+    }, 600)
+  } catch (e: any) {
+    error.value = e.message
+  } finally {
+    interrupting.value = false
+  }
+}
+
 async function remove() {
   try {
     await api.del(`/v1/jobs/${route.params.id}`)
@@ -174,6 +190,11 @@ onBeforeUnmount(stopFollowing)
       </div>
       <div class="flex items-center gap-2 shrink-0">
         <UButton
+          v-if="running" color="error" variant="soft" icon="i-fa7-solid-stop"
+          label="Interrupt" :loading="interrupting"
+          title="Stop this job; what was retrieved so far stays" @click="interrupt"
+        />
+        <UButton
           v-if="job" color="neutral" variant="ghost" icon="i-fa7-solid-trash"
           label="Delete" class="transition-transform duration-150 hover:scale-105"
           @click="remove"
@@ -192,8 +213,8 @@ onBeforeUnmount(stopFollowing)
       <!-- An interrupted job is not a failed one: it just never got to some URLs -->
       <UAlert
         v-if="job.status === 'interrupted'" color="neutral" variant="subtle"
-        icon="i-fa7-solid-circle-stop" title="Interrupted"
-        :description="`The server restarted or the client disconnected before this job finished. ${job.results?.length || 0} of ${requested.length} URL(s) were done${pendingCount ? '; the ones marked below were never retrieved, so submit them again to get them' : ''}.`"
+        icon="i-fa7-solid-circle-stop" :title="job.interrupted_by === 'user' ? 'Interrupted by a user' : 'Interrupted'"
+        :description="`${interruption(job.interrupted_by).long} ${job.results?.length || 0} of ${requested.length} URL(s) were done${pendingCount ? '; the ones marked below were never retrieved, so submit them again to get them' : ''}.`"
       />
 
       <div class="space-y-3">

@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from scrapemm.common.paths import APP_NAME
-from .. import registry, status as status_module
+from .. import interrupts, registry, status as status_module
 from ..auth import Principal, require_admin, require_api_key
 from ..blacklist import blacklist
 from ..cache import cache, immutable, KINDS
@@ -379,6 +379,26 @@ async def get_result_content(job_id: str, url: str = Query(...)) -> dict:
     if content is None:
         raise HTTPException(status_code=404, detail=f"No stored content for {url} in job '{job_id}'.")
     return {"url": url, "content": content}
+
+
+@router.post("/jobs/{job_id}/interrupt")
+async def interrupt_job(job_id: str, principal: Principal = Depends(require_api_key)) -> dict:
+    """Interrupts a running job, on behalf of the user: its retrievals stop, what was
+    retrieved so far stays, and the job shows as interrupted by the user. Its own key and
+    admins may do so."""
+    state = await asyncio.to_thread(jobs.job_state, job_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"No job '{job_id}'.")
+    if not (principal.is_admin or state["api_key"] == principal.id):
+        raise HTTPException(status_code=403, detail="That job runs under another API key.")
+    if state["status"] != "running":
+        raise HTTPException(status_code=409, detail=f"The job is no longer running "
+                                                     f"({state['status']}).")
+    if interrupts.interrupt(job_id):
+        return {"job_id": job_id, "interrupted": True}
+    # Running in the history, but nothing on this server works on it: an orphaned job
+    closed = await asyncio.to_thread(jobs.interrupt_stale, job_id, interrupts.USER)
+    return {"job_id": job_id, "interrupted": closed, "orphaned": True}
 
 
 @router.delete("/jobs/{job_id}")

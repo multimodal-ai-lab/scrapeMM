@@ -148,6 +148,7 @@ class JobStore:
             )
             self._start_counters()
             self._add_outcome_columns()
+            self._add_interruption_column()
             self._split_off_content()
             self._connection.executescript(RESULTS_INDEXES)
             self._connection.commit()
@@ -226,6 +227,13 @@ class JobStore:
         if rows:
             logger.info(f"Classified the outcome of {len(rows)} stored results.")
 
+    def _add_interruption_column(self) -> None:
+        """Who interrupted a job (see `scrapemm.server.interrupts`). Jobs interrupted
+        before it was recorded have none."""
+        columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(jobs)")}
+        if "interrupted_by" not in columns:
+            self._connection.execute("ALTER TABLE jobs ADD COLUMN interrupted_by TEXT")
+
     # --- Writing ------------------------------------------------------------------
 
     # For callers on the event loop: the same, in a worker thread
@@ -238,9 +246,9 @@ class JobStore:
         await run_light(self.record, job_id, payload, success)
 
     async def afinish(self, job_id: str, succeeded: int, failed: int,
-                      status: str = "completed") -> None:
+                      status: str = "completed", interrupted_by: Optional[str] = None) -> None:
         from .workers import run_light
-        await run_light(self.finish, job_id, succeeded, failed, status)
+        await run_light(self.finish, job_id, succeeded, failed, status, interrupted_by)
 
     def start(self, params: dict, url_count: int) -> str:
         """Opens a job. Every job runs under an API key, the one of whoever asked for it
@@ -290,12 +298,15 @@ class JobStore:
             self.version += 1
 
     def finish(self, job_id: str, succeeded: int, failed: int,
-               status: str = "completed") -> None:
+               status: str = "completed", interrupted_by: Optional[str] = None) -> None:
+        """Closes the job. An interrupted one says who interrupted it (user, client or
+        server, see `scrapemm.server.interrupts`)."""
         with self._lock:
             self._connection.execute(
-                "UPDATE jobs SET finished_at = ?, status = ?, succeeded = ?, failed = ? "
-                "WHERE id = ?",
-                (time.time(), status, succeeded, failed, job_id))
+                "UPDATE jobs SET finished_at = ?, status = ?, succeeded = ?, failed = ?, "
+                "interrupted_by = ? WHERE id = ?",
+                (time.time(), status, succeeded, failed,
+                 interrupted_by if status == "interrupted" else None, job_id))
             self._connection.commit()
             self.version += 1
 
@@ -305,11 +316,30 @@ class JobStore:
         forever."""
         with self._lock:
             count = self._connection.execute(
-                "UPDATE jobs SET status = 'interrupted', finished_at = ? "
+                "UPDATE jobs SET status = 'interrupted', finished_at = ?, interrupted_by = 'server' "
                 "WHERE status = 'running'", (time.time(),)).rowcount
             self._connection.commit()
             self.version += 1
         return count
+
+    def interrupt_stale(self, job_id: str, by: str) -> bool:
+        """Closes a job that is running in the history but that nothing on this server
+        works on (it was orphaned). False if it is not running."""
+        with self._lock:
+            changed = self._connection.execute(
+                "UPDATE jobs SET status = 'interrupted', finished_at = ?, interrupted_by = ? "
+                "WHERE id = ? AND status = 'running'", (time.time(), by, job_id)).rowcount
+            self._connection.commit()
+            self.version += 1
+        return bool(changed)
+
+    def job_state(self, job_id: str) -> Optional[dict]:
+        """The status and the key of a job, without its results: None if there is none."""
+        rows = self.query("SELECT status, params FROM jobs WHERE id = ?", (job_id,))
+        if not rows:
+            return None
+        params = json.loads(rows[0]["params"]) if rows[0]["params"] else {}
+        return {"status": rows[0]["status"], "api_key": params.get("api_key")}
 
     # --- Reading ------------------------------------------------------------------
 

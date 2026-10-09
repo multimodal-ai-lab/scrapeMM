@@ -245,6 +245,59 @@ async def test_retrieve_records_a_job(client, stub_engine):
     assert missing.status_code == 404
 
 
+# --- Interrupting jobs ------------------------------------------------------------
+
+async def test_interrupting_an_unknown_job_is_404(client):
+    assert (await client.post("/v1/jobs/nope/interrupt", headers=AUTH)).status_code == 404
+
+
+async def test_a_finished_job_cannot_be_interrupted(client, stub_engine):
+    job_id = (await _lines(client, {"urls": ["https://example.com/done"],
+                                    "output_format": "markdown"}))[0]["job_id"]
+    response = await client.post(f"/v1/jobs/{job_id}/interrupt", headers=AUTH)
+    assert response.status_code == 409
+
+
+async def test_a_user_interrupts_a_running_job(client, monkeypatch):
+    import asyncio
+    from scrapemm.server.api import retrieve as retrieve_api
+
+    async def never_ends(url, session, **kwargs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(retrieve_api, "retrieve_one", never_ends)
+    # The response only arrives complete through this transport, so the request runs on
+    # the side while the job is interrupted from here
+    request = asyncio.create_task(_lines(client, {"urls": ["https://example.com/slow"]}))
+    job_id = None
+    for _ in range(50):
+        await asyncio.sleep(0.1)
+        running = (await client.get("/v1/jobs", headers=AUTH, params={"status": "running"})).json()
+        ours = [j for j in running["jobs"] if any(e["url"] == "https://example.com/slow" for e in j["urls"])]
+        if ours:
+            job_id = ours[0]["id"]
+            break
+    assert job_id, "the job never showed as running"
+
+    answer = await client.post(f"/v1/jobs/{job_id}/interrupt", headers=AUTH)
+    assert answer.status_code == 200 and answer.json()["interrupted"] is True
+
+    messages = await asyncio.wait_for(request, 10)
+    assert messages[-1]["type"] == "summary" and messages[-1]["interrupted_by"] == "user"
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=AUTH)).json()
+    assert job["status"] == "interrupted" and job["interrupted_by"] == "user"
+
+
+async def test_a_user_closes_an_orphaned_job(client):
+    """Running in the history, though nothing works on it (it outlived its client)."""
+    from scrapemm.server.jobs import jobs
+    job_id = jobs.start({"urls": ["https://example.com/orphan"], "api_key": "someone"}, 1)
+    answer = await client.post(f"/v1/jobs/{job_id}/interrupt", headers=AUTH)
+    assert answer.status_code == 200 and answer.json()["orphaned"] is True
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=AUTH)).json()
+    assert job["status"] == "interrupted" and job["interrupted_by"] == "user"
+
+
 # --- Search -----------------------------------------------------------------------
 
 SERPER_SAMPLE = json.loads(

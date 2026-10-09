@@ -163,6 +163,7 @@ async def retrieve(
 
     by_url: dict[str, ScrapingResponse] = {}
     progress = None
+    interrupted_by = None  # Who ended the job early, if anyone (the closing summary says)
 
     timeout = aiohttp.ClientTimeout(total=None, sock_read=config.read_timeout)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -184,6 +185,9 @@ async def retrieve(
                 if progress is not None:
                     progress.update(1)
 
+            elif kind == "summary":
+                interrupted_by = message.get("interrupted_by")
+
             elif kind == "error":
                 raise ServerError(message.get("message", "The server reported an error."))
 
@@ -194,7 +198,8 @@ async def retrieve(
         if progress is not None:
             progress.close()
 
-    results = [by_url.get(url) or _missing(url, output_format) for url in requested]
+    results = [by_url.get(url) or _missing(url, output_format, interrupted_by)
+               for url in requested]
     return results[0] if single_url else results
 
 
@@ -321,9 +326,11 @@ async def _to_response(payload: ResponsePayload, registry: RegistryInfo,
     return payload.to_response(multimodal=multimodal, screenshot=screenshot)
 
 
-def _missing(url: str, output_format: OutputFormat) -> ScrapingResponse:
+def _missing(url: str, output_format: OutputFormat,
+             interrupted_by: Optional[str] = None) -> ScrapingResponse:
     """Stands in for a URL the server never reported on, so that the returned list
     still lines up with the URLs that were asked for."""
-    return ScrapingResponse(
-        url=url, content=None, output_format=output_format,
-        errors={"scrapemm": ServerError("The server did not return a result for this URL.")})
+    reason = (f"The job was interrupted by {interrupted_by} before this URL was retrieved."
+              if interrupted_by else "The server did not return a result for this URL.")
+    return ScrapingResponse(url=url, content=None, output_format=output_format,
+                            errors={"scrapemm": ServerError(reason)})

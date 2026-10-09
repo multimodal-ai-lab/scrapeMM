@@ -35,6 +35,26 @@ export function absoluteTime(timestamp: number): string {
 }
 
 /** Seconds as a short, readable duration: "0.4s", "12s", "3m 20s". */
+/**
+ * Who interrupted a job, in words: `short` for a line of the overview, `long` for the
+ * job's page. Jobs interrupted before it was recorded have no "by".
+ */
+export function interruption(by: string | null | undefined): { short: string, long: string } {
+  switch (by) {
+    case 'user':
+      return { short: 'interrupted by a user', long: 'A user interrupted this job.' }
+    case 'client':
+      return { short: 'client disconnected',
+               long: 'The client that submitted this job disconnected before it finished.' }
+    case 'server':
+      return { short: 'server stopped',
+               long: 'The server stopped or restarted before this job finished.' }
+    default:
+      return { short: 'interrupted',
+               long: 'The server restarted or the client disconnected before this job finished.' }
+  }
+}
+
 export function seconds(value: number | null | undefined): string {
   if (value == null) return '—'
   if (value < 10) return `${value.toFixed(1)}s`
