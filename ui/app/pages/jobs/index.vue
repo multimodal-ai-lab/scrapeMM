@@ -39,6 +39,7 @@ const filters = reactive({
     || ({ ok: 'ok', failed: 'error' } as Record<string, string>)[route.query.success as string]
     || ANY,
   since: (route.query.since as string) || ANY,
+  status: (route.query.status as string) || ANY,
 })
 const sort = ref((route.query.sort as string) || 'newest')
 
@@ -63,6 +64,13 @@ const PERIODS = [
   { label: 'Last 24 hours', value: '24h' },
   { label: 'Last 7 days', value: '7d' },
   { label: 'Last 30 days', value: '30d' },
+]
+const STATUSES = [
+  { label: 'Any status', value: ANY },
+  { label: 'Running', value: 'running' },
+  { label: 'Completed', value: 'completed' },
+  { label: 'Failed', value: 'failed' },
+  { label: 'Interrupted', value: 'interrupted' },
 ]
 const SORTS = [
   { label: 'Newest first', value: 'newest', icon: 'i-fa7-solid-arrow-down-wide-short' },
@@ -112,6 +120,10 @@ const activeChips = computed(() => {
     chips.push({ key: 'since', icon: 'i-fa7-solid-clock',
                  text: label(PERIODS, filters.since) })
   }
+  if (isSet(filters.status)) {
+    chips.push({ key: 'status', icon: 'i-fa7-solid-circle-notch',
+                 text: label(STATUSES, filters.status) })
+  }
   return chips
 })
 
@@ -120,7 +132,7 @@ function clearFilter(key: keyof typeof filters) {
 }
 
 function reset() {
-  Object.assign(filters, { url: '', method: ANY, format: ANY, outcome: ANY, since: ANY })
+  Object.assign(filters, { url: '', method: ANY, format: ANY, outcome: ANY, since: ANY, status: ANY })
 }
 
 function sinceTimestamp(period: string): number | null {
@@ -138,6 +150,7 @@ function query(offset: number, limit: number, withVersion = false) {
   if (isSet(filters.method)) q.set('method', filters.method)
   if (isSet(filters.format)) q.set('output_format', filters.format)
   if (isSet(filters.outcome)) q.set('outcome', filters.outcome)
+  if (isSet(filters.status)) q.set('status', filters.status)
   const since = isSet(filters.since) ? sinceTimestamp(filters.since) : null
   if (since) q.set('since', String(since))
   if (withVersion && version !== null) q.set('version', String(version))
@@ -274,6 +287,9 @@ onBeforeUnmount(stopWatching)
 // --- Presentation ---------------------------------------------------------------
 
 function urlLook(entry: any, job: any) {
+  if (entry.state === 'failed' && entry.error?.type === 'RetrievalInterrupted') {
+    return { icon: 'i-fa7-solid-circle-stop', color: 'text-dimmed', title: 'Stopped by a user' }
+  }
   if (entry.state === 'ok' || entry.state === 'failed') {
     // Results stored before the outcome classes existed are classified on the server
     // too; the fallback only covers an entry without any
@@ -286,11 +302,33 @@ function urlLook(entry: any, job: any) {
     return { icon: 'i-fa7-solid-circle-notch', color: 'text-info animate-spin', title: 'In progress' }
   }
   // Pending in a job that has ended: it was never retrieved
-  return { icon: 'i-fa7-solid-circle-stop', color: 'text-dimmed', title: 'Not retrieved: the job was interrupted' }
+  return { icon: 'i-fa7-solid-circle-stop', color: 'text-dimmed',
+           title: `Not retrieved: ${interruption(job.interrupted_by).short}` }
 }
 
 function resultLink(job: any, url: string) {
   return { path: `/jobs/${job.id}`, query: { result: url } }
+}
+
+/** What can be done to a URL card: stop a URL that is being retrieved (the job goes on
+ *  with its others), or retrieve one that was again, without the cache, as a new job
+ *  (see useUrlActions.ts). */
+const { acting, urlAction: actionFor, runUrlAction } = useUrlActions()
+
+function urlAction(entry: any, job: any) {
+  return actionFor(entry.state === 'ok' || entry.state === 'failed', job.status === 'running')
+}
+
+async function runAction(job: any, entry: any) {
+  const action = urlAction(entry, job)
+  if (!action) return
+  error.value = ''
+  try {
+    await runUrlAction(job.id, entry.url, action.kind)
+    setTimeout(refresh, 600)  // The change is moments away; the next poll would see it too
+  } catch (e: any) {
+    error.value = e.message
+  }
 }
 
 const copied = ref('')
@@ -347,6 +385,9 @@ async function copy(id: string) {
         </template>
       </USelect>
       <USelect v-model="filters.since" :items="PERIODS" class="w-40" />
+      <USelect
+        v-model="filters.status" :items="STATUSES" class="w-40" aria-label="Filter by status"
+      />
       <USelect
         v-model="sort" :items="SORTS" class="w-48" aria-label="Sort the jobs"
         :icon="SORTS.find((s) => s.value === sort)?.icon"
@@ -457,7 +498,7 @@ async function copy(id: string) {
             <span v-if="job.status === 'running'" class="text-info">
               running · {{ job.done }} of {{ job.url_count }} done
             </span>
-            <span v-else-if="job.status === 'interrupted'">interrupted</span>
+            <span v-else-if="job.status === 'interrupted'">{{ interruption(job.interrupted_by).short }}</span>
           </NuxtLink>
 
           <!-- For support and debugging: quiet until the job is hovered -->
@@ -476,31 +517,44 @@ async function copy(id: string) {
 
         <!-- Its URLs, one per row, each leading to its own result -->
         <div class="space-y-1.5">
-          <NuxtLink
-            v-for="entry in job.urls" :key="entry.url" :to="resultLink(job, entry.url)"
-            class="flex items-center gap-2.5 rounded-lg px-3 py-2 min-w-0
+          <div
+            v-for="entry in job.urls" :key="entry.url"
+            class="group/url flex items-center gap-2.5 rounded-lg px-3 py-2 min-w-0
                    bg-elevated/50 hover:bg-elevated transition-colors"
           >
-            <UIcon
-              :name="urlLook(entry, job).icon" class="size-3.5 shrink-0"
-              :class="urlLook(entry, job).color" :title="urlLook(entry, job).title"
-            />
-            <div class="min-w-0 flex-1 flex flex-col">
-              <UrlLabel :url="entry.url" class="text-sm" />
-              <span
-                v-if="entry.state === 'failed'" class="text-xs truncate"
-                :class="entry.outcome === 'unavailable' ? 'text-warning' : 'text-error/90'"
-                :title="entry.error?.message"
-              >{{ describeError(entry.error?.type) }}</span>
-            </div>
-            <span v-if="entry.state === 'ok'" class="shrink-0 text-xs text-dimmed flex items-center gap-2">
-              <span v-if="entry.from_cache" class="inline-flex items-center gap-1" title="From cache">
-                <UIcon name="i-fa7-solid-bolt" class="size-3" />
+            <NuxtLink :to="resultLink(job, entry.url)" class="flex items-center gap-2.5 min-w-0 flex-1">
+              <UIcon
+                :name="urlLook(entry, job).icon" class="size-3.5 shrink-0"
+                :class="urlLook(entry, job).color" :title="urlLook(entry, job).title"
+              />
+              <div class="min-w-0 flex-1 flex flex-col">
+                <UrlLabel :url="entry.url" class="text-sm" />
+                <span
+                  v-if="entry.state === 'failed'" class="text-xs truncate"
+                  :class="entry.error?.type === 'RetrievalInterrupted' ? 'text-dimmed'
+                    : entry.outcome === 'unavailable' ? 'text-warning' : 'text-error/90'"
+                  :title="entry.error?.message"
+                >{{ describeError(entry.error?.type) }}</span>
+              </div>
+              <span v-if="entry.state === 'ok'" class="shrink-0 text-xs text-dimmed flex items-center gap-2">
+                <span v-if="entry.from_cache" class="inline-flex items-center gap-1" title="From cache">
+                  <UIcon name="i-fa7-solid-bolt" class="size-3" />
+                </span>
+                <span>{{ entry.method }}</span>
+                <span v-if="entry.retrieval_time" :title="retrievalTimeTitle(entry.retrieval_time, entry.queue_time)">{{ seconds(entry.retrieval_time) }}</span>
               </span>
-              <span>{{ entry.method }}</span>
-              <span v-if="entry.retrieval_time" :title="retrievalTimeTitle(entry.retrieval_time, entry.queue_time)">{{ seconds(entry.retrieval_time) }}</span>
-            </span>
-          </NuxtLink>
+            </NuxtLink>
+            <!-- Stop while it is being retrieved, retry once it was; only on hover -->
+            <UButton
+              v-if="urlAction(entry, job)" size="xs" color="neutral" variant="ghost"
+              :icon="urlAction(entry, job)!.icon" :aria-label="urlAction(entry, job)!.title"
+              :title="urlAction(entry, job)!.title" :loading="acting === `${job.id}|${entry.url}`"
+              class="shrink-0 -my-1 -mr-1.5 opacity-0 group-hover/url:opacity-100
+                     focus-visible:opacity-100 transition-opacity"
+              :class="urlAction(entry, job)!.kind === 'stop' ? 'hover:text-error' : ''"
+              @click="runAction(job, entry)"
+            />
+          </div>
           <NuxtLink
             v-if="job.url_count > job.urls.length" :to="`/jobs/${job.id}`"
             class="block px-3 text-xs text-muted hover:text-default transition-colors"

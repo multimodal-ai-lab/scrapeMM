@@ -7,9 +7,10 @@ from typing import Optional
 
 from playwright.async_api import TimeoutError, Page, Frame, Error as PlaywrightError
 
+from scrapemm.server import budget
 from scrapemm.server.download.browser import MAX_IMAGE_BYTES, MAX_VIDEO_BYTES, BLOB_ATTR, install_stash
 from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget, settle_dom, \
-    renderer_crashed
+    renderer_crashed, evaluate_within
 from scrapemm.common import RetrievalFailed
 from scrapemm.common.exceptions import TargetUnavailableError
 from scrapemm.common.scraping_response import ScrapedContent
@@ -19,6 +20,12 @@ logger = logging.getLogger("scrapeMM")
 
 # Media fetched inside a frame at the same time
 STASH_CONCURRENCY = 6
+# How long a medium gets to arrive when it is fetched inside a frame, seconds: a slow one
+# is given up on, and the page returned without it, rather than the retrieval waiting for
+# it until its own limit fails the page as a whole (perma.cc/75EG-E5GK, a video that
+# took longer than ten minutes). Capped by what is left of the retrieval's time.
+STASH_IMAGE_TIMEOUT = 30
+STASH_VIDEO_TIMEOUT = 75
 # Large WARCs (e.g. 80MB+ Telegram videos) need a long wait for the innermost iframe.
 INNERMOST_FRAME_TIMEOUT_MS = 120_000
 # How long Perma.cc's page gets to show its archive iframe, a reload included (see
@@ -295,7 +302,8 @@ class PermaCC(HeadedBrowser):
     @staticmethod
     async def _frame_has_usable_content(frame: Frame) -> bool:
         try:
-            info = await frame.evaluate(
+            info = await evaluate_within(
+                frame,
                 """() => {
                     if (!document.body || document.readyState === 'loading') {
                         return { ready: false };
@@ -329,10 +337,12 @@ class PermaCC(HeadedBrowser):
         best_score = await self._media_score(root)
 
         while True:
-            for frame in root.page.frames:
-                if frame == root or not self._is_descendant_frame(frame, root):
-                    continue
-                score = await self._media_score(frame)
+            # Asked at once: a frame busy with a heavy medium answers only when its
+            # time is up (see `evaluate_within()`), and those waits must not add up
+            frames = [f for f in root.page.frames
+                      if f != root and self._is_descendant_frame(f, root)]
+            scores = await asyncio.gather(*(self._media_score(f) for f in frames))
+            for frame, score in zip(frames, scores):
                 if score > best_score:
                     best, best_score = frame, score
 
@@ -356,7 +366,8 @@ class PermaCC(HeadedBrowser):
     async def _media_score(frame: Frame) -> int:
         try:
             return int(
-                await frame.evaluate(
+                await evaluate_within(
+                    frame,
                     """() => {
                         let score = 0;
                         const photos = document.querySelectorAll(
@@ -382,7 +393,7 @@ async def _shows_replay_miss(frame: Frame, wait: float = REPLAY_MISS_WAIT) -> bo
     deadline = asyncio.get_running_loop().time() + wait
     while True:
         try:
-            if not await frame.evaluate(_REPLAY_MISS_JS):
+            if not await evaluate_within(frame, _REPLAY_MISS_JS):
                 return False
         except PlaywrightError:
             return False
@@ -393,7 +404,7 @@ async def _shows_replay_miss(frame: Frame, wait: float = REPLAY_MISS_WAIT) -> bo
 
 async def _shows_content(frame: Frame) -> bool:
     try:
-        return bool(await frame.evaluate(_SHOWS_CONTENT_JS))
+        return bool(await evaluate_within(frame, _SHOWS_CONTENT_JS))
     except PlaywrightError:
         return False
 
@@ -440,7 +451,7 @@ async def _settle_media_frame(frame: Frame) -> None:
     Also runs for the Internet Archive, which collects its media the same way."""
     await settle_dom(frame)
     try:
-        if await frame.evaluate(_VIDEO_PENDING_JS):
+        if await evaluate_within(frame, _VIDEO_PENDING_JS):
             await frame.wait_for_selector("video", state="attached",
                                           timeout=VIDEO_ELEMENT_TIMEOUT_MS)
     except TimeoutError:
@@ -466,9 +477,12 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
     # First, as the page may still be building itself: collected too early, a video its
     # player had not yet created was missing (see `_settle_media_frame()`)
     await _settle_media_frame(frame)
+    video_seconds = budget.cap(STASH_VIDEO_TIMEOUT, reserve=30)  # Leaves time to read them out
+    image_seconds = min(STASH_IMAGE_TIMEOUT, video_seconds)
     try:
         await install_stash(frame)
-        result = await frame.evaluate(
+        # Bounded from outside as well, for a page that does not answer at all
+        result = await asyncio.wait_for(frame.evaluate(
             """
             async (opts) => {
               const maxImageBytes = opts.maxImageBytes ?? 15728640;
@@ -596,7 +610,12 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
               };
 
               const stashFor = (url, kind) => stash(url, {
-                limit: kind === 'image' ? maxImageBytes : maxVideoBytes, skipStreaming: true });
+                limit: kind === 'image' ? maxImageBytes : maxVideoBytes, skipStreaming: true,
+                timeoutMs: kind === 'image' ? opts.imageTimeoutMs : opts.videoTimeoutMs });
+              // Media an earlier pass over the page gave up on are not waited for again
+              const skip = new Set(opts.skipUrls || []);
+              const timedOut = [];
+              window.__scrapemmStashTimeout = opts.videoTimeoutMs;
               const hasBlob = (el) => el.hasAttribute(blobAttr);
 
               let idx = 0;
@@ -609,8 +628,10 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
                   const i = idx++;
                   if (i >= tasks.length) break;
                   const t = tasks[i];
+                  if (skip.has(t.url)) { skipped++; continue; }
                   try {
                     const res = await stashFor(t.url, t.kind);
+                    if (res && res.reason === 'timeout') timedOut.push(t.url);
                     if (res && res.ok) {
                       t.el.setAttribute(blobAttr, res.id);
                       if (t.cleanupSrcset) t.el.removeAttribute('srcset');
@@ -800,7 +821,7 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
                 try { await tryInlineReplayMp4(); } catch (_) { /* ignore */ }
               }
 
-              return { total: tasks.length, inlined, skipped, videoInlined };
+              return { total: tasks.length, inlined, skipped, videoInlined, timedOut };
             }
             """,
             {
@@ -808,9 +829,19 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
                 "maxVideoBytes": int(video_limit),
                 "concurrency": int(concurrency),
                 "blobAttr": BLOB_ATTR,
+                "imageTimeoutMs": int(image_seconds * 1000),
+                "videoTimeoutMs": int(video_seconds * 1000),
+                "skipUrls": sorted(budget.abandoned()),
             },
-        )
+        ), timeout=video_seconds + 15)
         logger.debug(f"Fetched in {frame.url[:120]}: {result}")
+        if gave_up := (result or {}).get("timedOut"):
+            budget.abandoned().update(gave_up)
+            logger.info(f"Gave up on {len(gave_up)} medium/media in {frame.url[:100]} that took "
+                        f"longer than {video_seconds:.0f} s: {', '.join(u[:80] for u in gave_up[:3])}")
+    except asyncio.TimeoutError:
+        logger.info(f"The media of {frame.url[:100]} took longer than {video_seconds:.0f} s to "
+                    f"fetch inside it; the page goes on with those that arrived.")
     except Exception:
         # Best-effort; if anything fails, just proceed without inlining
         logger.debug("Fetching the frame's media in the frame failed; resolve_media() "

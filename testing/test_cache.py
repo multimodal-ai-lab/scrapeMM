@@ -66,11 +66,13 @@ async def test_cache_expiry():
     response = await retrieve(URL)
     assert response.success, response.errors
 
+    # The caller gets a copy filed under the URL as requested, never the cached response
+    # itself: the content is what they share
     key = cache_key(response.url, response.output_format, resolve_best_methods(response.url, "auto"))
-    assert cache.get(key) is response
+    assert cache.get(key).content is response.content
 
     set_cache_ttl(0.5)
-    assert cache.get(key) is response
+    assert cache.get(key).content is response.content
     time.sleep(0.6)
     assert cache.get(key) is None
     assert len(cache) == 0

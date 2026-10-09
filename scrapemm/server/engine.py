@@ -12,6 +12,7 @@ from typing import Collection, Literal, Coroutine, Callable, Optional
 from urllib.parse import urlsplit
 
 import aiohttp
+from bs4 import BeautifulSoup
 from ezmm import MultimodalSequence, Image
 from ezmm.common.registry import item_registry
 from playwright._impl._errors import TargetClosedError
@@ -70,7 +71,8 @@ async def retrieve(
         use_cache: bool = True,
         hedging_delay: float | None = None,
         strip: bool = False,
-        screenshot: bool = False
+        screenshot: bool = False,
+        enable_archives_fallback: bool | None = None
 ) -> ScrapingResponse | list[ScrapingResponse]:
     """Main function of this repository. Downloads the contents present at the given URL(s).
     For each URL, returns a ScrapingResponse containing the retrieved content, error, and method.
@@ -126,6 +128,10 @@ async def retrieve(
         that renders the page (the browser, the archives retrieved in it, Firecrawl), never
         by loading it again; methods that do not render it (plain HTTP, Decodo, API
         integrations) yield none. See `scrapemm.server.screenshot`.
+    :param enable_archives_fallback: Whether to fall back to archiving services (Perma.cc, the Wayback Machine)
+        when the live page cannot be retrieved. None (the default) decides by `prioritize`: on for
+        "completeness", off for "speed". Archives named in an explicit `methods` list are tried
+        regardless. The result is then a copy of the page as it was captured, which may be old.
     """
     # Ensure URLs are string or list
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
@@ -135,6 +141,8 @@ async def retrieve(
 
     if hedging_delay is None:
         hedging_delay = get_config_var("hedging_delay", DEFAULT_HEDGING_DELAY)
+    if enable_archives_fallback is None:
+        enable_archives_fallback = prioritize != "speed"
 
     if not include_media:
         logger.warning("The 'include_media' parameter is deprecated. Use output_format='markdown' instead.")
@@ -173,7 +181,7 @@ async def retrieve(
         # Retrieve URLs concurrently
         tasks = [_retrieve_single(url, session, url_to_methods[url], actions,
                                   output_format, max_video_size, prioritize, use_cache,
-                                  hedging_delay, screenshot) for url in
+                                  hedging_delay, screenshot, enable_archives_fallback) for url in
                  urls_unique]
         results = await run_with_semaphore(tasks, limit=40, show_progress=show_progress and len(urls_unique) > 1,
                                            progress_description="Retrieving URLs...")
@@ -181,8 +189,9 @@ async def retrieve(
             results = [await _strip(response) for response in results]
         _release_media_memory()
 
-        # Reconstruct output list
-        results = dict(zip(urls_unique, results))
+        # Reconstruct output list, each result under the URL as requested, not as
+        # preprocessed (percent-decoded, or its host fixed)
+        results = {url: replace(response, url=url) for url, response in zip(urls_unique, results)}
         if single_url:
             return results[urls]
         else:
@@ -220,6 +229,7 @@ async def retrieve_one(
         hedging_delay: float | None = None,
         strip: bool = False,
         screenshot: bool = False,
+        enable_archives_fallback: bool | None = None,
 ) -> ScrapingResponse:
     """Retrieves a single URL, subject to the server's concurrency limit. This is what
     the API streams over: it needs results one at a time, as they finish, rather than
@@ -228,6 +238,8 @@ async def retrieve_one(
         methods = "auto"
     if hedging_delay is None:
         hedging_delay = get_config_var("hedging_delay", DEFAULT_HEDGING_DELAY)
+    if enable_archives_fallback is None:
+        enable_archives_fallback = prioritize != "speed"
 
     # Identical requests in flight at the same time -- from concurrent jobs, typically --
     # share one retrieval instead of each scraping the same page. The cache only helps
@@ -235,13 +247,13 @@ async def retrieve_one(
     # per caller, on the shared result. A screenshot is: it is taken during the retrieval.
     key = (preprocess_url(url), output_format, json.dumps(methods, default=str),
            json.dumps(actions, sort_keys=True, default=str), max_video_size, prioritize,
-           use_cache, hedging_delay, screenshot)
+           use_cache, hedging_delay, screenshot, enable_archives_fallback)
     shared = _in_flight.get(key)
     joined = shared is not None
     if shared is None:
         shared = _InFlight(asyncio.create_task(_gated_retrieve(
             url, session, methods, actions, output_format, max_video_size, prioritize,
-            use_cache, hedging_delay, screenshot)))
+            use_cache, hedging_delay, screenshot, enable_archives_fallback)))
         _in_flight[key] = shared
         shared.task.add_done_callback(lambda _, k=key, s=shared: _forget(k, s))
     else:
@@ -293,7 +305,8 @@ def _forget(key: tuple, shared: _InFlight) -> None:
 
 
 async def _gated_retrieve(url, session, methods, actions, output_format, max_video_size,
-                          prioritize, use_cache, hedging_delay, screenshot) -> ScrapingResponse:
+                          prioritize, use_cache, hedging_delay, screenshot,
+                          enable_archives_fallback) -> ScrapingResponse:
     # Its own HTTP session rather than the first caller's: that one closes when its job
     # ends or its client disconnects, while others may still be waiting on this result
     global _active
@@ -305,7 +318,7 @@ async def _gated_retrieve(url, session, methods, actions, output_format, max_vid
         try:
             return await _retrieve_single(url, own, methods, actions, output_format,
                                           max_video_size, prioritize, use_cache, hedging_delay,
-                                          screenshot)
+                                          screenshot, enable_archives_fallback)
         finally:
             _active -= 1
             _release_media_memory()
@@ -356,7 +369,8 @@ async def _retrieve(
         prioritize: Literal["completeness", "speed"] = "completeness",
         use_cache: bool = True,
         hedging_delay: float | None = None,
-        screenshot: bool = False
+        screenshot: bool = False,
+        enable_archives_fallback: bool | None = None
 ) -> ScrapingResponse:
     logger.debug(f"Retrieving {url}")
     start_time = time.time()
@@ -380,6 +394,12 @@ async def _retrieve(
 
     # The retrieval chain's plan for this URL: its methods in order, live and archive
     plan = chain.resolve(url, methods)
+    if enable_archives_fallback is None:
+        enable_archives_fallback = prioritize != "speed"
+    if not enable_archives_fallback and methods == "auto":
+        # No fallback to archives; archives a client names itself are still tried
+        plan.order = list(plan.live)
+        plan.archive = []
     methods: list[str] = [chain.label(m) for m in plan.live]
     archives: list[str] = plan.archive
 
@@ -687,6 +707,13 @@ def _classify(url: str, method_name: str, content: Optional[ScrapedContent],
         return "error", TargetUnavailableError(
             f"The archive has no capture of this page: its replay says \"{marker}\".")
 
+    # ...nor a "not found" page served with HTTP 200 (a soft 404), live or captured by an
+    # archive at a time when the page was already gone
+    if title := _soft_not_found(content):
+        logger.info(f"Method {method_name} got a \"not found\" page for {url}: \"{title}\".")
+        return "error", TargetUnavailableError(
+            f"{url} does not exist: the page that came back is titled \"{title}\".")
+
     if content.get(output_format) is not None:
         return "success", content
 
@@ -742,6 +769,34 @@ def _replay_miss(content: ScrapedContent) -> Optional[str]:
     if len(text) > 2000:
         return None
     return next((m for m in REPLAY_MISS_MARKERS if m in text), None)
+
+
+# A page title that says the page does not exist: "Page Not Found - First Check", "404",
+# "Error 404: ...", "Seite nicht gefunden", ...
+_NOT_FOUND_TITLE = re.compile(
+    r"^\W*(?:(?:error\s*)?404\b|(?:page|article|content|story)?\s*(?:could\s*not|couldn.t|cannot|can.t)"
+    r"\s*be\s*found|(?:page|article|content|story)\s*(?:not\s*found|does(?:\s*not|n.t)\s*exist)|not\s*found\b"
+    r"|p[aá]gina\s*(?:no\s*encontrada|n[aã]o\s*encontrada)|seite\s*nicht\s*gefunden|page\s*introuvable"
+    r"|pagina\s*non\s*trovata)", re.IGNORECASE)
+SOFT_404_MAX_CHARS = 6000  # A real article is longer than the page that says it is gone
+
+
+def _soft_not_found(content: ScrapedContent) -> Optional[str]:
+    """The title of the content if it is a "not found" page: titled so, short, and with
+    next to no media. Pages that merely mention a 404 are articles, long or illustrated."""
+    if content.multimodal is not None and len(content.multimodal.images) + len(content.multimodal.videos) > 2:
+        return None
+    if content.html:
+        match = re.search(r"<title[^>]*>(.*?)</title>", content.html, re.DOTALL | re.IGNORECASE)
+        title = match.group(1) if match else ""
+        text = _TAGS.sub(" ", content.html)
+    else:
+        text = content.markdown or (str(content.multimodal) if content.multimodal else "")
+        title = next((line for line in text.splitlines() if line.strip()), "")
+    title = " ".join(title.replace("#", " ").split())
+    if not title or len(" ".join(text.split())) > SOFT_404_MAX_CHARS or not _NOT_FOUND_TITLE.match(title):
+        return None
+    return title[:120]
 
 
 def _derive_markdown(content: ScrapedContent) -> None:
@@ -860,6 +915,12 @@ async def _run_archives(archives: list[str], url: str, session: aiohttp.ClientSe
             errors[name] = e
             continue
         if content is None:
+            continue
+        if title := _soft_not_found(content):
+            # The capture is of the page's "not found" page (recorded with HTTP 200)
+            logger.info(f"Rejected {name}'s copy of {url}: it is a \"not found\" page, \"{title}\".")
+            errors[name] = TargetUnavailableError(
+                f"{name}'s capture of {url} is a \"not found\" page (\"{title}\").")
             continue
         if platform and (problem := _unusable_platform_copy(url, platform, content)):
             logger.info(f"Rejected {name}'s copy of {url}: {problem}")
@@ -1241,8 +1302,23 @@ async def _plain_http(url: str, session: aiohttp.ClientSession, output_format: O
     if "html" not in content_type:
         raise RetrievalFailed(f"A plain request got {content_type}, not a web page.")
     html = data.decode(encoding or "utf-8", errors="replace")
+    if _is_javascript_shell(html):
+        raise RetrievalFailed(f"A plain request got an empty page: {url} builds its content "
+                              f"with JavaScript.")
     return await to_scraped_content(html, session=session, output_format=output_format,
                                     url=final_url, max_video_size=max_video_size)
+
+
+def _is_javascript_shell(html: str) -> bool:
+    """Whether the page's body carries no text or media: a single-page app's shell, whose
+    content only a browser builds. Its <title> alone would otherwise count as the page's
+    text (youturn.in came back as "Youturn | fact check")."""
+    soup = BeautifulSoup(html, "html.parser")
+    if soup.body is None:
+        return False
+    for element in soup.body(["script", "style", "noscript"]):
+        element.decompose()
+    return not soup.body.get_text(strip=True) and soup.body.find(["img", "video", "iframe"]) is None
 
 
 async def _plain_get(url: str, session: aiohttp.ClientSession

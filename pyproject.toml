@@ -1,6 +1,6 @@
 [project]
 name = "scrapeMM"
-version = "1.6.0"
+version = "1.8.8"
 description = "Multimodal scraper for social media, internet archives, and the open web."
 readme = "README.md"
 requires-python = "<3.15,>=3.11"
@@ -12,7 +12,7 @@ authors = [{name = "Mark Rothermel", email = "mark.rothermel@tu-darmstadt.de"}]
 # a Docker image built from this repo; its dependencies live in requirements-server.txt.
 dependencies = [
     "aiohttp~=3.14.3",
-    "ezmm~=0.6.1",
+    "ezmm~=0.7.1",
     "tqdm~=4.70.1",
 ]
 

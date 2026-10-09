@@ -1,6 +1,6 @@
 """The Test page: the URL suite, running it, and the reports of past runs."""
 
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -9,6 +9,10 @@ from .. import testsuite
 from ..auth import Principal, require_api_key
 
 router = APIRouter(prefix="/v1/test", tags=["test"], dependencies=[Depends(require_api_key)])
+
+
+class RunRequest(BaseModel):
+    prioritize: Literal["completeness", "speed"] = "completeness"
 
 
 class SuiteEntry(BaseModel):
@@ -34,10 +38,13 @@ async def run_status() -> dict:
 
 
 @router.post("/run")
-async def start_run(principal: Principal = Depends(require_api_key)) -> dict:
-    """Starts a run, under the caller's API key: the run is a job like any other."""
+async def start_run(body: Optional[RunRequest] = None,
+                    principal: Principal = Depends(require_api_key)) -> dict:
+    """Starts a run, under the caller's API key: the run is a job like any other. It
+    retrieves with the given priority: completeness (the default) or speed."""
     try:
-        return testsuite.run.start({"id": principal.id, "name": principal.name})
+        return testsuite.run.start({"id": principal.id, "name": principal.name},
+                                   prioritize=body.prioritize if body else "completeness")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

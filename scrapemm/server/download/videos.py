@@ -133,6 +133,34 @@ def _is_hls_playlist(content: str) -> bool:
     return content.lstrip().lstrip(chr(0xFEFF)).startswith("#EXTM3U")  # A BOM may lead
 
 
+# Codec prefixes (RFC 6381) of video streams, as listed in the CODECS attribute
+VIDEO_CODEC_PREFIXES = ("avc1", "avc3", "hvc1", "hev1", "dvh1", "dvhe", "vp09", "vp8", "av01", "mp4v")
+
+
+def _has_video(variant: m3u8.Playlist) -> bool:
+    """Whether the HLS variant contains a video stream, judged by its RESOLUTION or CODECS."""
+    info = variant.stream_info
+    if info.resolution:
+        return True
+    codecs = [c.strip().lower() for c in (info.codecs or "").split(",")]
+    return any(c.startswith(VIDEO_CODEC_PREFIXES) for c in codecs)
+
+
+def _select_hls_variant(variants: list[m3u8.Playlist]) -> m3u8.Playlist:
+    """Pick the highest-quality variant of a master playlist: the one with the highest
+    resolution, then bandwidth, among those with video. The order of the playlist says
+    nothing, as audio-only variants may well come last. Without any video variant (an
+    audio stream), the variant with the highest bandwidth is taken."""
+    video_variants = [v for v in variants if _has_video(v)]
+
+    def quality(variant: m3u8.Playlist) -> tuple:
+        info = variant.stream_info
+        width, height = info.resolution or (0, 0)
+        return width * height, info.bandwidth or info.average_bandwidth or 0
+
+    return max(video_variants or variants, key=quality)
+
+
 async def download_hls_video(
         playlist_url: str,
         session: Union[aiohttp.ClientSession, "APIRequestContext"],
@@ -161,8 +189,7 @@ async def download_hls_video(
 
         # Check if this is a master playlist (contains variant playlists)
         if playlist.is_variant:
-            # Choose the highest quality variant
-            best_playlist = playlist.playlists[-1]  # Usually the last one is of highest quality
+            best_playlist = _select_hls_variant(playlist.playlists)
 
             # Manually construct the absolute URL for the variant playlist
             variant_url = urljoin(base_url, best_playlist.uri)

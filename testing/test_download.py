@@ -5,7 +5,7 @@ from ezmm import Image, Item, Video
 from scrapemm.server.download import download_medium, download_image, download_video
 from scrapemm.server.download.common import HEADERS
 from scrapemm.server.download.images import is_maybe_image_url
-from scrapemm.server.download.videos import is_maybe_video_url
+from scrapemm.server.download.videos import is_maybe_video_url, _select_hls_variant
 
 
 pytestmark = pytest.mark.server
@@ -109,9 +109,59 @@ async def test_download_medium_falls_back_to_video_when_image_download_fails(mon
     "https://video.bsky.app/watch/did%3Aplc%3Alvs2rrkrj6usatuglfukwoea/bafkreibdgmt4y3z62opupxdykw53ftvkyoprzxuztzocxqfe2hjskziq44/playlist.m3u8",
 ])
 async def test_download_m3u8(url):
+    from scrapemm.server.util import probe_video
     async with aiohttp.ClientSession(headers=HEADERS) as session:
         vid = await download_video(url, session)
         assert isinstance(vid, Video)
+    meta = await probe_video(vid.file_path)
+    if meta is None:
+        pytest.skip("ffprobe is needed to check the streams")
+    assert any(s.get("codec_type") == "video" for s in meta.get("streams", []))
+
+
+MASTER_PLAYLIST = """#EXTM3U
+#EXT-X-VERSION:4
+#EXT-X-STREAM-INF:BANDWIDTH=1500000,CODECS="mp4a.40.2,avc1.42C00D",RESOLUTION=640x360
+video_360.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=4000000,CODECS="mp4a.40.2,avc1.64001F",RESOLUTION=1280x720
+video_720.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=900000,CODECS="mp4a.40.2,avc1.42C00D",RESOLUTION=480x270
+video_270.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=8000000,CODECS="mp4a.40.2"
+audio_high.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=200000,CODECS="mp4a.40.2"
+audio_low.m3u8
+"""
+
+
+def test_select_hls_variant_prefers_video():
+    import m3u8
+    variant = _select_hls_variant(m3u8.loads(MASTER_PLAYLIST).playlists)
+    assert variant.uri == "video_720.m3u8"
+
+
+def test_select_hls_variant_video_by_codecs_only():
+    import m3u8
+    playlist = m3u8.loads("""#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS="hvc1.1.6.L93.B0,mp4a.40.2"
+video.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,CODECS="mp4a.40.2"
+audio.m3u8
+""")
+    assert _select_hls_variant(playlist.playlists).uri == "video.m3u8"
+
+
+def test_select_hls_variant_audio_only():
+    import m3u8
+    playlist = m3u8.loads("""#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=64000,CODECS="mp4a.40.2"
+low.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=256000,CODECS="mp4a.40.2"
+high.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS="mp4a.40.2"
+mid.m3u8
+""")
+    assert _select_hls_variant(playlist.playlists).uri == "high.m3u8"
 
 
 @pytest.mark.asyncio

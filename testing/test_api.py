@@ -245,6 +245,142 @@ async def test_retrieve_records_a_job(client, stub_engine):
     assert missing.status_code == 404
 
 
+# --- Interrupting jobs ------------------------------------------------------------
+
+async def test_interrupting_an_unknown_job_is_404(client):
+    assert (await client.post("/v1/jobs/nope/interrupt", headers=AUTH)).status_code == 404
+
+
+async def test_a_finished_job_cannot_be_interrupted(client, stub_engine):
+    job_id = (await _lines(client, {"urls": ["https://example.com/done"],
+                                    "output_format": "markdown"}))[0]["job_id"]
+    response = await client.post(f"/v1/jobs/{job_id}/interrupt", headers=AUTH)
+    assert response.status_code == 409
+
+
+async def test_a_user_interrupts_a_running_job(client, monkeypatch):
+    import asyncio
+    from scrapemm.server.api import retrieve as retrieve_api
+
+    async def never_ends(url, session, **kwargs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(retrieve_api, "retrieve_one", never_ends)
+    # The response only arrives complete through this transport, so the request runs on
+    # the side while the job is interrupted from here
+    request = asyncio.create_task(_lines(client, {"urls": ["https://example.com/slow"]}))
+    job_id = None
+    for _ in range(50):
+        await asyncio.sleep(0.1)
+        running = (await client.get("/v1/jobs", headers=AUTH, params={"status": "running"})).json()
+        ours = [j for j in running["jobs"] if any(e["url"] == "https://example.com/slow" for e in j["urls"])]
+        if ours:
+            job_id = ours[0]["id"]
+            break
+    assert job_id, "the job never showed as running"
+
+    answer = await client.post(f"/v1/jobs/{job_id}/interrupt", headers=AUTH)
+    assert answer.status_code == 200 and answer.json()["interrupted"] is True
+
+    messages = await asyncio.wait_for(request, 10)
+    assert messages[-1]["type"] == "summary" and messages[-1]["interrupted_by"] == "user"
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=AUTH)).json()
+    assert job["status"] == "interrupted" and job["interrupted_by"] == "user"
+
+
+async def test_a_user_closes_an_orphaned_job(client):
+    """Running in the history, though nothing works on it (it outlived its client)."""
+    from scrapemm.server.jobs import jobs
+    job_id = jobs.start({"urls": ["https://example.com/orphan"], "api_key": "someone"}, 1)
+    answer = await client.post(f"/v1/jobs/{job_id}/interrupt", headers=AUTH)
+    assert answer.status_code == 200 and answer.json()["orphaned"] is True
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=AUTH)).json()
+    assert job["status"] == "interrupted" and job["interrupted_by"] == "user"
+
+
+# --- Stopping and retrying one URL --------------------------------------------------
+
+async def test_a_user_stops_one_url_of_a_running_job(client, monkeypatch):
+    import asyncio
+    from scrapemm.server.api import retrieve as retrieve_api
+
+    async def fake(url, session, **kwargs):
+        if "slow" in url:
+            await asyncio.sleep(3600)
+        return ScrapingResponse(url=url, content=ScrapedContent(markdown="# Hi"),
+                                method="stub", output_format=kwargs["output_format"])
+
+    monkeypatch.setattr(retrieve_api, "retrieve_one", fake)
+    slow, fast = "https://example.com/slow-one", "https://example.com/fast-one"
+    request = asyncio.create_task(_lines(client, {"urls": [slow, fast], "output_format": "markdown"}))
+    job_id = None
+    for _ in range(50):
+        await asyncio.sleep(0.1)
+        running = (await client.get("/v1/jobs", headers=AUTH, params={"status": "running"})).json()
+        ours = [j for j in running["jobs"] if any(e["url"] == slow for e in j["urls"])]
+        if ours:
+            job_id = ours[0]["id"]
+            break
+    assert job_id, "the job never showed as running"
+    await asyncio.sleep(0.3)  # The fast one finishes
+
+    answer = await client.post(f"/v1/jobs/{job_id}/interrupt", headers=AUTH, json={"url": fast})
+    assert answer.status_code == 409  # Done already
+    answer = await client.post(f"/v1/jobs/{job_id}/interrupt", headers=AUTH, json={"url": slow})
+    assert answer.status_code == 200 and answer.json()["url"] == slow
+
+    messages = await asyncio.wait_for(request, 10)
+    assert messages[-1]["type"] == "summary" and "interrupted_by" not in messages[-1]
+    job = (await client.get(f"/v1/jobs/{job_id}", headers=AUTH)).json()
+    assert job["status"] == "completed"
+    stopped = next(r for r in job["results"] if r["url"] == slow)
+    assert stopped["errors"]["scrapemm"]["type"] == "RetrievalInterrupted"
+
+
+async def test_a_url_is_retried_as_a_new_job_without_the_cache(client, monkeypatch):
+    import asyncio
+    from scrapemm.server.api import retrieve as retrieve_api
+    seen = []
+
+    async def fake(url, session, **kwargs):
+        seen.append((url, kwargs))
+        return ScrapingResponse(url=url, content=ScrapedContent(markdown="# Again"),
+                                method="stub", output_format=kwargs["output_format"])
+
+    monkeypatch.setattr(retrieve_api, "retrieve_one", fake)
+    url = "https://example.com/retry-me"
+    first = (await _lines(client, {"urls": [url, "https://example.com/other"],
+                                   "output_format": "markdown", "strip": True,
+                                   "prioritize": "speed", "use_cache": True}))[0]["job_id"]
+    seen.clear()
+
+    answer = await client.post(f"/v1/jobs/{first}/retry", headers=AUTH, json={"url": url})
+    assert answer.status_code == 200
+    new_id = answer.json()["job_id"]
+    assert new_id != first
+    for _ in range(50):  # The job runs on the server, nobody streams it
+        await asyncio.sleep(0.1)
+        job = (await client.get(f"/v1/jobs/{new_id}", headers=AUTH)).json()
+        if job["status"] != "running":
+            break
+    assert job["status"] == "completed" and [r["url"] for r in job["results"]] == [url]
+    assert job["params"]["urls"] == [url] and job["params"]["use_cache"] is False
+    # With the settings of the job it repeats, but for the cache
+    (_, kwargs), = seen
+    assert kwargs["use_cache"] is False and kwargs["strip"] is True
+    assert kwargs["prioritize"] == "speed" and kwargs["output_format"] == "markdown"
+
+
+async def test_retrying_needs_a_job_and_a_url_of_it(client, stub_engine):
+    assert (await client.post("/v1/jobs/nope/retry", headers=AUTH,
+                              json={"url": "https://example.com/x"})).status_code == 404
+    job_id = (await _lines(client, {"urls": ["https://example.com/known"],
+                                    "output_format": "markdown"}))[0]["job_id"]
+    answer = await client.post(f"/v1/jobs/{job_id}/retry", headers=AUTH,
+                               json={"url": "https://example.com/unknown"})
+    assert answer.status_code == 404
+
+
 # --- Search -----------------------------------------------------------------------
 
 SERPER_SAMPLE = json.loads(

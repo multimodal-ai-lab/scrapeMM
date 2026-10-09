@@ -45,6 +45,7 @@ async def retrieve(  # type: ignore[overload-overlap]  # str is a Collection[str
         hedging_delay: float | None = None,
         strip: bool = False,
         screenshot: bool = False,
+        enable_archives_fallback: bool | None = None,
         config: Optional[Settings] = None,
 ) -> ScrapingResponse: ...
 
@@ -63,6 +64,7 @@ async def retrieve(
         hedging_delay: float | None = None,
         strip: bool = False,
         screenshot: bool = False,
+        enable_archives_fallback: bool | None = None,
         config: Optional[Settings] = None,
 ) -> list[ScrapingResponse]: ...
 
@@ -80,6 +82,7 @@ async def retrieve(
         hedging_delay: float | None = None,
         strip: bool = False,
         screenshot: bool = False,
+        enable_archives_fallback: bool | None = None,
         config: Optional[Settings] = None,
 ) -> ScrapingResponse | list[ScrapingResponse]:
     """Retrieves the contents present at the given URL(s) through a scrapeMM server.
@@ -121,6 +124,10 @@ async def retrieve(
     :param screenshot: Whether to also capture each retrieved page in the server's browser,
         as it looks to a visitor (`ScrapingResponse.screenshot`, an ezMM Image). Costs the
         server a page load per URL.
+    :param enable_archives_fallback: Whether to fall back to archiving services (Perma.cc, the Wayback Machine)
+        when the live page cannot be retrieved. None (the default) decides by `prioritize`: on for
+        "completeness", off for "speed". Archives named in an explicit `methods` list are tried
+        regardless. The result is then a copy of the page as it was captured, which may be old.
     :param config: Connection settings to use instead of the global ones.
     """
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
@@ -151,10 +158,12 @@ async def retrieve(
         "hedging_delay": hedging_delay,
         "strip": strip,
         "screenshot": screenshot,
+        "enable_archives_fallback": enable_archives_fallback,
     }
 
     by_url: dict[str, ScrapingResponse] = {}
     progress = None
+    interrupted_by = None  # Who ended the job early, if anyone (the closing summary says)
 
     timeout = aiohttp.ClientTimeout(total=None, sock_read=config.read_timeout)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -176,6 +185,9 @@ async def retrieve(
                 if progress is not None:
                     progress.update(1)
 
+            elif kind == "summary":
+                interrupted_by = message.get("interrupted_by")
+
             elif kind == "error":
                 raise ServerError(message.get("message", "The server reported an error."))
 
@@ -186,7 +198,8 @@ async def retrieve(
         if progress is not None:
             progress.close()
 
-    results = [by_url.get(url) or _missing(url, output_format) for url in requested]
+    results = [by_url.get(url) or _missing(url, output_format, interrupted_by)
+               for url in requested]
     return results[0] if single_url else results
 
 
@@ -313,9 +326,11 @@ async def _to_response(payload: ResponsePayload, registry: RegistryInfo,
     return payload.to_response(multimodal=multimodal, screenshot=screenshot)
 
 
-def _missing(url: str, output_format: OutputFormat) -> ScrapingResponse:
+def _missing(url: str, output_format: OutputFormat,
+             interrupted_by: Optional[str] = None) -> ScrapingResponse:
     """Stands in for a URL the server never reported on, so that the returned list
     still lines up with the URLs that were asked for."""
-    return ScrapingResponse(
-        url=url, content=None, output_format=output_format,
-        errors={"scrapemm": ServerError("The server did not return a result for this URL.")})
+    reason = (f"The job was interrupted by {interrupted_by} before this URL was retrieved."
+              if interrupted_by else "The server did not return a result for this URL.")
+    return ScrapingResponse(url=url, content=None, output_format=output_format,
+                            errors={"scrapemm": ServerError(reason)})

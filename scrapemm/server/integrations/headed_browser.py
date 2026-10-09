@@ -4,15 +4,18 @@ import atexit
 import json
 import logging
 import os
+import shutil
 import socket
 import sys
 import tempfile
+import time
 import urllib.request
 import uuid
 from contextlib import suppress, contextmanager
 from contextvars import ContextVar
 
 import aiohttp
+import psutil
 from pathlib import Path
 from typing import Optional, ClassVar
 from urllib.parse import urlparse
@@ -30,6 +33,7 @@ from scrapemm.server import screenshot, timing
 from scrapemm.server.config import get_config_var
 from scrapemm.server.download.browser import BrowserMedia, annotate_rendered_media
 from scrapemm.server.paths import BROWSER_PROFILE_PATH
+from scrapemm.server import budget
 from scrapemm.server.reachability import is_network_failure
 from scrapemm.server.integrations.base import RetrievalIntegration
 from scrapemm.common.scraping_response import ScrapedContent
@@ -208,6 +212,8 @@ REPLAY_ORIGINS = ("https://rejouer.perma.cc", "https://ghostarchive.org", "https
 ORIGIN_STORAGE_CAP = 2 * 1024 ** 3
 # How often the running browser's replay storage is looked at, see `_watch_replay_storage()`
 STORAGE_CHECK_INTERVAL = 45 * 60
+# How often browsers left behind by other processes are looked for, see `_reap_orphaned_browsers()`
+ORPHAN_CHECK_INTERVAL = 5 * 60
 # The pages through which each replay origin is used (its frames sit inside them)
 _REPLAY_PAGE_HOSTS = {"https://rejouer.perma.cc": ("perma.cc", "rejouer.perma.cc"),
                       "https://ghostarchive.org": ("ghostarchive.org",),
@@ -360,13 +366,76 @@ async def check_replay_storage() -> dict[str, int]:
     return freed
 
 
+async def _watch_orphaned_browsers() -> None:
+    """While the server runs: every `ORPHAN_CHECK_INTERVAL`, reaps the browsers that
+    other processes left behind (see `_reap_orphaned_browsers()`)."""
+    while True:
+        with suppress(Exception):
+            await asyncio.to_thread(_reap_orphaned_browsers)
+        await asyncio.sleep(ORPHAN_CHECK_INTERVAL)
+
+
 _storage_watch: Optional[asyncio.Task] = None
+_orphan_watch: Optional[asyncio.Task] = None
 
 
 def _start_storage_watch() -> None:
-    global _storage_watch
+    global _storage_watch, _orphan_watch
     if _storage_watch is None or _storage_watch.done():
         _storage_watch = asyncio.ensure_future(_watch_replay_storage())
+    if _orphan_watch is None or _orphan_watch.done():
+        _orphan_watch = asyncio.ensure_future(_watch_orphaned_browsers())
+
+
+def _kill_process_tree(pid: int) -> None:
+    """Kills a browser process and everything it spawned (renderers, GPU process, ...)."""
+    try:
+        parent = psutil.Process(pid)
+        processes = parent.children(recursive=True) + [parent]
+    except psutil.Error:
+        return  # Gone already
+    for process in processes:
+        with suppress(psutil.Error):
+            process.kill()
+    psutil.wait_procs(processes, timeout=5)
+
+
+def _is_throwaway_profile(path: Optional[str]) -> bool:
+    """Whether `path` is a profile SeleniumBase made up for one browser (`uc_*` in the
+    temp directory), as opposed to a persistent one."""
+    return bool(path) and Path(path).name.startswith("uc_")         and Path(path).parent == Path(tempfile.gettempdir())
+
+
+def _reap_orphaned_browsers() -> int:
+    """Kills the browsers whose launching process is gone, and deletes their profiles.
+    Returns how many there were.
+
+    A process that ends without closing its browser -- killed, or a script that never
+    got to its exit handler -- leaves Chromium running, reparented to PID 1. Every
+    `podman exec ... python` that retrieved something while the server held the
+    persistent profile did so: each left a browser on a throwaway profile behind, 14 of
+    them within 20 minutes, holding gigabytes. Only throwaway profiles are touched: a
+    browser on a persistent one may be someone's on purpose."""
+    own = getattr(HeadedBrowser._browser, "_process_pid", None)
+    reaped = 0
+    for process in psutil.process_iter(["pid", "ppid", "cmdline"]):
+        try:
+            args = process.info["cmdline"] or []
+            if process.info["ppid"] != 1 or process.info["pid"] == own:
+                continue
+            if "--remote-debugging-port" not in " ".join(args) or any(a.startswith("--type=") for a in args):
+                continue  # Not a browser's main process
+            profile = next((a.split("=", 1)[1] for a in args if a.startswith("--user-data-dir=")), None)
+            if not _is_throwaway_profile(profile):
+                continue
+        except psutil.Error:
+            continue
+        _kill_process_tree(process.info["pid"])
+        shutil.rmtree(profile, ignore_errors=True)
+        reaped += 1
+    if reaped:
+        logger.info(f"Killed {reaped} browser(s) that processes ending without closing them left behind.")
+    return reaped
 
 
 def _process_alive(pid: int) -> bool:
@@ -495,10 +564,11 @@ _BROWSER_CRASH_MARKERS = (
 
 # Seconds a tab gets to answer before it counts as unresponsive (see _close_orphaned_tabs)
 TAB_ANSWER_TIMEOUT = 3
-# Longest a single browser retrieval may take. Heavy archive pages (an 80 MB video in a
-# Perma.cc replay) take a few minutes at most; beyond this one is stuck, and freeing its
+# Longest a single browser retrieval may take. Beyond this one is stuck, and freeing its
 # slot matters more than waiting for it -- it otherwise stalls its whole site's queue.
-BROWSER_RETRIEVAL_TIMEOUT = 600
+# What is slow to arrive (a video in an archive's replay) gives up before this, so that
+# the page comes back without it instead of failing as a whole (see `budget`).
+BROWSER_RETRIEVAL_TIMEOUT = 120
 
 # The tabs that running retrievals opened (CDP target ids). Any other tab showing a
 # page may be left over -- see `_close_orphaned_tabs()`.
@@ -1119,6 +1189,14 @@ def _persist_browser_profile_at_exit() -> None:
         asyncio.run(_close_browser_gracefully(browser))
     except Exception:
         pass  # Interpreter shutdown is no place to raise
+    # Whether or not the request to close got through (at exit, it often cannot): a
+    # browser that outlives its process runs on forever, orphaned
+    if pid := getattr(browser, "_process_pid", None):
+        with suppress(Exception):
+            _kill_process_tree(pid)
+    profile = getattr(getattr(browser, "config", None), "user_data_dir", None)
+    if _is_throwaway_profile(profile):
+        shutil.rmtree(profile, ignore_errors=True)
 
 
 class HeadedBrowser(RetrievalIntegration):
@@ -1415,8 +1493,11 @@ class HeadedBrowser(RetrievalIntegration):
         # never loaded; up to 8 at once went through cleanly.
         slot = _BrowserSlot(get_domain(url) or "")
         try:
+            waiting_since = time.time()
             await slot.acquire()
+            timing.wait_for_slot(time.time() - waiting_since)
             timing.work_started()
+            budget.start(BROWSER_RETRIEVAL_TIMEOUT)  # Inherited by the task below
             # Not asyncio.wait_for(): that waits for the cancelled retrieval to wind
             # down, and a stuck one may never do so. The slot is freed right away instead.
             task = asyncio.ensure_future(self._browse(url, slot=slot, **kwargs))
@@ -1923,10 +2004,29 @@ _DOM_STATE_JS = ("() => [document.documentElement ? document.documentElement.out
                  " document.readyState]")
 
 
+# How long a frame gets to answer one script, seconds. A frame busy with a heavy medium (a
+# long video loading in an archive's replay) may not answer at all, and a call that never
+# returns held the whole retrieval until its limit (perma.cc/75EG-E5GK: two minutes in
+# Perma.cc's search for the frame with the media).
+EVALUATE_TIMEOUT = 10
+
+
+async def evaluate_within(target: Page | Frame, script: str, arg=None,
+                          timeout: float = EVALUATE_TIMEOUT):
+    """`target.evaluate()`, but a frame that does not answer in time raises Playwright's
+    timeout error, which callers treat as any other failed evaluation (navigation, a
+    detached frame), instead of being waited for."""
+    call = target.evaluate(script) if arg is None else target.evaluate(script, arg)
+    try:
+        return await asyncio.wait_for(call, timeout)
+    except asyncio.TimeoutError:
+        raise PlaywrightTimeoutError(f"The frame did not answer within {timeout:.0f} s.") from None
+
+
 async def _is_thin(target: Page | Frame, min_text: int) -> bool:
     try:
-        return await target.evaluate(
-            "() => (document.body ? document.body.innerText.length : 0)") < min_text
+        return await evaluate_within(
+            target, "() => (document.body ? document.body.innerText.length : 0)") < min_text
     except PlaywrightError:
         return True  # Mid-navigation: the next document is still to come
 
@@ -1945,7 +2045,7 @@ async def settle_dom(target: Page | Frame, min_text: int = 0) -> None:
     anchor, since = None, start  # The size the DOM holds still at, and since when
     while (now := loop.time()) < start + (DOM_THIN_TIMEOUT if min_text else DOM_SETTLE_TIMEOUT):
         try:
-            size, state = await target.evaluate(_DOM_STATE_JS)
+            size, state = await evaluate_within(target, _DOM_STATE_JS)
         except PlaywrightError:
             size, state = None, None  # Mid-navigation: whatever comes next is a new page
         settled = False
@@ -1963,6 +2063,7 @@ async def settle_dom(target: Page | Frame, min_text: int = 0) -> None:
         await asyncio.sleep(DOM_SETTLE_INTERVAL)
 
 
+CONSENT_FRAME_TIMEOUT = 1.0 # Seconds a frame has to answer the removal
 # Removes the dialogs of known consent platforms (see `util.CONSENT_PLATFORMS`) from a
 # document, and the scroll lock they put on it. Returns [bytes removed, [[id, classes]]].
 _REMOVE_CONSENT_JS = """({ids, prefixes, classes}) => {
@@ -2005,17 +2106,24 @@ async def remove_consent_dialogs(page: Page) -> None:
                                       CONSENT_PLATFORM_ID_PREFIXES, consent_platform_of)
     config = {"ids": sorted(CONSENT_PLATFORM_IDS), "prefixes": list(CONSENT_PLATFORM_ID_PREFIXES),
               "classes": sorted(CONSENT_PLATFORM_CLASSES)}
-    for frame in getattr(page, "frames", None) or [page]:
+    async def clean(frame) -> None:
         try:
-            removed_bytes, removed = await frame.evaluate(_REMOVE_CONSENT_JS, config)
-        except Exception:  # Detached or navigating (or a test double): nothing to remove
+            # Timed: a frame that is still loading (an embedded YouTube player, say) may
+            # never answer, and the whole retrieval would wait with it (aosfatos.org)
+            removed_bytes, removed = await asyncio.wait_for(
+                frame.evaluate(_REMOVE_CONSENT_JS, config), CONSENT_FRAME_TIMEOUT)
+        except Exception:  # Detached, navigating or silent (or a test double): nothing to remove
             logger.debug(f"Could not look for consent dialogs in {getattr(frame, 'url', '?')}.",
                          exc_info=True)
-            continue
+            return
         if removed:
             platforms = sorted({consent_platform_of(i, c) or "?" for i, c in removed})
             logger.info(f"🍪 Removed the consent dialog of {', '.join(platforms)} "
                         f"({removed_bytes / 1e6:.2f} MB) from {frame.url[:120]}.")
+
+    # A frame without an address has not navigated anywhere yet and never answers
+    frames = [f for f in getattr(page, "frames", None) or [page] if getattr(f, "url", "?") != ""]
+    await asyncio.gather(*(clean(frame) for frame in frames))
 
 
 class Browser(HeadedBrowser):

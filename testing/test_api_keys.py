@@ -203,3 +203,31 @@ async def test_test_runs_run_under_the_starters_key(tmp_path, monkeypatch):
     await asyncio.wait_for(run._task, 30)
     job = store._connection.execute("SELECT params FROM jobs").fetchone()
     assert '"api_key": "abc123"' in job["params"]
+
+
+@pytest.mark.parametrize("prioritize", ["completeness", "speed"])
+async def test_test_runs_retrieve_with_the_chosen_priority(tmp_path, monkeypatch, prioritize):
+    import asyncio
+    from scrapemm.common import ScrapedContent, ScrapingResponse
+    from scrapemm.server import engine, jobs as jobs_module, testsuite
+    from scrapemm.server.jobs import JobStore
+
+    monkeypatch.setattr(jobs_module, "jobs", JobStore(path=tmp_path / "jobs.db"))
+    monkeypatch.setattr(testsuite, "suite", lambda: [
+        {"url": "https://a.example", "category": "Open web", "expected": {}}])
+    monkeypatch.setattr(testsuite, "RUNS_PATH", tmp_path / "runs.json")
+    seen = []
+
+    async def retrieved(url, session, **kwargs):
+        seen.append(kwargs.get("prioritize"))
+        return ScrapingResponse(url=url, content=ScrapedContent(html="<p>Hi</p>"),
+                                method="stub", output_format="multimodal")
+
+    monkeypatch.setattr(engine, "retrieve_one", retrieved)
+    run = testsuite.TestRun()
+    with pytest.raises(ValueError):
+        run.start({"id": "abc123", "name": "Pipeline"}, prioritize="fastest")
+    run.start({"id": "abc123", "name": "Pipeline"}, prioritize=prioritize)
+    await asyncio.wait_for(run._task, 30)
+    assert seen == [prioritize]
+    assert run.report()["prioritize"] == prioritize

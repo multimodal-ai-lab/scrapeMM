@@ -468,6 +468,7 @@ def _job_figures() -> dict:
             # Per 15-minute slot, for "today" in the viewer's time zone (see `recent_counts`)
             "recent": {"slot": SLOT, "counts": jobs.recent_counts()},
             "success_rate": jobs.recent_success_rate(RECENT_WINDOW),
+            "scrape_times": jobs.recent_scrape_times(RECENT_WINDOW),
         },
         "jobs": {**jobs.stats(), "running": jobs.count_jobs(status="running")},
         "searches": jobs.search_figures(),

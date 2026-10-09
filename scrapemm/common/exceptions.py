@@ -56,6 +56,10 @@ class DiskFull(Exception):
     before continuing."""
 
 
+class RetrievalInterrupted(RetrievalFailed):
+    """A user stopped the retrieval of this URL (in the web UI or through the API)."""
+
+
 class ServerError(Exception):
     """The scrapeMM server itself failed, or the client could not reach it."""
 
@@ -71,6 +75,7 @@ WIRE_EXCEPTIONS: dict[str, type[Exception]] = {
         RateLimitError,
         QuotaExceededError,
         RetrievalFailed,
+        RetrievalInterrupted,
         AccessBlockedError,
         RegionBlockedError,
         CaptchaEncounteredError,

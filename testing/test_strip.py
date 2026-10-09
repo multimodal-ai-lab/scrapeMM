@@ -76,6 +76,14 @@ CONSENT_BANNERS = [
     '<iframe src="https://cmp.example.com/index.html"></iframe></div>',
     '<div class="site-consent-layer"><p>Nous utilisons des traceurs. Votre consentement ?</p>'
     '<button>Tout accepter</button></div>',
+    # Tarteaucitron (science.feedback.org)
+    '<div id="tarteaucitronRoot"><div id="tarteaucitronAlertBig">Cookies management panel '
+    '<button>Allow all cookies</button></div></div>',
+    # Google Funding Choices (boatos.org), with a push-notification prompt beside it
+    '<div class="fc-consent-root"><div class="fc-dialog-container">boatos.org solicita o seu '
+    'consentimento. <button>Consentir</button></div></div>'
+    '<div id="perfecty-push-dialog-container" class="site perfecty-push-dialog-container">'
+    'Se inscreva para receber nossas atualizações <button>Permitir</button></div>',
 ]
 
 
@@ -162,6 +170,37 @@ async def test_strip_content_keeps_media_it_cannot_place():
     stripped = await strip_content(original, url=URL)
     assert video.reference in str(stripped.multimodal)
     assert "Menu" not in str(stripped.multimodal)
+
+
+async def test_strip_content_does_not_hold_the_loop_while_the_registry_is_busy(monkeypatch):
+    """Looking up the known media asks the registry, which can be slow to answer while
+    media downloads register their files in threads (ezMM's lock, before 0.7.1). That
+    wait must happen off the loop, or every request stalls with it."""
+    import asyncio
+    import threading
+    import time
+    from ezmm.common.registry import item_registry
+
+    photo = _image("https://example.com/photo.jpg", "maroon")
+    html = '<html><body><nav>Menu</nav><main><p>Text</p><img src="photo.jpg"></main></body></html>'
+    original = ScrapedContent(html=html, multimodal=MultimodalSequence(f"Text {photo.reference}"))
+
+    release = threading.Event()
+    lookup = item_registry.get_source_urls
+
+    def slow_lookup(*args, **kwargs):
+        release.wait(5)  # A registry busy elsewhere
+        return lookup(*args, **kwargs)
+
+    monkeypatch.setattr(item_registry, "get_source_urls", slow_lookup)
+    stripping = asyncio.create_task(strip_content(original, url=URL))
+    started = time.monotonic()
+    await asyncio.sleep(0.3)  # Returns late if the loop is held
+    lag = time.monotonic() - started - 0.3
+    release.set()
+    stripped = await stripping
+    assert lag < 0.2
+    assert photo.reference in str(stripped.multimodal)
 
 
 @pytest.fixture

@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from scrapemm.common.paths import APP_NAME
-from .. import registry, status as status_module
+from .. import interrupts, registry, status as status_module
 from ..auth import Principal, require_admin, require_api_key
 from ..blacklist import blacklist
 from ..cache import cache, immutable, KINDS
@@ -381,6 +381,35 @@ async def get_result_content(job_id: str, url: str = Query(...)) -> dict:
     return {"url": url, "content": content}
 
 
+class InterruptRequest(BaseModel):
+    url: Optional[str] = None  # Only this URL; the job goes on with the others
+
+
+@router.post("/jobs/{job_id}/interrupt")
+async def interrupt_job(job_id: str, body: Optional[InterruptRequest] = None,
+                        principal: Principal = Depends(require_api_key)) -> dict:
+    """Interrupts a running job, on behalf of the user: its retrievals stop, what was
+    retrieved so far stays, and the job shows as interrupted by the user. With a `url`,
+    only that URL's retrieval is stopped (it fails as interrupted) and the job goes on.
+    Its own key and admins may do so."""
+    url = body.url if body else None
+    state = await asyncio.to_thread(jobs.job_state, job_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"No job '{job_id}'.")
+    if not (principal.is_admin or state["api_key"] == principal.id):
+        raise HTTPException(status_code=403, detail="That job runs under another API key.")
+    if state["status"] != "running":
+        raise HTTPException(status_code=409, detail=f"The job is no longer running "
+                                                     f"({state['status']}).")
+    if interrupts.interrupt(job_id, url):
+        return {"job_id": job_id, "interrupted": True, **({"url": url} if url else {})}
+    if url is not None and interrupts.is_live(job_id):
+        raise HTTPException(status_code=409, detail="That URL is not being retrieved (any more).")
+    # Running in the history, but nothing on this server works on it: an orphaned job
+    closed = await asyncio.to_thread(jobs.interrupt_stale, job_id, interrupts.USER)
+    return {"job_id": job_id, "interrupted": closed, "orphaned": True}
+
+
 @router.delete("/jobs/{job_id}")
 async def delete_job(job_id: str) -> dict:
     return {"job_id": job_id, "deleted": jobs.delete_job(job_id)}
@@ -422,7 +451,8 @@ async def retrieval_statistics(
 async def media(kind: str, identifier: int) -> FileResponse:
     """Serves a media file's bytes, for clients that cannot reach the registry
     directly. Clients on the same machine never come here."""
-    item = registry.resolve_item(kind, identifier)
+    # Off the loop: the registry's lock may be held by the threads adding media
+    item = await asyncio.to_thread(registry.resolve_item, kind, identifier)
     if item is None:
         raise HTTPException(status_code=404, detail=f"No item <{kind}:{identifier}>.")
     path = item.file_path

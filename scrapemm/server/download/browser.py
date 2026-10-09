@@ -27,6 +27,7 @@ from playwright.async_api import Page, Frame, Response
 from yarl import URL
 
 from scrapemm.server.download.common import HEADERS
+from scrapemm.server import budget
 from scrapemm.server.download.requests import MEDIA_TIMEOUT
 from scrapemm.server.download.util import stream
 
@@ -69,8 +70,13 @@ if (!window.__scrapemmStash) {
   window.__scrapemmBlobs = {};
   let seq = 0;
   window.__scrapemmStash = async (url, opts = {}) => {
+    // Gives up on a medium that is slow, and says so: `reason: 'timeout'`. The time can
+    // be set for the whole frame (`window.__scrapemmStashTimeout`, milliseconds).
+    const timeoutMs = opts.timeoutMs || window.__scrapemmStashTimeout || 0;
+    const controller = new AbortController();
+    const timer = timeoutMs ? setTimeout(() => controller.abort(), timeoutMs) : null;
     try {
-      const res = await fetch(url, { credentials: 'include' });
+      const res = await fetch(url, { credentials: 'include', signal: controller.signal });
       if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
       const type = res.headers.get('content-type') || '';
       const t = type.toLowerCase();
@@ -89,7 +95,9 @@ if (!window.__scrapemmStash) {
       window.__scrapemmBlobs[id] = { blob, type: blob.type || type };
       return { ok: true, id, size: blob.size, type: blob.type || type };
     } catch (e) {
-      return { ok: false, reason: String(e) };
+      return { ok: false, reason: controller.signal.aborted ? 'timeout' : String(e) };
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   };
 }
@@ -374,6 +382,7 @@ class BrowserMedia:
 
     async def _get(self, url: str, frame: Optional[MediaSource], limit: Optional[int],
                    fallback: Optional[str], timeout: float) -> tuple[Optional[bytes], Optional[str]]:
+        timeout = budget.cap(timeout)  # No longer than the retrieval has time for
         steps = [(self._copy, url), (self._fetch, url)]
         if fallback and fallback != url:
             steps += [(self._copy, fallback), (self._fetch, fallback)]

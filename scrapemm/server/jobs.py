@@ -16,6 +16,7 @@ files would break sequences that were handed out long ago.
 import asyncio
 import json
 import logging
+import math
 import sqlite3
 import threading
 import time
@@ -148,6 +149,7 @@ class JobStore:
             )
             self._start_counters()
             self._add_outcome_columns()
+            self._add_interruption_column()
             self._split_off_content()
             self._connection.executescript(RESULTS_INDEXES)
             self._connection.commit()
@@ -226,6 +228,13 @@ class JobStore:
         if rows:
             logger.info(f"Classified the outcome of {len(rows)} stored results.")
 
+    def _add_interruption_column(self) -> None:
+        """Who interrupted a job (see `scrapemm.server.interrupts`). Jobs interrupted
+        before it was recorded have none."""
+        columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(jobs)")}
+        if "interrupted_by" not in columns:
+            self._connection.execute("ALTER TABLE jobs ADD COLUMN interrupted_by TEXT")
+
     # --- Writing ------------------------------------------------------------------
 
     # For callers on the event loop: the same, in a worker thread
@@ -238,9 +247,9 @@ class JobStore:
         await run_light(self.record, job_id, payload, success)
 
     async def afinish(self, job_id: str, succeeded: int, failed: int,
-                      status: str = "completed") -> None:
+                      status: str = "completed", interrupted_by: Optional[str] = None) -> None:
         from .workers import run_light
-        await run_light(self.finish, job_id, succeeded, failed, status)
+        await run_light(self.finish, job_id, succeeded, failed, status, interrupted_by)
 
     def start(self, params: dict, url_count: int) -> str:
         """Opens a job. Every job runs under an API key, the one of whoever asked for it
@@ -290,12 +299,15 @@ class JobStore:
             self.version += 1
 
     def finish(self, job_id: str, succeeded: int, failed: int,
-               status: str = "completed") -> None:
+               status: str = "completed", interrupted_by: Optional[str] = None) -> None:
+        """Closes the job. An interrupted one says who interrupted it (user, client or
+        server, see `scrapemm.server.interrupts`)."""
         with self._lock:
             self._connection.execute(
-                "UPDATE jobs SET finished_at = ?, status = ?, succeeded = ?, failed = ? "
-                "WHERE id = ?",
-                (time.time(), status, succeeded, failed, job_id))
+                "UPDATE jobs SET finished_at = ?, status = ?, succeeded = ?, failed = ?, "
+                "interrupted_by = ? WHERE id = ?",
+                (time.time(), status, succeeded, failed,
+                 interrupted_by if status == "interrupted" else None, job_id))
             self._connection.commit()
             self.version += 1
 
@@ -305,11 +317,31 @@ class JobStore:
         forever."""
         with self._lock:
             count = self._connection.execute(
-                "UPDATE jobs SET status = 'interrupted', finished_at = ? "
+                "UPDATE jobs SET status = 'interrupted', finished_at = ?, interrupted_by = 'server' "
                 "WHERE status = 'running'", (time.time(),)).rowcount
             self._connection.commit()
             self.version += 1
         return count
+
+    def interrupt_stale(self, job_id: str, by: str) -> bool:
+        """Closes a job that is running in the history but that nothing on this server
+        works on (it was orphaned). False if it is not running."""
+        with self._lock:
+            changed = self._connection.execute(
+                "UPDATE jobs SET status = 'interrupted', finished_at = ?, interrupted_by = ? "
+                "WHERE id = ? AND status = 'running'", (time.time(), by, job_id)).rowcount
+            self._connection.commit()
+            self.version += 1
+        return bool(changed)
+
+    def job_state(self, job_id: str) -> Optional[dict]:
+        """The status, the key and the parameters of a job, without its results: None if
+        there is none."""
+        rows = self.query("SELECT status, params FROM jobs WHERE id = ?", (job_id,))
+        if not rows:
+            return None
+        params = json.loads(rows[0]["params"]) if rows[0]["params"] else {}
+        return {"status": rows[0]["status"], "api_key": params.get("api_key"), "params": params}
 
     # --- Reading ------------------------------------------------------------------
 
@@ -543,6 +575,19 @@ class JobStore:
             # The share that actually yielded content
             "retrieved_rate": (outcomes[OK] / total) if total else None,
         }
+
+    def recent_scrape_times(self, limit: int = 1000) -> dict:
+        """The median and 95th percentile of the retrieval time over the most recent
+        `limit` actual scrapes (answers from the cache took no scraping and are left out)."""
+        times = sorted(row[0] for row in self.query(
+            "SELECT retrieval_time FROM results WHERE from_cache = 0 "
+            "AND retrieval_time IS NOT NULL ORDER BY created_at DESC LIMIT ?", (limit,)))
+        if not times:
+            return {"window": limit, "total": 0, "median": None, "p95": None}
+        return {"window": limit, "total": len(times),
+                "median": times[len(times) // 2] if len(times) % 2
+                else (times[len(times) // 2 - 1] + times[len(times) // 2]) / 2,
+                "p95": times[min(len(times) - 1, math.ceil(0.95 * len(times)) - 1)]}
 
     def recent_counts(self, seconds: float = RECENT_SPAN) -> list[list]:
         """The URLs retrieved in the last `seconds`, as [slot start, count] per slot of
