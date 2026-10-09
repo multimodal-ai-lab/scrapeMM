@@ -1,6 +1,6 @@
 [project]
 name = "scrapeMM"
-version = "1.8.8"
+version = "1.8.9"
 description = "Multimodal scraper for social media, internet archives, and the open web."
 readme = "README.md"
 requires-python = "<3.15,>=3.11"
