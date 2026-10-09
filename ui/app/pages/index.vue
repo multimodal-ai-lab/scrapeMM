@@ -279,7 +279,11 @@ const tiles = computed(() => {
       to: env.throughput.success_rate.outcomes?.error ? '/jobs?outcome=error' : '/jobs' },
     { label: 'Scraping time', icon: 'i-fa7-solid-stopwatch',
       value: times?.median == null ? '—' : `${times.median.toFixed(1)} s`,
-      tone: 'neutral' as const,
+      // Judged by the median, the headline figure: slow above 5 s, bad above 20 s
+      tone: times?.median == null ? 'neutral' as const
+        : times.median > 20 ? 'error' as const
+          : times.median > 5 ? 'warning' as const
+            : 'neutral' as const,
       detail: times?.total
         ? `median · 95th percentile ${times.p95.toFixed(1)} s, of the last ${times.total} scrapes`
         : 'nothing scraped yet' },

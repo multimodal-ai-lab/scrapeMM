@@ -25,6 +25,9 @@ class RetrievalClock:
         self.entered = time.time()
         self.admitted: Optional[float] = None
         self.started: Optional[float] = None
+        # Waits for a browser slot after the clock started (the reachability check comes
+        # first): queue time all the same, see `wait_for_slot()`
+        self.slot_wait = 0.0
 
     def admit(self) -> None:
         if self.admitted is None:
@@ -38,8 +41,8 @@ class RetrievalClock:
         """Sets the response's retrieval and queue times by this clock. In place: the
         response may be the one just put in the cache, which should agree with it."""
         start = self.started or self.admitted or self.entered
-        response.retrieval_time = time.time() - start
-        response.queue_time = start - self.entered
+        response.retrieval_time = max(time.time() - start - self.slot_wait, 0.0)
+        response.queue_time = start - self.entered + self.slot_wait
         return response
 
 
@@ -61,6 +64,13 @@ def work_started() -> None:
     """Marks the current retrieval's first outgoing request, if not marked yet."""
     if (clock := _current.get()) is not None:
         clock.mark()
+
+
+def wait_for_slot(seconds: float) -> None:
+    """Counts `seconds` spent waiting for a browser slot as queue time, even if the
+    clock had started already."""
+    if (clock := _current.get()) is not None and clock.started is not None:
+        clock.slot_wait += seconds
 
 
 async def _on_request_start(session, context, params) -> None:

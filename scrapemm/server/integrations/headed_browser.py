@@ -7,6 +7,7 @@ import os
 import socket
 import sys
 import tempfile
+import time
 import urllib.request
 import uuid
 from contextlib import suppress, contextmanager
@@ -1415,7 +1416,9 @@ class HeadedBrowser(RetrievalIntegration):
         # never loaded; up to 8 at once went through cleanly.
         slot = _BrowserSlot(get_domain(url) or "")
         try:
+            waiting_since = time.time()
             await slot.acquire()
+            timing.wait_for_slot(time.time() - waiting_since)
             timing.work_started()
             # Not asyncio.wait_for(): that waits for the cancelled retrieval to wind
             # down, and a stuck one may never do so. The slot is freed right away instead.
