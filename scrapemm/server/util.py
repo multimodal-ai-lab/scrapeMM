@@ -1009,7 +1009,9 @@ async def strip_content(content: "ScrapedContent", url: Optional[str] = None) ->
     stripped = replace(content, html=html, stripped=True)
     if content.multimodal is not None:
         items = list({e.reference: e for e in content.multimodal if not isinstance(e, str)}.values())
-        known = KnownMedia(items)
+        # Off the loop: every item asks the registry for its URLs, and the registry's lock
+        # may be held for seconds by the threads adding media meanwhile
+        known = await asyncio.to_thread(KnownMedia, items)
         sequence = await to_multimodal_sequence(html, session=None, url=url, known_media=known)
         domain_root = get_domain_root(url) if url else None
         removed = {m.reference for uri in removed_uris

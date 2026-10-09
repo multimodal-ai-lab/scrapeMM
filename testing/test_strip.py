@@ -172,6 +172,38 @@ async def test_strip_content_keeps_media_it_cannot_place():
     assert "Menu" not in str(stripped.multimodal)
 
 
+async def test_strip_content_does_not_hold_the_loop_while_the_registry_is_busy():
+    """Media downloads register their files in threads, holding the registry's lock
+    meanwhile. Looking up the known media must wait for it off the loop, or every
+    request stalls with it."""
+    import asyncio
+    import threading
+    import time
+    from ezmm.common.registry import item_registry
+
+    photo = _image("https://example.com/photo.jpg", "maroon")
+    html = '<html><body><nav>Menu</nav><main><p>Text</p><img src="photo.jpg"></main></body></html>'
+    original = ScrapedContent(html=html, multimodal=MultimodalSequence(f"Text {photo.reference}"))
+
+    held, release = threading.Event(), threading.Event()
+
+    def hold_lock():
+        with item_registry._lock:
+            held.set()
+            release.wait(5)
+
+    threading.Thread(target=hold_lock, daemon=True).start()
+    held.wait(5)
+    stripping = asyncio.create_task(strip_content(original, url=URL))
+    started = time.monotonic()
+    await asyncio.sleep(0.3)  # Returns late if the loop is held
+    lag = time.monotonic() - started - 0.3
+    release.set()
+    stripped = await stripping
+    assert lag < 0.2
+    assert photo.reference in str(stripped.multimodal)
+
+
 @pytest.fixture
 def browser_serves(monkeypatch, tmp_path):
     """Makes the browser return the given HTML, with the host reachable and not

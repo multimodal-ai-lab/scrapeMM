@@ -451,7 +451,8 @@ async def retrieval_statistics(
 async def media(kind: str, identifier: int) -> FileResponse:
     """Serves a media file's bytes, for clients that cannot reach the registry
     directly. Clients on the same machine never come here."""
-    item = registry.resolve_item(kind, identifier)
+    # Off the loop: the registry's lock may be held by the threads adding media
+    item = await asyncio.to_thread(registry.resolve_item, kind, identifier)
     if item is None:
         raise HTTPException(status_code=404, detail=f"No item <{kind}:{identifier}>.")
     path = item.file_path
