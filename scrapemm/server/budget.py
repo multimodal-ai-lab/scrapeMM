@@ -33,9 +33,12 @@ def remaining() -> Optional[float]:
     return None if deadline is None else deadline - time.monotonic()
 
 
-def cap(seconds: float, reserve: float = 10.0, floor: float = 5.0) -> float:
+def cap(seconds: float, reserve: float = 10.0, floor: float = 0.0) -> float:
     """`seconds`, or less if the budget runs out sooner: it leaves `reserve` seconds for
-    what follows the wait, but never less than `floor` seconds for the wait itself."""
+    what follows the wait. Once that time is used up, 0 (or `floor`): the caller gives up
+    at once. Granting every wait a few seconds more instead let a page's media, queued two
+    at a time per host, wait on in rounds well past the budget's end -- and the page that
+    the budget was to save was cut off and lost as a whole (kallxo.com, 30+ images)."""
     left = remaining()
     if left is None:
         return seconds

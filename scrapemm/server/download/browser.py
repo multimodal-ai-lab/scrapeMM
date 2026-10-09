@@ -383,6 +383,9 @@ class BrowserMedia:
     async def _get(self, url: str, frame: Optional[MediaSource], limit: Optional[int],
                    fallback: Optional[str], timeout: float) -> tuple[Optional[bytes], Optional[str]]:
         timeout = budget.cap(timeout)  # No longer than the retrieval has time for
+        if timeout <= 0:
+            self.stats["skipped"] += 1
+            return None, None  # The retrieval's time is up: the page comes back without it
         steps = [(self._copy, url), (self._fetch, url)]
         if fallback and fallback != url:
             steps += [(self._copy, fallback), (self._fetch, fallback)]

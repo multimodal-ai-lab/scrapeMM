@@ -120,3 +120,16 @@ async def test_media_in_consent_banners_are_not_resolved(monkeypatch):
     assert fetched == ["https://example.com/photo.jpg"]
     assert "vendor-logo.png" not in str(sequence)
     assert "Wir verwenden Cookies" in str(sequence)
+
+
+def test_markdown_of_a_page_nested_too_deeply_for_recursion():
+    """markdownify recurses per level of nesting: a page nested 1500 levels deep failed
+    every method with a RecursionError. Its text, links and images still come through."""
+    from scrapemm.server.util import html2md
+    html = ('<p>Top</p>' + '<div>' * 1500 + 'Deep <a href="https://e.example/x">link</a> '
+            '<img src="https://e.example/a.jpg">' + '</div>' * 1500 + '<p>After</p>')
+    markdown = html2md(html)
+    assert markdown.startswith("Top")
+    assert "[link](https://e.example/x)" in markdown
+    assert "![](https://e.example/a.jpg)" in markdown
+    assert markdown.endswith("After")

@@ -792,18 +792,10 @@ async def _resolve_media_in(
 
     # 4. Download media, at most a few at a time from each host, like a browser does
     host_gates: dict[str, asyncio.Semaphore] = {}
+    skipped: list[str] = []  # Not waited for, as the retrieval's time was up
 
-    async def bounded(uri: str, task: Awaitable):
-        if uri in pageless:
-            # Not these: an embedded YouTube video may queue for minutes behind the
-            # others (YouTube's pacing), and still arrive
-            return await task
-        seconds = budget.cap(MAX_SECONDS_PER_MEDIUM)
-        try:
-            return await asyncio.wait_for(task, seconds)
-        except TimeoutError:
-            logger.info(f"Gave up on the medium {uri[:120]} after {seconds:.0f} s.")
-            return None
+    def bounded(uri: str, task: Awaitable):
+        return _wait_for_medium(uri, task, pageless, skipped)
 
     async def gated(uri: str, task: Awaitable):
         if uri in in_browser:
@@ -833,6 +825,10 @@ async def _resolve_media_in(
             if inspect.iscoroutine(task) and inspect.getcoroutinestate(task) == inspect.CORO_CREATED:
                 task.close()
 
+    if skipped:
+        logger.info(f"Left out {len(skipped)} media of {url or 'the page'}: the retrieval's "
+                    f"time was up (e.g. {skipped[0][:100]}).")
+
     # 5. Add downloaded media to resolved_media
     if known_media is not None:
         url_to_medium = known_media
@@ -843,6 +839,27 @@ async def _resolve_media_in(
     # 6. Replace or remove elements in the SOUP
     await _in_html_thread(_replace_media_elements, media_elements, media_uris, resolved_media)
     return True
+
+
+async def _wait_for_medium(uri: str, task: Awaitable, pageless: set[str], skipped: list[str]):
+    """Waits for one medium, at most `MAX_SECONDS_PER_MEDIUM` and no longer than the
+    retrieval has time for. One whose wait would start when the time is up is not waited
+    for at all (added to `skipped`): the page comes back without it."""
+    if uri in pageless:
+        # Not these: an embedded YouTube video may queue for minutes behind the
+        # others (YouTube's pacing), and still arrive
+        return await task
+    seconds = budget.cap(MAX_SECONDS_PER_MEDIUM)
+    if seconds <= 0:
+        skipped.append(uri)
+        if inspect.iscoroutine(task):
+            task.close()
+        return None
+    try:
+        return await asyncio.wait_for(task, seconds)
+    except TimeoutError:
+        logger.info(f"Gave up on the medium {uri[:120]} after {seconds:.0f} s.")
+        return None
 
 
 def _replace_media_elements(media_elements: list[Tag], media_uris: list[Optional[str]],
@@ -1060,14 +1077,41 @@ def html2md(html: str | MultimodalSequence) -> str:
     return soup2md(BeautifulSoup(str(html), "html.parser"))
 
 
+# Deepest nesting of elements Markdown conversion copes with. markdownify recurses once
+# or twice per level, and Python stops at a depth of 1000: a page nested deeper failed
+# every method (12 times in an hour in production)
+MAX_MARKDOWN_DEPTH = 200
+
+
 def soup2md(soup: BeautifulSoup) -> str:
-    """Converts parsed HTML to Markdown, leaving the tree as is."""
+    """Converts parsed HTML to Markdown, leaving the tree as is -- unless it is nested
+    too deeply to convert, which then gets flattened (see `_flatten_deep_nesting()`)."""
+    converter = MarkdownConverter(heading_style="ATX")
     try:
-        markdown = MarkdownConverter(heading_style="ATX").convert_soup(soup)
-        return postprocess_markdown(markdown)
+        markdown = converter.convert_soup(soup)
     except RecursionError:
-        logger.debug("RecursionError while converting HTML to Markdown.")
-        raise
+        flattened = _flatten_deep_nesting(soup, MAX_MARKDOWN_DEPTH)
+        logger.info(f"Flattened {flattened} elements nested too deeply to convert to Markdown.")
+        markdown = converter.convert_soup(soup)
+    return postprocess_markdown(markdown)
+
+
+def _flatten_deep_nesting(soup: BeautifulSoup, max_depth: int) -> int:
+    """Unwraps the elements nested deeper than `max_depth`, so that their content moves up
+    to the ancestor at that depth. Text, links and media stay; only the wrappers' own
+    formatting goes. Without recursion itself, or it would fail the same way. Returns the
+    number of elements unwrapped."""
+    depths: dict[int, int] = {}
+    deep = []
+    for tag in soup.find_all(True):  # In document order: a parent before its children
+        depth = depths.get(id(tag.parent), 0) + 1
+        depths[id(tag)] = depth
+        # Childless elements (images, line breaks) add no depth, and are content
+        if depth > max_depth and tag.name != "a" and tag.contents:
+            deep.append(tag)
+    for tag in reversed(deep):  # The deepest first, so each moves up into one going next
+        tag.unwrap()
+    return len(deep)
 
 
 def sanitize(text: str) -> str:

@@ -477,7 +477,8 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
     # First, as the page may still be building itself: collected too early, a video its
     # player had not yet created was missing (see `_settle_media_frame()`)
     await _settle_media_frame(frame)
-    video_seconds = budget.cap(STASH_VIDEO_TIMEOUT, reserve=30)  # Leaves time to read them out
+    # Leaves time to read them out. Never 0: the page takes that for no limit at all
+    video_seconds = budget.cap(STASH_VIDEO_TIMEOUT, reserve=30, floor=5)
     image_seconds = min(STASH_IMAGE_TIMEOUT, video_seconds)
     try:
         await install_stash(frame)
