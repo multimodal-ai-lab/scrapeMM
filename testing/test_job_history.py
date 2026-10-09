@@ -1,11 +1,11 @@
-"""The job history: all-time counters that pruning never lowers, and limits from the
-settings (`job_retention_days`, `max_jobs`; 0 for no limit)."""
+"""The job history: all-time counters, and limits from the settings (`job_retention_days`,
+`max_jobs`; 0 for no limit) on how long jobs keep their content. The jobs are kept."""
 
 import time
 
 import pytest
 
-from scrapemm.common.wire import ResponsePayload
+from scrapemm.common.wire import ContentPayload, ResponsePayload
 from scrapemm.server import config
 from scrapemm.server.jobs import JobStore
 
@@ -24,17 +24,26 @@ def run_jobs(store: JobStore, n: int, urls_each: int = 2) -> list[str]:
         job = store.start({"urls": [f"https://e.example/{i}/{u}" for u in range(urls_each)],
                            "api_key": "root"}, urls_each)
         for u in range(urls_each):
-            store.record(job, ResponsePayload(url=f"https://e.example/{i}/{u}", method="stub"), True)
+            store.record(job, ResponsePayload(url=f"https://e.example/{i}/{u}", method="stub",
+                                              content=ContentPayload(markdown="Text")), True)
         ids.append(job)
     return ids
 
 
-def test_all_time_counts_survive_pruning(store):
-    run_jobs(store, 5)
-    assert store.prune(max_jobs=2) == 3
+def test_pruning_drops_only_the_content(store):
+    """Jobs beyond the limit lose their content, but they and their results stay: the
+    statistics are made of them."""
+    ids = run_jobs(store, 5)
+    assert store.prune(max_jobs=2) == 6  # Three jobs of two URLs
     stats = store.stats()
-    assert (stats["jobs"], stats["urls"]) == (2, 4)  # What the history still holds
+    assert (stats["jobs"], stats["urls"]) == (5, 10)
     assert (stats["all_time"]["jobs"], stats["all_time"]["urls"]) == (5, 10)
+    old, new = store.get_job(ids[0]), store.get_job(ids[-1])
+    assert [r["method"] for r in old["results"]] == ["stub", "stub"]
+    assert not any(r["has_content"] for r in old["results"])
+    assert store.get_content(ids[0], "https://e.example/0/0") is None
+    assert all(r["has_content"] for r in new["results"])
+    assert store.prune(max_jobs=2) == 0  # Nothing left to drop
 
 
 def test_a_url_recorded_again_counts_once(store):
@@ -46,14 +55,15 @@ def test_a_url_recorded_again_counts_once(store):
 def test_limits_come_from_the_settings(store, monkeypatch):
     run_jobs(store, 4)
     monkeypatch.setattr(config, "_config", {"max_jobs": 3})
-    assert store.prune() == 1
+    assert store.prune() == 2  # One job's two results
     monkeypatch.setattr(config, "_config", {"max_jobs": 0, "job_retention_days": 0})
     assert store.prune() == 0  # 0: no limit
     # Too old for a retention of a day
     store._connection.execute("UPDATE jobs SET created_at = ?", (time.time() - 2 * 86400,))
     store._connection.commit()
     monkeypatch.setattr(config, "_config", {"job_retention_days": 1})
-    assert store.prune() == 3
+    assert store.prune() == 6  # The other three jobs' results
+    assert store.stats()["jobs"] == 4
 
 
 def test_counters_start_from_an_existing_history(tmp_path, monkeypatch):

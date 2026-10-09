@@ -247,20 +247,20 @@ onBeforeUnmount(() => clearInterval(statsTimer))
             <UInput v-model="retrieval.blacklist_ttl" type="number" min="0" />
           </UFormField>
         </div>
-        <!-- How much history the Jobs and Statistics views reach back. The Dashboard's
-             totals count everything ever run, whatever is pruned. -->
+        <!-- How long jobs keep their page content. The jobs themselves are kept for ever,
+             and with them the Statistics view's history. -->
         <div class="border-t border-default pt-4 space-y-3">
           <h3 class="text-sm font-medium">Job history</h3>
           <div class="grid sm:grid-cols-2 gap-4">
             <UFormField
-              label="Jobs kept at most"
-              description="The oldest go first. Each keeps its content, about 110 KB per URL. 0 keeps all."
+              label="Jobs with content at most"
+              description="Older jobs lose their page content (about 110 KB per URL); the jobs themselves and their statistics are kept. 0 keeps all content."
             >
               <UInput v-model="retrieval.max_jobs" type="number" min="0" step="1000" placeholder="10000 (default)" />
             </UFormField>
             <UFormField
-              label="Kept for (days)"
-              description="Older jobs and search records are removed. 0 keeps them for ever."
+              label="Content kept for (days)"
+              description="Older jobs lose their page content; the jobs are kept. 0 keeps the content for ever."
             >
               <UInput v-model="retrieval.job_retention_days" type="number" min="0" placeholder="90 (default)" />
             </UFormField>

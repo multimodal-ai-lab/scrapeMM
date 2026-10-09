@@ -42,8 +42,8 @@ SETTINGS: dict[str, type] = {
     "disabled_methods": list,
     "youtube_min_interval": float,
     "youtube_cooldown": float,
-    "job_retention_days": float,  # Job history: how long jobs are kept (0: for ever)
-    "max_jobs": int,  # Job history: how many jobs are kept at most (0: no limit)
+    "job_retention_days": float,  # Job history: how long jobs keep their content (0: for ever)
+    "max_jobs": int,  # Job history: how many jobs keep their content at most (0: no limit)
     # Known consent platforms' dialogs removed in the browser before reading (default on)
     "remove_consent_dialogs": bool,
 }

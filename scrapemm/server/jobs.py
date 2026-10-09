@@ -70,9 +70,10 @@ WAL_SIZE_LIMIT = 64 * 1024 * 1024  # Bytes the write-ahead log is cut back to
 SLOT = 15 * 60
 RECENT_SPAN = 25 * 60 * 60
 
-# How much job history is kept, unless the settings say otherwise (`job_retention_days`,
-# `max_jobs`; 0 for no limit). Each job keeps its content, ~110 KB a URL, so 10,000 jobs
-# of one URL already take about a gigabyte.
+# How long jobs keep their page content, unless the settings say otherwise
+# (`job_retention_days`, `max_jobs`; 0 for no limit). The content takes ~110 KB a URL, so
+# 10,000 jobs of one URL already hold about a gigabyte. Jobs and their results' figures
+# (method, outcome, times) are kept for ever: they are what the statistics are made of.
 DEFAULT_RETENTION_DAYS = 90
 DEFAULT_MAX_JOBS = 10_000
 PRUNE_INTERVAL = 3600  # Seconds between prunings while the server runs, see `app`
@@ -489,9 +490,11 @@ class JobStore:
 
     def prune(self, retention_days: Optional[float] = None,
               max_jobs: Optional[int] = None) -> int:
-        """Drops job records that are too old or too many: by the settings
-        `job_retention_days` and `max_jobs` unless given, 0 meaning no limit. Never touches
-        media, nor the all-time counters."""
+        """Drops the page content of jobs that are too old or too many: by the settings
+        `job_retention_days` and `max_jobs` unless given, 0 meaning no limit. The jobs and
+        their results stay, without content, and so does what the statistics are made of:
+        dropping them along with the content cut the statistics off at a day's worth of
+        jobs. Never touches media. Returns the number of results whose content went."""
         from .config import get_config_var
         if retention_days is None:
             retention_days = get_config_var("job_retention_days")
@@ -504,22 +507,18 @@ class JobStore:
             removed = 0
             if deadline is not None:
                 removed += self._connection.execute(
-                    "DELETE FROM jobs WHERE created_at < ?", (deadline,)).rowcount
+                    "DELETE FROM result_content WHERE job_id IN ("
+                    "  SELECT id FROM jobs WHERE created_at < ?)", (deadline,)).rowcount
             if max_jobs > 0:
                 removed += self._connection.execute(
-                    "DELETE FROM jobs WHERE id NOT IN ("
+                    "DELETE FROM result_content WHERE job_id NOT IN ("
                     "  SELECT id FROM jobs ORDER BY created_at DESC LIMIT ?)",
                     (int(max_jobs),)).rowcount
-            self._connection.execute(
-                "DELETE FROM results WHERE job_id NOT IN (SELECT id FROM jobs)")
-            self._connection.execute(
-                "DELETE FROM result_content WHERE job_id NOT IN (SELECT id FROM jobs)")
-            if deadline is not None:
-                self._connection.execute("DELETE FROM searches WHERE created_at < ?", (deadline,))
             self._connection.commit()
-            self.version += 1
+            if removed:
+                self.version += 1
         if removed:
-            logger.info(f"Pruned {removed} job records (media untouched).")
+            logger.info(f"Dropped the content of {removed} results of old jobs (jobs and media kept).")
         return removed
 
     def stats(self) -> dict:
