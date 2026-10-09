@@ -31,6 +31,7 @@ from scrapemm.server import screenshot, timing
 from scrapemm.server.config import get_config_var
 from scrapemm.server.download.browser import BrowserMedia, annotate_rendered_media
 from scrapemm.server.paths import BROWSER_PROFILE_PATH
+from scrapemm.server import budget
 from scrapemm.server.reachability import is_network_failure
 from scrapemm.server.integrations.base import RetrievalIntegration
 from scrapemm.common.scraping_response import ScrapedContent
@@ -496,10 +497,11 @@ _BROWSER_CRASH_MARKERS = (
 
 # Seconds a tab gets to answer before it counts as unresponsive (see _close_orphaned_tabs)
 TAB_ANSWER_TIMEOUT = 3
-# Longest a single browser retrieval may take. Heavy archive pages (an 80 MB video in a
-# Perma.cc replay) take a few minutes at most; beyond this one is stuck, and freeing its
+# Longest a single browser retrieval may take. Beyond this one is stuck, and freeing its
 # slot matters more than waiting for it -- it otherwise stalls its whole site's queue.
-BROWSER_RETRIEVAL_TIMEOUT = 600
+# What is slow to arrive (a video in an archive's replay) gives up before this, so that
+# the page comes back without it instead of failing as a whole (see `budget`).
+BROWSER_RETRIEVAL_TIMEOUT = 120
 
 # The tabs that running retrievals opened (CDP target ids). Any other tab showing a
 # page may be left over -- see `_close_orphaned_tabs()`.
@@ -1420,6 +1422,7 @@ class HeadedBrowser(RetrievalIntegration):
             await slot.acquire()
             timing.wait_for_slot(time.time() - waiting_since)
             timing.work_started()
+            budget.start(BROWSER_RETRIEVAL_TIMEOUT)  # Inherited by the task below
             # Not asyncio.wait_for(): that waits for the cancelled retrieval to wind
             # down, and a stuck one may never do so. The slot is freed right away instead.
             task = asyncio.ensure_future(self._browse(url, slot=slot, **kwargs))
@@ -1926,10 +1929,29 @@ _DOM_STATE_JS = ("() => [document.documentElement ? document.documentElement.out
                  " document.readyState]")
 
 
+# How long a frame gets to answer one script, seconds. A frame busy with a heavy medium (a
+# long video loading in an archive's replay) may not answer at all, and a call that never
+# returns held the whole retrieval until its limit (perma.cc/75EG-E5GK: two minutes in
+# Perma.cc's search for the frame with the media).
+EVALUATE_TIMEOUT = 10
+
+
+async def evaluate_within(target: Page | Frame, script: str, arg=None,
+                          timeout: float = EVALUATE_TIMEOUT):
+    """`target.evaluate()`, but a frame that does not answer in time raises Playwright's
+    timeout error, which callers treat as any other failed evaluation (navigation, a
+    detached frame), instead of being waited for."""
+    call = target.evaluate(script) if arg is None else target.evaluate(script, arg)
+    try:
+        return await asyncio.wait_for(call, timeout)
+    except asyncio.TimeoutError:
+        raise PlaywrightTimeoutError(f"The frame did not answer within {timeout:.0f} s.") from None
+
+
 async def _is_thin(target: Page | Frame, min_text: int) -> bool:
     try:
-        return await target.evaluate(
-            "() => (document.body ? document.body.innerText.length : 0)") < min_text
+        return await evaluate_within(
+            target, "() => (document.body ? document.body.innerText.length : 0)") < min_text
     except PlaywrightError:
         return True  # Mid-navigation: the next document is still to come
 
@@ -1948,7 +1970,7 @@ async def settle_dom(target: Page | Frame, min_text: int = 0) -> None:
     anchor, since = None, start  # The size the DOM holds still at, and since when
     while (now := loop.time()) < start + (DOM_THIN_TIMEOUT if min_text else DOM_SETTLE_TIMEOUT):
         try:
-            size, state = await target.evaluate(_DOM_STATE_JS)
+            size, state = await evaluate_within(target, _DOM_STATE_JS)
         except PlaywrightError:
             size, state = None, None  # Mid-navigation: whatever comes next is a new page
         settled = False

@@ -25,6 +25,7 @@ from ezmm import MultimodalSequence, Item, Image, Video
 from markdownify import MarkdownConverter
 from playwright.async_api import APIRequestContext, Page, Frame
 
+from scrapemm.server import budget
 from scrapemm.server.download import download_video, download_image
 from scrapemm.server.download.images import _is_svg, image_from_binary, image_size
 from scrapemm.server.download.util import (
@@ -137,9 +138,10 @@ async def _in_html_thread(function, *args, **kwargs):
 MAX_MEDIA_PER_HOST = 2
 # Longest a single medium fetched through the page may take (embedded players excepted).
 # The page is returned without it rather than not at all: in a browser retrieval, a
-# medium that took longer ran into the 10-minute limit, which failed the whole page
-# (thequint.com, over a trickling ad video).
-MAX_SECONDS_PER_MEDIUM = 300
+# medium that took longer ran into the retrieval's time limit, which failed the whole page
+# (thequint.com, over a trickling ad video; perma.cc/75EG-E5GK). In a browser retrieval,
+# what is left of its budget caps this further (see `budget.cap()`).
+MAX_SECONDS_PER_MEDIUM = 100
 # Images with a shorter side are icons, logos and spacers, not content
 MIN_IMAGE_SIDE = 256
 URL_REGEX = r"https?:\/\/(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9@:%_\+.~#?&//=]*)"
@@ -796,10 +798,11 @@ async def _resolve_media_in(
             # Not these: an embedded YouTube video may queue for minutes behind the
             # others (YouTube's pacing), and still arrive
             return await task
+        seconds = budget.cap(MAX_SECONDS_PER_MEDIUM)
         try:
-            return await asyncio.wait_for(task, MAX_SECONDS_PER_MEDIUM)
+            return await asyncio.wait_for(task, seconds)
         except TimeoutError:
-            logger.info(f"Gave up on the medium {uri[:120]} after {MAX_SECONDS_PER_MEDIUM} s.")
+            logger.info(f"Gave up on the medium {uri[:120]} after {seconds:.0f} s.")
             return None
 
     async def gated(uri: str, task: Awaitable):
