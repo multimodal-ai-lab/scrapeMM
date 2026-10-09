@@ -172,10 +172,10 @@ async def test_strip_content_keeps_media_it_cannot_place():
     assert "Menu" not in str(stripped.multimodal)
 
 
-async def test_strip_content_does_not_hold_the_loop_while_the_registry_is_busy():
-    """Media downloads register their files in threads, holding the registry's lock
-    meanwhile. Looking up the known media must wait for it off the loop, or every
-    request stalls with it."""
+async def test_strip_content_does_not_hold_the_loop_while_the_registry_is_busy(monkeypatch):
+    """Looking up the known media asks the registry, which can be slow to answer while
+    media downloads register their files in threads (ezMM's lock, before 0.7.1). That
+    wait must happen off the loop, or every request stalls with it."""
     import asyncio
     import threading
     import time
@@ -185,15 +185,14 @@ async def test_strip_content_does_not_hold_the_loop_while_the_registry_is_busy()
     html = '<html><body><nav>Menu</nav><main><p>Text</p><img src="photo.jpg"></main></body></html>'
     original = ScrapedContent(html=html, multimodal=MultimodalSequence(f"Text {photo.reference}"))
 
-    held, release = threading.Event(), threading.Event()
+    release = threading.Event()
+    lookup = item_registry.get_source_urls
 
-    def hold_lock():
-        with item_registry._lock:
-            held.set()
-            release.wait(5)
+    def slow_lookup(*args, **kwargs):
+        release.wait(5)  # A registry busy elsewhere
+        return lookup(*args, **kwargs)
 
-    threading.Thread(target=hold_lock, daemon=True).start()
-    held.wait(5)
+    monkeypatch.setattr(item_registry, "get_source_urls", slow_lookup)
     stripping = asyncio.create_task(strip_content(original, url=URL))
     started = time.monotonic()
     await asyncio.sleep(0.3)  # Returns late if the loop is held
