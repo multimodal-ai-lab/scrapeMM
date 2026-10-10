@@ -197,14 +197,14 @@ const tiles = computed(() => {
   const tone = success == null ? 'neutral' as const : success > 0.95 ? 'success' as const
     : success >= 0.8 ? 'warning' as const : 'error' as const
   return [
-    { label: 'Retrievals', icon: 'i-fa7-solid-list-check', value: s.total.toLocaleString(),
+    { label: 'Retrievals', icon: 'i-fa7-solid-list-check', value: compact(s.total),
       detail: rangeLabel.value, tone: 'neutral' as const },
     { label: 'Success rate', icon: 'i-fa7-solid-check', value: percent(success), tone,
       ring: success,
       detail: `${s.error} failed · ${s.unavailable} unavailable · ${s.ok} retrieved` },
     { label: 'Cache hits', icon: 'i-fa7-solid-bolt', value: percent(share(s.cached, s.total)),
       ring: share(s.cached, s.total), tone: 'neutral' as const,
-      detail: `${s.cached} of ${s.total} from the cache` },
+      detail: `${compact(s.cached)} of ${compact(s.total)} from the cache` },
     { label: 'Median time', icon: 'i-fa7-solid-stopwatch', value: seconds(s.median_time),
       tone: 'neutral' as const, title: RETRIEVAL_TIME_MEANING,
       detail: s.median_queue_time == null ? 'per retrieved URL, from its first request'
@@ -241,11 +241,11 @@ const timeItems = computed(() => {
 
 const methodItems = computed(() => (data.value?.methods || []).slice(0, 10).map((m: any) => ({
   label: m.method, value: m.count,
-  hint: `${m.method}: ${m.count} retrieved · median ${seconds(m.median_time)} · p90 ${seconds(m.p90_time)}`,
+  hint: `${m.method}: ${compact(m.count)} retrieved · median ${seconds(m.median_time)} · p90 ${seconds(m.p90_time)}`,
 })))
 
 const domainItems = computed(() => (data.value?.failing_domains || []).map((d: any) => ({
-  label: d.domain, value: d.count, hint: `${d.domain}: ${d.count} failed (red)`,
+  label: d.domain, value: d.count, hint: `${d.domain}: ${compact(d.count)} failed (red)`,
 })))
 
 function jobsLinkFor(domain: string) {
@@ -326,7 +326,7 @@ function jobsLinkFor(domain: string) {
             >
               <span class="size-2.5 rounded-sm shrink-0" :style="{ background: s.color }" />
               <span class="text-muted">{{ s.label }}</span>
-              <span class="text-highlighted tabular-nums">{{ s.total.toLocaleString() }}</span>
+              <span class="text-highlighted tabular-nums" :title="s.total.toLocaleString()">{{ compact(s.total) }}</span>
             </span>
           </div>
         </div>
@@ -347,10 +347,10 @@ function jobsLinkFor(domain: string) {
               <tr v-for="(t, i) in [...titles].reverse()" :key="t">
                 <td class="py-1 pr-3 text-muted whitespace-nowrap">{{ t }}</td>
                 <td v-for="s in [...series].reverse()" :key="s.key" class="py-1 px-2 text-right">
-                  {{ s.counts[titles.length - 1 - i] || '' }}
+                  {{ s.counts[titles.length - 1 - i] ? compact(s.counts[titles.length - 1 - i]) : '' }}
                 </td>
                 <td class="py-1 pl-2 text-right text-highlighted">
-                  {{ data.per_bucket.total[titles.length - 1 - i] || '' }}
+                  {{ data.per_bucket.total[titles.length - 1 - i] ? compact(data.per_bucket.total[titles.length - 1 - i]) : '' }}
                 </td>
               </tr>
             </tbody>

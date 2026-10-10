@@ -345,12 +345,12 @@ async function copy(id: string) {
       <h1 class="text-2xl font-semibold">Jobs</h1>
       <p class="text-sm text-muted mt-1">
         {{ stats.jobs }} jobs · {{ stats.urls }} URLs ·
-        <span class="text-success">{{ stats.outcomes?.ok ?? stats.succeeded }} retrieved</span> ·
+        <span class="text-success">{{ compact(stats.outcomes?.ok ?? stats.succeeded) }} retrieved</span> ·
         <span
           :class="stats.outcomes?.unavailable ? 'text-warning' : ''"
           title="scrapeMM did its part, but the target was unavailable, behind a paywall or a CAPTCHA, or rate-limited"
         >{{ stats.outcomes?.unavailable ?? 0 }} unavailable</span> ·
-        <span :class="stats.failed ? 'text-error' : ''">{{ stats.failed }} failed</span>
+        <span :class="stats.failed ? 'text-error' : ''">{{ compact(stats.failed) }} failed</span>
       </p>
     </div>
 
@@ -422,7 +422,7 @@ async function copy(id: string) {
         class="text-xs text-dimmed shrink-0 transition-opacity duration-200"
         :class="active ? 'opacity-100' : 'opacity-0'"
       >
-        {{ total }} matching job{{ total === 1 ? '' : 's' }}
+        {{ compact(total) }} matching job{{ total === 1 ? '' : 's' }}
       </p>
     </div>
 
@@ -571,7 +571,7 @@ async function copy(id: string) {
           class="size-4 text-dimmed animate-spin"
         />
         <span v-else-if="jobs.length >= total && total > pageSize" class="text-xs text-dimmed">
-          All {{ total }} jobs are shown.
+          All {{ compact(total) }} jobs are shown.
         </span>
       </div>
     </div>

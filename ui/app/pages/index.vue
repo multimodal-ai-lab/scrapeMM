@@ -273,8 +273,8 @@ const tiles = computed(() => {
           ? `${env.throughput.success_rate.outcomes.error} failed · `
             + `${env.throughput.success_rate.outcomes.unavailable} unavailable · `
             + `${env.throughput.success_rate.outcomes.ok} retrieved, `
-            + `of the last ${env.throughput.success_rate.total}`
-          : `of the last ${env.throughput.success_rate.total} retrievals`)
+            + `of the last ${compact(env.throughput.success_rate.total)}`
+          : `of the last ${compact(env.throughput.success_rate.total)} retrievals`)
         : 'nothing retrieved yet',
       to: env.throughput.success_rate.outcomes?.error ? '/jobs?outcome=error' : '/jobs' },
     { label: 'Scraping time', icon: 'i-fa7-solid-stopwatch',
@@ -285,20 +285,20 @@ const tiles = computed(() => {
           : times.median > 5 ? 'warning' as const
             : 'neutral' as const,
       detail: times?.total
-        ? `median · 95th percentile ${times.p95.toFixed(1)} s, of the last ${times.total} scrapes`
+        ? `median · 95th percentile ${times.p95.toFixed(1)} s, of the last ${compact(times.total)} scrapes`
         : 'nothing scraped yet' },
     { label: 'Retrieved today', icon: 'i-fa7-solid-gauge-high',
       value: `${retrievedToday.value}`, tone: 'neutral' as const,
       // Today, hour by hour: where it came from and how it went
       detail: 'URLs since midnight', to: '/statistics?bucket=hour&periods=24' },
     { label: 'Search requests today', icon: 'i-fa7-solid-magnifying-glass',
-      value: `${searchesToday.value.total}`,
+      value: compact(searchesToday.value.total),
       tone: searchesToday.value.failed ? 'warning' as const : 'neutral' as const,
       detail: searchesToday.value.total
         ? searchesToday.value.providers
-          .map((p) => `${p.name} ${p.ok + p.failed}${p.failed ? ` (${p.failed} failed)` : ''}`)
+          .map((p) => `${p.name} ${compact(p.ok + p.failed)}${p.failed ? ` (${compact(p.failed)} failed)` : ''}`)
           .join(' · ')
-        : `none since midnight · ${env.searches?.total ?? 0} all time`,
+        : `none since midnight · ${compact(env.searches?.total ?? 0)} all time`,
       to: '/playground/search' },
     { label: 'Awaiting CAPTCHA', icon: 'i-fa7-solid-lock',
       value: `${env.captcha.waiting}`,
@@ -317,9 +317,9 @@ const tiles = computed(() => {
       to: '/blacklist' },
     // All time: counted as they run, so pruning the history does not lower them
     { label: 'Jobs run', icon: 'i-fa7-solid-clock-rotate-left',
-      value: `${(env.jobs.all_time?.jobs ?? env.jobs.jobs).toLocaleString()}`, tone: 'neutral' as const,
-      detail: `${(env.jobs.all_time?.urls ?? env.jobs.urls).toLocaleString()} URLs all time · `
-        + `${env.jobs.jobs.toLocaleString()} jobs kept`,
+      value: compact(env.jobs.all_time?.jobs ?? env.jobs.jobs), tone: 'neutral' as const,
+      detail: `${compact(env.jobs.all_time?.urls ?? env.jobs.urls)} URLs all time · `
+        + `${compact(env.jobs.jobs)} jobs kept`,
       to: '/jobs' },
     { label: 'Media stored', icon: 'i-fa7-solid-photo-film',
       // Null until the server's first background measurement is done
@@ -332,8 +332,8 @@ const tiles = computed(() => {
       detail: env.media.files == null
         ? 'measuring…'
         : env.media.disk_free
-          ? `${env.media.files} files · ${bytes(env.media.disk_free)} free`
-          : `${env.media.files} files downloaded`,
+          ? `${compact(env.media.files)} files · ${bytes(env.media.disk_free)} free`
+          : `${compact(env.media.files)} files downloaded`,
       to: '/settings' },
     // How often a retrieval was answered from the cache instead of being scraped again:
     // relative as the value, absolute below it, alongside what the cache holds now
@@ -342,12 +342,12 @@ const tiles = computed(() => {
         : `${(env.jobs.cache_hit_rate * 100).toFixed(1)}%`,
       tone: 'neutral' as const, ring: env.jobs.cache_hit_rate,
       detail: env.jobs.urls
-        ? `${env.jobs.from_cache} of ${env.jobs.urls} URLs · ${env.cache.entries} cached, ${duration(env.cache.ttl)}`
-        : `${env.cache.entries} cached · ${duration(env.cache.ttl)}`,
+        ? `${compact(env.jobs.from_cache)} of ${compact(env.jobs.urls)} URLs · ${compact(env.cache.entries)} cached, ${duration(env.cache.ttl)}`
+        : `${compact(env.cache.entries)} cached · ${duration(env.cache.ttl)}`,
       to: '/settings' },
     // URLs accepted by a job but not started yet, because every slot is taken
     { label: 'Waiting in line', icon: 'i-fa7-solid-hourglass-half',
-      value: `${env.queue.waiting}`, tone: 'neutral' as const,
+      value: compact(env.queue.waiting), tone: 'neutral' as const,
       detail: env.queue.waiting || env.queue.active || env.jobs.running
         ? `URLs queued · ${env.queue.active}/${env.queue.limit} scraping · `
           + `${env.jobs.running} job${env.jobs.running === 1 ? '' : 's'} running`

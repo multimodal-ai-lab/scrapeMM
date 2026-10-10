@@ -307,7 +307,7 @@ onBeforeUnmount(() => clearInterval(statsTimer))
         <div class="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
           <USwitch v-model="cacheForm.enabled" label="Re-use recent results" />
           <span class="text-muted tabular-nums">
-            {{ cacheStats?.entries ?? 0 }} entries · {{ cacheStats?.size_mb ?? 0 }} MB in memory
+            {{ compact(cacheStats?.entries ?? 0) }} entries · {{ cacheStats?.size_mb ?? 0 }} MB in memory
           </span>
         </div>
         <p class="text-xs text-muted -mt-2">
@@ -364,7 +364,7 @@ onBeforeUnmount(() => clearInterval(statsTimer))
         </h2>
       </template>
       <p class="text-sm text-muted">
-        {{ media.files ?? 'Still counting the' }} files at <code class="font-mono">{{ media.root }}</code>
+        {{ media.files == null ? 'Still counting the' : compact(media.files) }} files at <code class="font-mono">{{ media.root }}</code>
         <span v-if="media.host_root"> (host path <code class="font-mono">{{ media.host_root }}</code>)</span>.
       </p>
       <p class="text-xs text-muted mt-2">

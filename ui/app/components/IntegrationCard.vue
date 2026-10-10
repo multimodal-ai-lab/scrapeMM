@@ -57,10 +57,7 @@ const menuItems = computed(() => {
   return [actions]
 })
 
-const retrievals = computed(() => {
-  const n = props.item.retrievals || 0
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
-})
+const retrievals = computed(() => compact(props.item.retrievals || 0))
 
 /** What the chip's tooltip says. Falls back to the state's own label. */
 const explanation = computed(() => props.item.detail || tone.value.label)

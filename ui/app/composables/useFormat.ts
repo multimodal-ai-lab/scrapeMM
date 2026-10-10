@@ -78,6 +78,23 @@ export function retrievalTimeTitle(retrieval: number | null | undefined,
   return `${RETRIEVAL_TIME_MEANING}${waited}`
 }
 
+/** A count, short enough to read at a glance: 999, 1.46K, 14.6K, 1.46M, 868M, 1.2B. Three
+ *  significant digits; the exact number belongs in a tooltip where it matters. */
+export function compact(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '—'
+  const magnitude = Math.abs(value)
+  if (magnitude < 1000) return String(Math.round(value))
+  const units = ['K', 'M', 'B', 'T']
+  const power = Math.min(Math.floor(Math.log10(magnitude) / 3), units.length)
+  const scaled = value / 1000 ** power
+  const digits = Math.abs(scaled) >= 100 ? 0 : Math.abs(scaled) >= 10 ? 1 : 2
+  // Rounding may carry over into the next unit (999,999 -> 1000K): say 1M then
+  if (Math.abs(Number(scaled.toFixed(digits))) >= 1000 && power < units.length) {
+    return compact(Math.sign(value) * 1000 ** (power + 1))
+  }
+  return `${Number(scaled.toFixed(digits))}${units[power - 1]}`
+}
+
 export function bytes(value: number): string {
   if (!value) return '0 B'
   const units = ['B', 'KB', 'MB', 'GB', 'TB']

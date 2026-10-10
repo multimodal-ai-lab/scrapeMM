@@ -111,7 +111,7 @@ const ago = (at?: number | null) => {
             :label="entry.enabled ? 'In use' : 'Off'" />
         </h2>
         <span v-if="status?.configured" class="text-xs text-muted tabular-nums">
-          {{ status.requests_today }} {{ status.requests_today === 1 ? 'retrieval' : 'retrievals' }} through it today
+          {{ compact(status.requests_today) }} {{ status.requests_today === 1 ? 'retrieval' : 'retrievals' }} through it today
         </span>
       </div>
     </template>
