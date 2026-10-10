@@ -463,6 +463,23 @@ async def _settle_media_frame(frame: Frame) -> None:
                      f"{await frame.evaluate(_MEDIA_STATE_JS)}")
 
 
+# Stops a replayed page's players: they kept streaming the very videos being fetched here,
+# and an archive serves a client only so fast (web.archive.org ~330 KB/s, however many
+# connections), so both downloads crawled. A Kwai capture's 5.7 MB video took 71 s.
+_STOP_PLAYBACK_JS = """() => document.querySelectorAll('video, audio').forEach(m => {
+    try { m.pause(); m.autoplay = false; m.preload = 'none'; } catch (_) {}
+})"""
+
+
+async def _stop_playback(frame: Frame) -> None:
+    """Pauses the media of the frame and of the frames within it. Best-effort: a frame
+    that does not answer keeps playing, which costs time, not the retrieval."""
+    frames = [frame, *frame.child_frames]
+    for f in frames:
+        with suppress(PlaywrightError, asyncio.TimeoutError):
+            await asyncio.wait_for(f.evaluate(_STOP_PLAYBACK_JS), 5)
+
+
 async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video_limit: int = MAX_VIDEO_BYTES,
                                 concurrency: int = STASH_CONCURRENCY) -> None:
     """Fetches the frame's media inside the frame, where the replay's session and service
@@ -477,6 +494,7 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
     # First, as the page may still be building itself: collected too early, a video its
     # player had not yet created was missing (see `_settle_media_frame()`)
     await _settle_media_frame(frame)
+    await _stop_playback(frame)
     # Leaves time to read them out. Never 0: the page takes that for no limit at all
     video_seconds = budget.cap(STASH_VIDEO_TIMEOUT, reserve=30, floor=5)
     image_seconds = min(STASH_IMAGE_TIMEOUT, video_seconds)
