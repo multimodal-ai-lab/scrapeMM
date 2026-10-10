@@ -364,7 +364,7 @@ Views: {view_count:,} - Likes: {like_count:,} - Comments: {comment_count:,} - Sh
 
         avatar = None
         if avatar_url:
-            avatar = await download_image(avatar_url, session, ignore_small_images=False)
+            avatar = await download_image(avatar_url, session)  # Kept only if large enough
 
         text = f"""**TikTok Profile**
 User: {display_name} (@{username})

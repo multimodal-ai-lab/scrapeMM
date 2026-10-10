@@ -180,9 +180,7 @@ class Reddit(RetrievalIntegration):
         # Single-image post
         url = post.get("url_overridden_by_dest") or ""
         if post.get("post_hint") == "image" or looks_like_image_file_url(url):
-            # Reddit media is always deliberately posted content, so keep small images, too
-            image = await download_image(url, session=session, headers=MEDIA_HEADERS,
-                                         ignore_small_images=False)
+            image = await download_image(url, session=session, headers=MEDIA_HEADERS)
             return [image] if image else []
 
         return []
@@ -204,11 +202,9 @@ class Reddit(RetrievalIntegration):
                 if url := source.get("mp4"):
                     tasks.append(download_video(url, session=session, headers=MEDIA_HEADERS))
                 elif url := source.get("gif"):
-                    tasks.append(download_image(url, session=session, headers=MEDIA_HEADERS,
-                                                ignore_small_images=False))
+                    tasks.append(download_image(url, session=session, headers=MEDIA_HEADERS))
             elif url := source.get("u"):
-                tasks.append(download_image(url, session=session, headers=MEDIA_HEADERS,
-                                            ignore_small_images=False))
+                tasks.append(download_image(url, session=session, headers=MEDIA_HEADERS))
 
         return [medium for medium in await asyncio.gather(*tasks) if medium]
 

@@ -27,7 +27,7 @@ from playwright.async_api import APIRequestContext, Page, Frame
 
 from scrapemm.server import budget
 from scrapemm.server.download import download_video, download_image
-from scrapemm.server.download.images import _is_svg, image_from_binary, image_size
+from scrapemm.server.download.images import _is_svg, image_from_binary, image_size, is_too_small
 from scrapemm.server.download.util import (
     looks_like_image_file_url,
     looks_like_vector_file_url,
@@ -142,8 +142,6 @@ MAX_MEDIA_PER_HOST = 2
 # (thequint.com, over a trickling ad video; perma.cc/75EG-E5GK). In a browser retrieval,
 # what is left of its budget caps this further (see `budget.cap()`).
 MAX_SECONDS_PER_MEDIUM = 100
-# Images with a shorter side are icons, logos and spacers, not content
-MIN_IMAGE_SIDE = 256
 URL_REGEX = r"https?:\/\/(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9@:%_\+.~#?&//=]*)"
 DATA_URI_REGEX = r"data:([\w/+.-]+/[\w.+-]+);base64,([A-Za-z0-9+/=]+)"
 MD_HYPERLINK_REGEX = rf'(!?\[([^]^[]*)\]\((.*?)(?: "[^"]*")?\))'
@@ -876,7 +874,7 @@ def _replace_media_elements(media_elements: list[Tag], media_uris: list[Optional
         has_child_tags = any(getattr(child, "name", None) for child in element.children)
 
         if medium:
-            too_small = isinstance(medium, Image) and min(image_size(medium)) < MIN_IMAGE_SIDE
+            too_small = isinstance(medium, Image) and is_too_small(*image_size(medium))
 
             if not too_small:
                 if uri and uri in inserted_url_refs:
@@ -1132,11 +1130,11 @@ def from_base64(b64_data: str, mime_type: str = "image/jpeg", url: str | None = 
                 # size of its own; rasterizing it decides.
                 if not _is_svg(binary_data):
                     with PIL.Image.open(BytesIO(binary_data)) as header:  # Reads the header only
-                        if min(header.size) < MIN_IMAGE_SIDE:
+                        if is_too_small(*header.size):
                             return None
-                # Downscaled like any downloaded image: a huge inline one otherwise
-                # took hundreds of MB
-                return image_from_binary(binary_data, source_url=url, ignore_small_images=False)
+                # Downscaled like any downloaded image (a huge inline one otherwise took
+                # hundreds of MB), and then held to the same minimum
+                return image_from_binary(binary_data, source_url=url)
             elif mime_type.startswith("video/"):
                 return Video(binary_data=binary_data, source_url=url)
             else:

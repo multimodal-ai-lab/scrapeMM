@@ -133,3 +133,30 @@ def test_markdown_of_a_page_nested_too_deeply_for_recursion():
     assert "[link](https://e.example/x)" in markdown
     assert "![](https://e.example/a.jpg)" in markdown
     assert markdown.endswith("After")
+
+
+def _png(width: int, height: int) -> bytes:
+    from io import BytesIO
+    from PIL import Image as PillowImage
+    buffer = BytesIO()
+    PillowImage.new("RGB", (width, height), "teal").save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+@pytest.mark.parametrize("width,height,kept", [(256, 400, False), (400, 256, False), (257, 257, True)])
+def test_one_minimum_size_for_every_image(width, height, kept):
+    """An image is kept only if both sides exceed `MIN_IMAGE_SIDE`, whether downloaded or
+    inlined as a data URI. The data-URI path used to let an image of exactly 256 px pass."""
+    import base64
+    from scrapemm.server.download.images import image_from_binary
+    from scrapemm.server.util import from_base64
+    data = _png(width, height)
+    assert (image_from_binary(data, "https://e.example/a.png") is not None) is kept
+    assert (from_base64(base64.b64encode(data).decode(), "image/png") is not None) is kept
+
+
+def test_an_inline_image_too_small_once_downscaled_is_left_out():
+    """5000 x 300 px fits the minimum, but downscaled to the 2048 px limit it is 2048 x 123."""
+    import base64
+    from scrapemm.server.util import from_base64
+    assert from_base64(base64.b64encode(_png(5000, 300)).decode(), "image/png") is None

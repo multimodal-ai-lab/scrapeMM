@@ -231,8 +231,8 @@ class Instagram(RetrievalIntegration):
 
         items: list = [header]
         if picture_url := user.get("profile_pic_url_hd") or user.get("profile_pic_url"):
-            # Profile pictures are small; keep them anyway, they identify the account
-            if picture := await download_image(picture_url, session, ignore_small_images=False):
+            # Kept only if large enough, like any image (see `MIN_IMAGE_SIDE`)
+            if picture := await download_image(picture_url, session):
                 items.append(picture)
 
         recent = []

@@ -29,6 +29,14 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 # second at a time.
 _image_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="images")
 
+# An image is kept only if both its sides exceed this many pixels: smaller ones are icons,
+# logos, avatars and spacers, not content. The one rule for every way an image arrives.
+MIN_IMAGE_SIDE = 256
+
+
+def is_too_small(width: float, height: float) -> bool:
+    return min(width, height) <= MIN_IMAGE_SIDE
+
 
 async def decode_image(content: bytes, source_url: str, **kwargs) -> Optional[Image]:
     """`image_from_binary()` in the image threads, off the event loop."""
@@ -88,7 +96,7 @@ def image_from_binary(
         if pillow_img.width > max_size[0] or pillow_img.height > max_size[1]:
             pillow_img.thumbnail(max_size, Resampling.LANCZOS)  # Preserves aspect ratio
 
-        if not ignore_small_images or (pillow_img.width > 256 and pillow_img.height > 256):
+        if not ignore_small_images or not is_too_small(pillow_img.width, pillow_img.height):
             image = Image(pillow_image=pillow_img, source_url=source_url)
             image.relocate(move_not_copy=True)  # Ensure the image is in the temp dir + follows simple naming
             # The pixels are on disk now and reload lazily. Kept, they add up to GBs over
@@ -132,7 +140,7 @@ def rasterize_svg(content: bytes, max_size: tuple[int, int] = (2048, 2048),
     resvg renders without scripts and without fetching anything."""
     import resvg_py
     size = _svg_size(content)
-    if size and ignore_small_images and min(size) <= 256:
+    if size and ignore_small_images and is_too_small(*size):
         return None
     options = {}
     if size and (size[0] > max_size[0] or size[1] > max_size[1]):
