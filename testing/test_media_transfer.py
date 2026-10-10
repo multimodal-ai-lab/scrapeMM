@@ -134,3 +134,22 @@ def test_remap_drops_media_that_could_not_be_obtained():
 def test_remap_leaves_unknown_references_alone():
     """A reference with no manifest entry is not ours to rewrite or drop."""
     assert media_module._remap("a <image:5> b", {}) == "a <image:5> b"
+
+
+def test_media_usage_comes_from_the_registry(monkeypatch):
+    """The dashboard's figure is ezMM's: its items without duplicates and missing files,
+    and their stored sizes -- not a walk over the files, which took hours."""
+    from scrapemm.server import registry
+    calls = []
+    monkeypatch.setattr(registry.item_registry, "count_items",
+                        lambda include_missing=True: calls.append(include_missing) or 1464999)
+    monkeypatch.setattr(registry.item_registry, "total_size", lambda kind=None: 868_169_308_192)
+    monkeypatch.setattr(registry, "_usage", None)
+    monkeypatch.setattr(registry, "_measure_duration", 0.0)
+    monkeypatch.setattr(registry, "refresh", lambda *args, **kwargs: False)  # Not in the background
+
+    assert registry.usage()["files"] is None  # Answers at once, before any measurement
+    registry._measure()
+    usage = registry.usage()
+    assert (usage["files"], usage["bytes"]) == (1464999, 868_169_308_192)
+    assert calls == [False]  # Missing files left out, as ezMM counts them

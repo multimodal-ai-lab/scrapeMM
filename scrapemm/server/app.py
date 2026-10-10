@@ -92,7 +92,7 @@ async def _warm_caches() -> None:
     try:
         from . import status
         await status._playwright_status()
-        registry.refresh()  # Measures in its own thread
+        registry.refresh()  # Measured in a thread of its own
     except asyncio.CancelledError:
         raise
     except Exception:

@@ -14,8 +14,6 @@ are literally the same one.
 
 import logging
 import shutil
-import signal
-import subprocess
 import threading
 import time
 import os
@@ -147,32 +145,29 @@ def resolve_item(kind: str, identifier: int) -> Optional[Item]:
         return None
 
 
-# How long a measured size is served before the tree is walked again. A shared lab
-# registry holds millions of files, whose walk takes long and loads the disk, so the
-# dashboard's figure may well be half an hour old.
-USAGE_TTL = 30 * 60.0
+# How long a measured size is served before it is measured again. The figure comes from
+# the registry's database (ezMM keeps each item's size), two queries of a quarter second
+# each on a registry of millions, so the dashboard can follow it closely.
+USAGE_TTL = 15.0
 
-# A walk that takes longer than this is given up (and retried after the TTL)
-WALK_TIMEOUT = 2 * 60 * 60.0
-
-# A walk is never repeated sooner than this many times its own duration, so a registry
-# of millions of files is not re-measured back to back
-WALK_COST_FACTOR = 10
+# A measurement is never repeated sooner than this many times its own duration
+MEASURE_COST_FACTOR = 10
 
 _usage: Optional[dict] = None  # The last complete measurement
-_walk_duration = 0.0
-_walk_lock = threading.Lock()
-_walking = False
+_measure_duration = 0.0
+_measure_lock = threading.Lock()
+_measuring = False
 
 
 def usage(max_age: float = USAGE_TTL) -> dict:
-    """Size of the registry, for the dashboard. Returns at once, always.
+    """Size of the registry, for the dashboard: its items (duplicates and items whose file
+    is missing left out, as ezMM counts them) and their total size. Returns at once,
+    always, from the last measurement, and has a new one taken in the background when
+    that is older than `max_age`. Until the first one is done, the sizes are None.
 
-    Walking the tree is O(files), and a lab's registry holds millions of them: done in
-    the request, it stalled the whole server for as long as the walk took. So this only
-    ever answers from the last measurement and, when that is older than `max_age`, has
-    a new one taken in the background. Until the first walk is done, the sizes are None.
-    """
+    Not the files under the root: walking them took hours on a registry of millions,
+    so the figure lagged far behind (still counting 1.9 million duplicates' files the
+    morning after ezMM had removed them), and it counted files no item refers to."""
     refresh(max_age)
     measured = _usage or {"bytes": None, "files": None, "measured_at": None}
     # The free space is one statvfs call, so it is always current
@@ -180,83 +175,35 @@ def usage(max_age: float = USAGE_TTL) -> dict:
 
 
 def refresh(min_age: float = USAGE_TTL) -> bool:
-    """Starts a background walk unless one is running or the last one is younger than
-    `min_age` (or than its own cost allows). Returns True only if it started one: a walk
-    already under way may have begun before the files a caller wants counted."""
-    global _walking
-    with _walk_lock:
-        if _walking:
+    """Starts a background measurement unless one is running or the last one is younger
+    than `min_age` (or than its own cost allows). Returns True only if it started one."""
+    global _measuring
+    with _measure_lock:
+        if _measuring:
             return False
         measured_at = (_usage or {}).get("measured_at") or 0.0
-        if time.time() - measured_at < max(min_age, WALK_COST_FACTOR * _walk_duration):
+        if time.time() - measured_at < max(min_age, MEASURE_COST_FACTOR * _measure_duration):
             return False
-        _walking = True
-    threading.Thread(target=_walk, name="media-usage", daemon=True).start()
+        _measuring = True
+    threading.Thread(target=_measure, name="media-usage", daemon=True).start()
     return True
 
 
-def _walk() -> None:
-    global _usage, _walk_duration, _walking
+def _measure() -> None:
+    """In a thread of its own: the queries scan the items table, and SQLite lets go of
+    the GIL meanwhile."""
+    global _usage, _measure_duration, _measuring
     started = time.time()
     try:
-        measured = _measure_with_find()
-        if measured is None:
-            measured = _measure_in_python()
-        total, count = measured
+        count = item_registry.count_items(include_missing=False)
+        total = item_registry.total_size()
         _usage = {"bytes": total, "files": count, "measured_at": time.time()}
-        _walk_duration = time.time() - started
-        logger.debug(f"Measured the media registry: {count} files in {_walk_duration:.1f}s.")
+        _measure_duration = time.time() - started
     except Exception:
         logger.debug("Measuring the media registry failed.", exc_info=True)
     finally:
-        with _walk_lock:
-            _walking = False
-
-
-# Sums up the sizes in the subprocess, so that Python reads a single line. `%.0f`, as
-# some awks print `%d` as a 32-bit integer.
-_FIND_SCRIPT = r"""find "$1" -type f -printf '%s\n' 2>/dev/null | awk '{s += $1; n++} END {printf "%.0f %d\n", s, n}'"""
-
-
-def _measure_with_find() -> Optional[tuple[int, int]]:
-    """Total size and number of files, measured by `find` in a subprocess at the lowest
-    CPU priority. A walk in Python over millions of files held the GIL for most of the
-    time and so stalled the event loop, i.e. every retrieval. None where there is no
-    GNU find (e.g. on Windows)."""
-    if os.name != "posix" or not shutil.which("find") or not shutil.which("awk"):
-        return None
-    process = subprocess.Popen(
-        ["nice", "-n", "19", "sh", "-c", _FIND_SCRIPT, "sh", str(registry_root())],
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
-    try:
-        stdout, _ = process.communicate(timeout=WALK_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)  # The whole pipeline, not just the shell
-        process.wait()
-        raise TimeoutError(f"Measuring the media registry took over {WALK_TIMEOUT:.0f} s.")
-    total, count = stdout.split()
-    return int(total), int(count)
-
-
-def _measure_in_python() -> tuple[int, int]:
-    """The fallback where there is no `find`. Holds the GIL for much of the walk."""
-    total, count = 0, 0
-    pending = [str(registry_root())]
-    while pending:
-        try:
-            with os.scandir(pending.pop()) as entries:
-                for entry in entries:
-                    try:
-                        if entry.is_dir(follow_symlinks=False):
-                            pending.append(entry.path)
-                        elif entry.is_file(follow_symlinks=False):
-                            total += entry.stat(follow_symlinks=False).st_size
-                            count += 1
-                    except OSError:
-                        continue
-        except OSError:
-            continue
-    return total, count
+        with _measure_lock:
+            _measuring = False
 
 
 def _disk_usage() -> dict:

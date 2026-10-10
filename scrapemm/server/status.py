@@ -478,9 +478,8 @@ def _job_figures() -> dict:
 
 
 def _media_usage() -> dict:
-    """Never walks the tree itself (see `registry.usage`), and never because of a job:
-    re-measuring after every job kept a walk over a shared registry of millions of files
-    running for a whole batch. The figure is refreshed on the registry's TTL instead."""
+    """Never measures itself (see `registry.usage`): the figure is refreshed in the
+    background on the registry's TTL."""
     return registry.usage()
 
 
