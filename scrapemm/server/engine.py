@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, replace
 from traceback import format_exc
@@ -1553,7 +1554,22 @@ async def postprocess_media(result: MultimodalSequence):
         await asyncio.gather(*(normalize_video(video) for video in result.videos))
 
 
+# Relocations one at a time: the same item may be on several pages retrieved at once,
+# and two threads moving its file both found it at its old path -- the second failed its
+# whole retrieval (perma.cc/N8MR-NS96, in a test run). They are renames, so this is cheap.
+_relocate_lock = threading.Lock()
+
+
 def _relocate_items(result: MultimodalSequence):
     """Moves every item into the ezmm registry directory."""
-    for item in result.unique_items():
-        item.relocate(move_not_copy=True)
+    with _relocate_lock:
+        for item in result.unique_items():
+            try:
+                item.relocate(move_not_copy=True)
+            except FileNotFoundError:
+                # Moved already, by another instance of the item (or another process)
+                target = item._default_file_path()
+                if not target.exists():
+                    raise
+                item.file_path = target
+                item_registry.update_file_path(item)

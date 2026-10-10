@@ -153,3 +153,23 @@ def test_media_usage_comes_from_the_registry(monkeypatch):
     usage = registry.usage()
     assert (usage["files"], usage["bytes"]) == (1464999, 868_169_308_192)
     assert calls == [False]  # Missing files left out, as ezMM counts them
+
+
+def test_an_item_on_two_pages_is_relocated_once(tmp_path):
+    """Two retrievals finishing at once both relocated the same item: the second, holding
+    an instance still at the old path, found the file gone and failed its whole retrieval
+    (perma.cc/N8MR-NS96). It now takes the file where the first one moved it."""
+    from ezmm import Image, MultimodalSequence
+    from PIL import Image as PillowImage
+    from scrapemm.server.engine import _relocate_items
+
+    outside = tmp_path / "olive.jpg"  # Not where the registry keeps it, like a legacy file
+    import os
+    PillowImage.frombytes("RGB", (300, 300), os.urandom(300 * 300 * 3)).save(outside)  # A new item
+    image = Image(file_path=outside, source_url="https://e.example/olive.jpg")
+    stale = Image.__new__(Image)  # Another instance of the same item, from before the move
+    stale.__dict__.update(image.__dict__)
+    _relocate_items(MultimodalSequence([image]))  # The first retrieval moves the file
+    assert image.file_path == image._default_file_path() != stale.file_path
+    _relocate_items(MultimodalSequence([stale]))  # The second one used to raise here
+    assert stale.file_path == image.file_path and stale.file_path.exists()
