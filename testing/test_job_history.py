@@ -99,3 +99,14 @@ def test_a_job_interrupted_says_by_whom(tmp_path):
     assert store.get_job(by_user)["interrupted_by"] == "user"
     assert store.get_job(finished)["interrupted_by"] is None
     assert store.interrupt_stale(by_user, "user") is False  # No longer running
+
+
+def test_jobs_sort_by_failures_both_ways(store):
+    """Each sort property goes both ways (the Jobs view picks property and order apart)."""
+    ids = run_jobs(store, 3)
+    for i, job in enumerate(ids):
+        store._connection.execute("UPDATE jobs SET failed = ? WHERE id = ?", (i, job))
+    store._connection.commit()
+    most = [j["id"] for j in store.list_jobs(sort="most_failed")]
+    fewest = [j["id"] for j in store.list_jobs(sort="fewest_failed")]
+    assert most == ids[::-1] and fewest == ids

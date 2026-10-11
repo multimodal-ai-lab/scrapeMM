@@ -651,6 +651,7 @@ SORTS = {
     "most_urls": "jobs.url_count DESC",
     "fewest_urls": "jobs.url_count ASC",
     "most_failed": "jobs.failed DESC",
+    "fewest_failed": "jobs.failed ASC",
 }
 
 # URLs listed per job in the overview; the detail view has them all

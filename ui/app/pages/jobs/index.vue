@@ -27,6 +27,7 @@ let version: number | null = null
 // the empty string for "no selection". So "any" is the sentinel, translated away when
 // the query is built.
 const ANY = 'any'
+const STATUS_PREFIX = 'status:'
 
 // Filters and sorting live in the query string, so a search can be linked to and
 // survives a reload -- which is the whole point of being able to find a job again.
@@ -34,58 +35,91 @@ const filters = reactive({
   url: (route.query.url as string) || '',
   method: (route.query.method as string) || ANY,
   format: (route.query.format as string) || ANY,
-  // `success` is what links from before the outcome classes used ('ok' / 'failed')
+  // One filter for a URL's outcome and a job's status: the status as `status:<status>`.
+  // `success` is what links from before the outcome classes used ('ok' / 'failed').
   outcome: (route.query.outcome as string)
+    || (route.query.status ? `${STATUS_PREFIX}${route.query.status}` : '')
     || ({ ok: 'ok', failed: 'error' } as Record<string, string>)[route.query.success as string]
     || ANY,
   since: (route.query.since as string) || ANY,
-  status: (route.query.status as string) || ANY,
 })
-const sort = ref((route.query.sort as string) || 'newest')
+// Sorting: by what, and which way. Together they name one of the server's orders.
+const SORT_ORDERS: Record<string, [string, string]> = {  // key: [descending, ascending]
+  date: ['newest', 'oldest'],
+  duration: ['longest', 'shortest'],
+  urls: ['most_urls', 'fewest_urls'],
+  failures: ['most_failed', 'fewest_failed'],
+}
+const initialSort = (route.query.sort as string) || 'newest'
+const sortKey = ref(Object.keys(SORT_ORDERS).find((k) => SORT_ORDERS[k]!.includes(initialSort)) || 'date')
+const sortDir = ref(Object.values(SORT_ORDERS).some((o) => o[1] === initialSort) ? 'asc' : 'desc')
+const sort = computed(() => SORT_ORDERS[sortKey.value]![sortDir.value === 'asc' ? 1 : 0])
 
 function isSet(value: string) {
   return !!value && value !== ANY
 }
 
+// Every option carries an icon (and `tone`, its colour), shown in the list and, for the
+// chosen one, in the select itself (see `optionLook()`)
 const FORMATS = [
-  { label: 'Any format', value: ANY },
-  { label: 'Multimodal', value: 'multimodal' },
-  { label: 'Markdown', value: 'markdown' },
-  { label: 'HTML', value: 'html' },
+  { label: 'Any format', value: ANY, icon: 'i-fa7-solid-file', tone: 'text-dimmed' },
+  { label: 'Multimodal', value: 'multimodal', icon: 'i-fa7-solid-photo-film', tone: 'text-muted' },
+  { label: 'Markdown', value: 'markdown', icon: 'i-fa7-brands-markdown', tone: 'text-muted' },
+  { label: 'HTML', value: 'html', icon: 'i-fa7-solid-code', tone: 'text-muted' },
 ]
-// Grouped: the three classes, then the kinds of "unavailable" (see useOutcome.ts)
-const OUTCOMES = outcomeFilterItems(ANY)
+// Grouped: the three classes, the kinds of "unavailable" (see useOutcome.ts), and the
+// job's own status
+const OUTCOMES = [
+  ...outcomeFilterItems(ANY),
+  [
+    { type: 'label' as const, label: 'Job status' },
+    { label: 'Running', value: `${STATUS_PREFIX}running`, icon: 'i-fa7-solid-circle-notch', tone: 'text-info' },
+    { label: 'Completed', value: `${STATUS_PREFIX}completed`, icon: 'i-fa7-solid-flag-checkered', tone: 'text-success' },
+    { label: 'Failed', value: `${STATUS_PREFIX}failed`, icon: 'i-fa7-solid-bug', tone: 'text-error' },
+    { label: 'Interrupted', value: `${STATUS_PREFIX}interrupted`, icon: 'i-fa7-solid-circle-stop', tone: 'text-dimmed' },
+  ],
+]
 const OUTCOME_OPTIONS = OUTCOMES.flat().filter((o: any) => o.value) as
   { label: string, value: string, icon: string, tone: string }[]
 const PERIODS = [
-  { label: 'Any time', value: ANY },
-  { label: 'Last hour', value: '1h' },
-  { label: 'Today', value: 'today' },
-  { label: 'Last 24 hours', value: '24h' },
-  { label: 'Last 7 days', value: '7d' },
-  { label: 'Last 30 days', value: '30d' },
+  { label: 'Any time', value: ANY, icon: 'i-fa7-solid-infinity', tone: 'text-dimmed' },
+  { label: 'Last hour', value: '1h', icon: 'i-fa7-solid-clock', tone: 'text-muted' },
+  { label: 'Today', value: 'today', icon: 'i-fa7-solid-sun', tone: 'text-muted' },
+  { label: 'Last 24 hours', value: '24h', icon: 'i-fa7-solid-clock-rotate-left', tone: 'text-muted' },
+  { label: 'Last 7 days', value: '7d', icon: 'i-fa7-solid-calendar-week', tone: 'text-muted' },
+  { label: 'Last 30 days', value: '30d', icon: 'i-fa7-solid-calendar-days', tone: 'text-muted' },
 ]
-const STATUSES = [
-  { label: 'Any status', value: ANY },
-  { label: 'Running', value: 'running' },
-  { label: 'Completed', value: 'completed' },
-  { label: 'Failed', value: 'failed' },
-  { label: 'Interrupted', value: 'interrupted' },
+const SORT_KEYS = [
+  { label: 'Date', value: 'date', icon: 'i-fa7-solid-calendar', tone: 'text-muted' },
+  { label: 'Duration', value: 'duration', icon: 'i-fa7-solid-hourglass-half', tone: 'text-muted' },
+  { label: 'URLs', value: 'urls', icon: 'i-fa7-solid-list-ol', tone: 'text-muted' },
+  { label: 'Failures', value: 'failures', icon: 'i-fa7-solid-circle-exclamation', tone: 'text-muted' },
 ]
-const SORTS = [
-  { label: 'Newest first', value: 'newest', icon: 'i-fa7-solid-arrow-down-wide-short' },
-  { label: 'Oldest first', value: 'oldest', icon: 'i-fa7-solid-arrow-up-wide-short' },
-  { label: 'Longest duration', value: 'longest', icon: 'i-fa7-solid-hourglass-end' },
-  { label: 'Shortest duration', value: 'shortest', icon: 'i-fa7-solid-hourglass-start' },
-  { label: 'Most URLs', value: 'most_urls', icon: 'i-fa7-solid-list-ol' },
-  { label: 'Fewest URLs', value: 'fewest_urls', icon: 'i-fa7-solid-list' },
-  { label: 'Most failures', value: 'most_failed', icon: 'i-fa7-solid-circle-exclamation' },
-]
+// The direction in the words of the property: "Newest first" reads better than "Descending"
+const SORT_DIRECTIONS = computed(() => {
+  const words: Record<string, [string, string]> = {
+    date: ['Newest first', 'Oldest first'],
+    duration: ['Longest first', 'Shortest first'],
+    urls: ['Most first', 'Fewest first'],
+    failures: ['Most first', 'Fewest first'],
+  }
+  const [down, up] = words[sortKey.value] || ['Descending', 'Ascending']
+  return [
+    { label: down, value: 'desc', icon: 'i-fa7-solid-arrow-down-wide-short', tone: 'text-muted' },
+    { label: up, value: 'asc', icon: 'i-fa7-solid-arrow-up-wide-short', tone: 'text-muted' },
+  ]
+})
 
 const methodOptions = computed(() => [
-  { label: 'Any method', value: ANY },
-  ...methods.value.map((m) => ({ label: m, value: m })),
+  { label: 'Any method', value: ANY, icon: 'i-fa7-solid-screwdriver-wrench', tone: 'text-dimmed' },
+  ...methods.value.map((m) => ({ label: m, value: m, icon: 'i-fa7-solid-wrench', tone: 'text-muted' })),
 ])
+
+/** The icon and its colour of the option `value` among `items`, for the select's own face */
+function optionLook(items: any[], value: string): { icon?: string, tone?: string } {
+  const option = items.flat().find((o: any) => o.value === value)
+  return { icon: option?.icon, tone: option?.tone }
+}
 
 const active = computed(() => Object.values(filters).filter(isSet).length)
 
@@ -120,10 +154,6 @@ const activeChips = computed(() => {
     chips.push({ key: 'since', icon: 'i-fa7-solid-clock',
                  text: label(PERIODS, filters.since) })
   }
-  if (isSet(filters.status)) {
-    chips.push({ key: 'status', icon: 'i-fa7-solid-circle-notch',
-                 text: label(STATUSES, filters.status) })
-  }
   return chips
 })
 
@@ -132,7 +162,7 @@ function clearFilter(key: keyof typeof filters) {
 }
 
 function reset() {
-  Object.assign(filters, { url: '', method: ANY, format: ANY, outcome: ANY, since: ANY, status: ANY })
+  Object.assign(filters, { url: '', method: ANY, format: ANY, outcome: ANY, since: ANY })
 }
 
 function sinceTimestamp(period: string): number | null {
@@ -149,8 +179,10 @@ function query(offset: number, limit: number, withVersion = false) {
   if (isSet(filters.url)) q.set('url', filters.url)
   if (isSet(filters.method)) q.set('method', filters.method)
   if (isSet(filters.format)) q.set('output_format', filters.format)
-  if (isSet(filters.outcome)) q.set('outcome', filters.outcome)
-  if (isSet(filters.status)) q.set('status', filters.status)
+  if (isSet(filters.outcome)) {
+    if (filters.outcome.startsWith(STATUS_PREFIX)) q.set('status', filters.outcome.slice(STATUS_PREFIX.length))
+    else q.set('outcome', filters.outcome)
+  }
   const since = isSet(filters.since) ? sinceTimestamp(filters.since) : null
   if (since) q.set('since', String(since))
   if (withVersion && version !== null) q.set('version', String(version))
@@ -227,7 +259,11 @@ async function refresh() {
 
 function syncQuery() {
   const q: Record<string, string> = {}
-  for (const [key, value] of Object.entries(filters)) if (isSet(value)) q[key] = value
+  for (const [key, value] of Object.entries(filters)) {
+    if (!isSet(value)) continue
+    if (key === 'outcome' && value.startsWith(STATUS_PREFIX)) q.status = value.slice(STATUS_PREFIX.length)
+    else q[key] = value
+  }
   if (sort.value !== 'newest') q.sort = sort.value
   router.replace({ query: q })
 }
@@ -370,12 +406,18 @@ async function copy(id: string) {
           />
         </template>
       </UInput>
-      <USelect v-model="filters.method" :items="methodOptions" class="w-40" />
-      <USelect v-model="filters.format" :items="FORMATS" class="w-40" />
       <USelect
-        v-model="filters.outcome" :items="OUTCOMES" class="w-40" aria-label="Filter by outcome"
-        :icon="OUTCOME_OPTIONS.find((o) => o.value === filters.outcome)?.icon"
-        :ui="{ leadingIcon: OUTCOME_OPTIONS.find((o) => o.value === filters.outcome)?.tone }"
+        v-for="select in [
+          { model: 'method', items: methodOptions, label: 'Filter by method' },
+          { model: 'format', items: FORMATS, label: 'Filter by output format' },
+          { model: 'outcome', items: OUTCOMES, label: 'Filter by outcome or job status' },
+          { model: 'since', items: PERIODS, label: 'Filter by time' },
+        ] as const"
+        :key="select.model"
+        v-model="filters[select.model]" :items="select.items as any" class="w-40"
+        :aria-label="select.label"
+        :icon="optionLook(select.items as any, filters[select.model]).icon"
+        :ui="{ leadingIcon: optionLook(select.items as any, filters[select.model]).tone }"
       >
         <template #item-leading="{ item }">
           <UIcon
@@ -384,14 +426,25 @@ async function copy(id: string) {
           />
         </template>
       </USelect>
-      <USelect v-model="filters.since" :items="PERIODS" class="w-40" />
-      <USelect
-        v-model="filters.status" :items="STATUSES" class="w-40" aria-label="Filter by status"
-      />
-      <USelect
-        v-model="sort" :items="SORTS" class="w-48" aria-label="Sort the jobs"
-        :icon="SORTS.find((s) => s.value === sort)?.icon"
-      />
+      <!-- Sorting: what by, and which way -->
+      <div class="flex">
+        <USelect
+          v-model="sortKey" :items="SORT_KEYS" class="w-36 rounded-r-none" aria-label="Sort the jobs by"
+          :icon="optionLook(SORT_KEYS, sortKey).icon"
+        >
+          <template #item-leading="{ item }">
+            <UIcon :name="(item as any).icon" class="size-4 shrink-0 text-muted" />
+          </template>
+        </USelect>
+        <USelect
+          v-model="sortDir" :items="SORT_DIRECTIONS" class="w-40 -ml-px rounded-l-none"
+          aria-label="Sort order" :icon="optionLook(SORT_DIRECTIONS, sortDir).icon"
+        >
+          <template #item-leading="{ item }">
+            <UIcon :name="(item as any).icon" class="size-4 shrink-0 text-muted" />
+          </template>
+        </USelect>
+      </div>
     </div>
 
     <!-- Chips and count share one row that is always present and always the same

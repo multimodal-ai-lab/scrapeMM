@@ -332,7 +332,7 @@ async def list_jobs(
                                        description="UNIX timestamp, inclusive"),
         sort: str = Query(default="newest",
                           description="newest, oldest, longest, shortest, most_urls, "
-                                      "fewest_urls or most_failed"),
+                                      "fewest_urls, most_failed or fewest_failed"),
         version: Optional[int] = Query(
             default=None,
             description="The version of an earlier answer. If the job history has not "
