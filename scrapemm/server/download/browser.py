@@ -435,9 +435,10 @@ class BrowserMedia:
     def has_playback(self, url: str) -> bool:
         """Whether a player downloaded (some of) the video at `url`, or this server is
         downloading it (`prefetch_video()`)."""
-        if (task := self._prefetches.get(url)) is not None:
-            if not task.done() or task.result() is not None:
-                return True
+        if (task := self._prefetches.get(url)) is not None and task.done()                 and not task.cancelled() and task.result() is not None:
+            # Only once it arrived: one still under way may yet fail, and the frame's own
+            # fallbacks (e.g. TikTok's video address in the page data) must not be skipped
+            return True
         return any(c.total >= 0 and c.received for c in self._playback.get(url, []))
 
     def playback_urls(self) -> set[str]:
