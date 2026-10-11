@@ -204,6 +204,7 @@ class ArchiveOrg(HeadedBrowser):
     domains = ["archive.org"]
     retrieval_timeout = ARCHIVE_RETRIEVAL_TIMEOUT
     captures_playback = True
+    playback_ignore = _VIDEO_DECOYS
 
     def _watch_page(self, page: Page) -> None:
         """Records the video responses the archive actually served while the page loaded.

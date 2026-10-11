@@ -1242,6 +1242,7 @@ class HeadedBrowser(RetrievalIntegration):
     # Whether the videos the page's players download are kept rather than fetched again
     # (see `BrowserMedia.watch_playback()`): for the archives that replay video pages
     captures_playback: ClassVar[bool] = False
+    playback_ignore: ClassVar[tuple[str, ...]] = ()  # Videos not worth downloading (decoys)
     # Seconds a page gets to load its document, and whether a page that missed that is
     # tried once more on a new tab (under load, a page that is quick alone can miss it)
     navigation_timeout: ClassVar[float] = 60
@@ -1613,7 +1614,7 @@ class HeadedBrowser(RetrievalIntegration):
                 media.stats = media_stats  # Counted where `_browse()` can log them
                 page._scrapemm_media = media  # For the archives' frame scripts
                 if self.captures_playback:
-                    await media.watch_playback()
+                    await media.watch_playback(self.playback_ignore)
                 self._watch_page(page)
                 await page.set_viewport_size({"width": 1920, "height": 1080})
 

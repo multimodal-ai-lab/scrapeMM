@@ -466,35 +466,29 @@ def _playback_urls(frame) -> set[str]:
     return media.playback_urls() if media is not None else set()
 
 
-# What a frame's players are doing (TEMPORARY diagnosis: do the replays' players download?)
-_PLAYER_STATE_JS = """() => [...document.querySelectorAll('video')].map(v => {
-    const b = v.buffered; let seconds = 0;
-    for (let i = 0; i < b.length; i++) seconds += b.end(i) - b.start(i);
-    return {paused: v.paused, autoplay: v.autoplay, muted: v.muted, preload: v.preload,
-            ready: v.readyState, network: v.networkState, buffered: Math.round(seconds),
-            duration: Math.round(v.duration || 0), error: v.error ? v.error.code : null,
-            src: (v.currentSrc || v.getAttribute('src') || '').slice(-40)};
-})"""
+_VIDEO_URLS_JS = """() => [...document.querySelectorAll('video, video source')]
+    .map(v => v.currentSrc || v.getAttribute('src') || '')
+    .filter(u => /^https?:/.test(u))"""
 
 
-async def _log_player_state(frames) -> None:
-    states = []
+async def _prefetch_videos(frames) -> None:
+    """Has this server download the frames' videos that are not downloading yet (see
+    `BrowserMedia.prefetch_video()`): those the page never requested itself."""
+    page = getattr(frames[0], "page", None)
+    media = getattr(page, "_scrapemm_media", None)
+    if media is None or not media.watching:
+        return  # Not a page whose videos are downloaded alongside (`captures_playback`)
     for f in frames:
         with suppress(PlaywrightError, asyncio.TimeoutError):
-            states += await asyncio.wait_for(f.evaluate(_PLAYER_STATE_JS), 5)
-    if states:
-        page = getattr(frames[0], "page", None)
-        media = getattr(page, "_scrapemm_media", None)
-        seen = {url[-40:]: [(c.received, c.total, c.done) for c in captures]
-                for url, captures in (media._playback.items() if media is not None else [])}
-        logger.info(f"Players at {frames[0].url[:100]}: {states}; downloads seen: {seen}")
+            for url in await asyncio.wait_for(f.evaluate(_VIDEO_URLS_JS), 5):
+                media.prefetch_video(url)
 
 
 async def _stop_playback(frame: Frame) -> None:
     """Pauses the media of the frame and of the frames within it. Best-effort: a frame
     that does not answer keeps playing, which costs time, not the retrieval."""
     frames = [frame, *frame.child_frames]
-    await _log_player_state(frames)
+    await _prefetch_videos(frames)
     for f in frames:
         with suppress(PlaywrightError, asyncio.TimeoutError):
             await asyncio.wait_for(f.evaluate(_STOP_PLAYBACK_JS), 5)
