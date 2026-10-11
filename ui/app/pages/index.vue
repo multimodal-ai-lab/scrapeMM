@@ -334,7 +334,7 @@ const tiles = computed(() => {
         : env.media.disk_free
           ? `${env.media.files} files · ${bytes(env.media.disk_free)} free`
           : `${env.media.files} files downloaded`,
-      to: '/settings' },
+      to: '/settings?section=cache' },
     // How often a retrieval was answered from the cache instead of being scraped again:
     // relative as the value, absolute below it, alongside what the cache holds now
     { label: 'Cache hits', icon: 'i-fa7-solid-bolt',
@@ -344,7 +344,7 @@ const tiles = computed(() => {
       detail: env.jobs.urls
         ? `${env.jobs.from_cache} of ${env.jobs.urls} URLs · ${env.cache.entries} cached, ${duration(env.cache.ttl)}`
         : `${env.cache.entries} cached · ${duration(env.cache.ttl)}`,
-      to: '/settings' },
+      to: '/settings?section=cache' },
     // URLs accepted by a job but not started yet, because every slot is taken
     { label: 'Waiting in line', icon: 'i-fa7-solid-hourglass-half',
       value: `${env.queue.waiting}`, tone: 'neutral' as const,
@@ -367,7 +367,7 @@ function proxyTile(proxy: any) {
   return { label: 'Proxy', icon: 'i-fa7-solid-shuffle',
     value: proxy.enabled ? 'On' : 'Off',
     tone: test && !test.ok ? 'warning' as const : proxy.enabled ? 'success' as const : 'neutral' as const,
-    detail: parts.join(' · '), to: '/settings' }
+    detail: parts.join(' · '), to: '/settings?section=proxy' }
 }
 
 onMounted(() => {

@@ -47,7 +47,7 @@ const menuItems = computed(() => {
   // Credentials and switching methods on and off are for Admins: they apply to everybody
   if (!isAdmin.value) return [actions]
   if (props.item.configurable) {
-    actions.push({ label: 'Configure', icon: 'i-fa7-solid-sliders', to: '/settings#secrets' })
+    actions.push({ label: 'Configure', icon: 'i-fa7-solid-sliders', to: '/settings?section=secrets' })
   }
   actions.push({
     label: props.item.enabled ? 'Disable' : 'Enable',
