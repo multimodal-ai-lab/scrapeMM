@@ -11,6 +11,7 @@ from PIL.Image import Resampling
 from PIL import ImageFile
 from ezmm import Image
 
+from scrapemm.server.config import get_setting
 from scrapemm.server.download.util import looks_like_image_file_url
 
 if TYPE_CHECKING:
@@ -35,8 +36,12 @@ _image_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="images")
 MIN_MEDIA_SIDE = 128
 
 
+def min_media_side() -> int:
+    return int(get_setting("min_media_side", MIN_MEDIA_SIDE))
+
+
 def is_too_small(width: float, height: float) -> bool:
-    return min(width, height) < MIN_MEDIA_SIDE
+    return min(width, height) < min_media_side()
 
 
 async def decode_image(content: bytes, source_url: str, **kwargs) -> Optional[Image]:

@@ -31,7 +31,7 @@ from scrapemm.common import RetrievalFailed
 from scrapemm.common.exceptions import TargetUnavailableError, RegionBlockedError
 from scrapemm.server.download.documents import document_extension
 from scrapemm.server import screenshot, timing
-from scrapemm.server.config import get_config_var
+from scrapemm.server.config import get_config_var, get_setting
 from scrapemm.server.download.browser import BrowserMedia, annotate_rendered_media
 from scrapemm.server.paths import BROWSER_PROFILE_PATH
 from scrapemm.server import budget
@@ -1238,11 +1238,20 @@ class HeadedBrowser(RetrievalIntegration):
     # the archive integrations: a replay may pass on the archived page's own status.
     fails_on_not_found = False
     waits_for_browser_slot = True  # Its time starts with a slot, see `_get()`
-    retrieval_timeout: ClassVar[float] = BROWSER_RETRIEVAL_TIMEOUT  # Seconds, see `_get()`
+    # The setting that limits a retrieval's seconds (see `_get()`, `retrieval_timeout`)
+    retrieval_timeout_setting: ClassVar[str] = "browser_retrieval_timeout"
     # Seconds a page gets to load its document, and whether a page that missed that is
     # tried once more on a new tab (under load, a page that is quick alone can miss it)
     navigation_timeout: ClassVar[float] = 60
     retry_on_timeout: ClassVar[bool] = True
+
+    @property
+    def retrieval_timeout(self) -> float:
+        """Seconds a retrieval may take, per the setting `retrieval_timeout_setting`."""
+        default = (ARCHIVE_RETRIEVAL_TIMEOUT
+                   if self.retrieval_timeout_setting == "archive_retrieval_timeout"
+                   else BROWSER_RETRIEVAL_TIMEOUT)
+        return float(get_setting(self.retrieval_timeout_setting, default))
 
     # Shared UC browser for all HeadedBrowser integrations (Perma.cc, Archive.org, …).
     _browser: ClassVar[Optional[Browser]] = None
@@ -1527,12 +1536,13 @@ class HeadedBrowser(RetrievalIntegration):
             await slot.acquire()
             timing.wait_for_slot(time.time() - waiting_since)
             timing.work_started()
-            budget.start(self.retrieval_timeout)  # Inherited by the task below
+            timeout = self.retrieval_timeout
+            budget.start(timeout)  # Inherited by the task below
             # Not asyncio.wait_for(): that waits for the cancelled retrieval to wind
             # down, and a stuck one may never do so. The slot is freed right away instead.
             task = asyncio.ensure_future(self._browse(url, slot=slot, **kwargs))
             try:
-                done, _ = await asyncio.wait({task}, timeout=self.retrieval_timeout)
+                done, _ = await asyncio.wait({task}, timeout=timeout)
             except asyncio.CancelledError:
                 task.cancel()  # The caller gave up (e.g. a run was stopped): so does this
                 raise
@@ -1541,7 +1551,7 @@ class HeadedBrowser(RetrievalIntegration):
             task.cancel()
             task.add_done_callback(lambda t: t.cancelled() or t.exception())  # No "never retrieved" noise
             raise RetrievalFailed(f"{self.name} did not finish retrieving {url} within "
-                                  f"{self.retrieval_timeout:.0f} s; given up.")
+                                  f"{timeout:.0f} s; given up.")
         finally:
             slot.release()
 

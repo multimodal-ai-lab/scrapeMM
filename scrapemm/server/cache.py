@@ -269,6 +269,13 @@ def _archived_url(capture: str) -> Optional[str]:
 # slow -- archive.ph delays requests after a burst)
 _failed_media: dict[str, float] = {}
 FAILED_MEDIA_MEMORY = 3600.0
+
+
+def _failed_media_memory() -> float:
+    from .config import get_setting  # Imported here: config imports this module
+    return float(get_setting("failed_media_memory", FAILED_MEDIA_MEMORY))
+
+
 _SRC = re.compile(r"""\b(?:src|poster|data-src)\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
 
 
@@ -276,8 +283,9 @@ def note_failed_medium(url: str, page_url: Optional[str] = None) -> None:
     if (key := media_key(url, page_url)) is not None:
         now = time.monotonic()
         _failed_media[key] = now
+        memory = _failed_media_memory()
         if len(_failed_media) > 10_000:
-            for k in [k for k, t in _failed_media.items() if now - t > FAILED_MEDIA_MEMORY]:
+            for k in [k for k, t in _failed_media.items() if now - t > memory]:
                 _failed_media.pop(k, None)
 
 
@@ -287,9 +295,10 @@ def _lacks_media(url: str, html: Optional[str]) -> bool:
         return False
     from urllib.parse import urljoin
     now = time.monotonic()
+    memory = _failed_media_memory()
     for src in _SRC.findall(html):
         key = media_key(urljoin(url, src), url)
-        if key is not None and now - _failed_media.get(key, -FAILED_MEDIA_MEMORY) < FAILED_MEDIA_MEMORY:
+        if key is not None and now - _failed_media.get(key, -memory) < memory:
             return True
     return False
 

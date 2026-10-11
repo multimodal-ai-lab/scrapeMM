@@ -31,6 +31,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 from scrapemm.common.paths import APP_NAME
+from .config import get_setting
 from .paths import CONFIG_DIR
 
 logger = logging.getLogger(APP_NAME)
@@ -107,10 +108,11 @@ class ChallengeStore:
             challenge.last_seen = time.time()
             if not any(p.url == url and p.output_format == output_format
                        for p in challenge.pending):
-                if len(challenge.pending) < MAX_PENDING:
+                max_pending = int(get_setting("captcha_max_pending", MAX_PENDING))
+                if len(challenge.pending) < max_pending:
                     challenge.pending.append(Pending(url, output_format, methods, max_video_size))
                 else:
-                    logger.warning(f"Not queueing {url}: {MAX_PENDING} URLs are already "
+                    logger.warning(f"Not queueing {url}: {max_pending} URLs are already "
                                    f"waiting on the {domain} CAPTCHA.")
             self._save()
 

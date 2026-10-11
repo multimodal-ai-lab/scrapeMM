@@ -4,7 +4,7 @@ from typing import Optional
 
 from playwright.async_api import Page
 
-from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget, ARCHIVE_RETRIEVAL_TIMEOUT
+from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget
 
 logger = logging.getLogger("scrapeMM")
 
@@ -12,7 +12,7 @@ logger = logging.getLogger("scrapeMM")
 class Ghostarchive(HeadedBrowser):
     name = "Ghostarchive"
     domains = ["ghostarchive.org"]
-    retrieval_timeout = ARCHIVE_RETRIEVAL_TIMEOUT
+    retrieval_timeout_setting = "archive_retrieval_timeout"
 
     async def _extract_content(self, page: Page) -> Optional[ContentTarget]:
         # Ghostarchive renders archived content with ReplayWeb.page, which loads the

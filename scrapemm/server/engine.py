@@ -32,7 +32,7 @@ from scrapemm.server.blacklist import blacklist
 from scrapemm.server.cache import cache, cache_key
 from scrapemm.server.captcha_detect import detect_captcha
 from scrapemm.server.paywall_detect import detect_paywall
-from scrapemm.server.config import get_config_var
+from scrapemm.server.config import get_config_var, get_setting
 from scrapemm.server.download import download_image, download_video
 from scrapemm.server.download.common import HEADERS
 from scrapemm.server.download.util import (looks_like_image_file_url, looks_like_video_file_url,
@@ -855,7 +855,7 @@ def _segments(order: list[str]) -> list[tuple[str, list[str]]]:
 def _archive_deadline(url: str) -> Optional[float]:
     """When the archive methods of a platform URL must be done, all together (see
     PLATFORM_ARCHIVE_BUDGET); None for the open web."""
-    return time.monotonic() + PLATFORM_ARCHIVE_BUDGET if chain.platform_of(url) else None
+    return time.monotonic() + _platform_archive_budget() if chain.platform_of(url) else None
 
 
 async def _run_archives(archives: list[str], url: str, session: aiohttp.ClientSession,
@@ -887,14 +887,14 @@ async def _run_archives(archives: list[str], url: str, session: aiohttp.ClientSe
             elif (remaining := deadline - time.monotonic()) <= 0:
                 routine.close()
                 errors[name] = RetrievalFailed(
-                    f"Not tried: the {PLATFORM_ARCHIVE_BUDGET:.0f} s for archived copies of "
+                    f"Not tried: the {_platform_archive_budget():.0f} s for archived copies of "
                     f"{platform} URLs were used up.")
                 continue
             else:
                 content = await asyncio.wait_for(routine, remaining)
         except asyncio.TimeoutError:
             errors[name] = RetrievalFailed(
-                f"{name} did not deliver within the {PLATFORM_ARCHIVE_BUDGET:.0f} s allowed "
+                f"{name} did not deliver within the {_platform_archive_budget():.0f} s allowed "
                 f"for archived copies of {platform} URLs.")
             continue
         except Exception as e:
@@ -930,6 +930,11 @@ async def _in_slot(key: str, routine: Callable[..., Coroutine], *args, **kwargs)
 # archive of a platform page seldom holds the content: better an answer in under a minute
 # than a replay of a YouTube page for minutes.
 PLATFORM_ARCHIVE_BUDGET = 45.0
+
+
+def _platform_archive_budget() -> float:
+    return float(get_setting("platform_archive_budget", PLATFORM_ARCHIVE_BUDGET))
+
 
 # Visible text of a platform's login or consent page, lower case. Checked in archived
 # copies of platform URLs only, where such a page is what the archive captured instead of
@@ -1074,7 +1079,8 @@ async def _latest_wayback_snapshot(url: str, session: aiohttp.ClientSession) -> 
         timestamp, original = max(found)  # The newest
         snapshot = f"https://web.archive.org/web/{timestamp}/{original}"
     if snapshot or answered:  # Not a lookup that failed: that one is worth repeating
-        ttl = WAYBACK_HIT_TTL if snapshot else WAYBACK_MISS_TTL
+        ttl = (get_setting("wayback_hit_ttl", WAYBACK_HIT_TTL) if snapshot
+               else get_setting("wayback_miss_ttl", WAYBACK_MISS_TTL))
         _wayback_cache[key] = (time.monotonic() + ttl, snapshot)
     return snapshot
 
@@ -1110,7 +1116,8 @@ async def _wayback_json(endpoint: str, params: dict, session: aiohttp.ClientSess
                 else:
                     problem = f"HTTP {response.status}"
                     if response.status == 429 and attempt:
-                        _wayback_backoff[0] = time.monotonic() + WAYBACK_BACKOFF
+                        _wayback_backoff[0] = (time.monotonic()
+                                               + get_setting("wayback_backoff", WAYBACK_BACKOFF))
                     elif 400 <= response.status < 500 and response.status != 429:
                         break  # Asking again will not change that
         except asyncio.TimeoutError:

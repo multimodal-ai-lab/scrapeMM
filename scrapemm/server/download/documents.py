@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
+from scrapemm.server.config import get_setting
+
 logger = logging.getLogger("scrapeMM")
 
 SPREADSHEET_EXTENSIONS = (".xlsx", ".xlsm")
@@ -151,6 +153,14 @@ def keep_pdf(data: bytes) -> Optional[Path]:
 MAX_PDF_PAGES = 500
 
 
+def _max_pdf_pages() -> int:
+    return max(1, int(get_setting("max_pdf_pages", MAX_PDF_PAGES)))
+
+
+def _max_sheet_rows() -> int:
+    return max(1, int(get_setting("max_sheet_rows", MAX_ROWS_PER_SHEET)))
+
+
 def _pdf_text(data: bytes, name: str) -> Optional[tuple[str, str]]:
     try:
         from pypdf import PdfReader
@@ -159,7 +169,8 @@ def _pdf_text(data: bytes, name: str) -> Optional[tuple[str, str]]:
         return None
     try:
         reader = PdfReader(BytesIO(data))
-        pages = [(page.extract_text() or "").strip() for page in reader.pages[:MAX_PDF_PAGES]]
+        max_pages = _max_pdf_pages()
+        pages = [(page.extract_text() or "").strip() for page in reader.pages[:max_pages]]
         total = len(reader.pages)
     except Exception as e:
         logger.info(f"Could not read the PDF {name}: {type(e).__name__}: {e}")
@@ -167,8 +178,8 @@ def _pdf_text(data: bytes, name: str) -> Optional[tuple[str, str]]:
     if not any(pages):
         logger.info(f"The PDF {name} has no text layer (a scan?).")
         return None
-    note = (f"(Only the first {MAX_PDF_PAGES} of {total} pages.)"
-            if total > MAX_PDF_PAGES else "")
+    note = (f"(Only the first {max_pages} of {total} pages.)"
+            if total > max_pages else "")
     paragraph, line = "\n\n", "\n"
     markdown = paragraph.join([f"# {name}"] + [p for p in pages if p] + ([note] if note else []))
     html_text = (f"<h1>{html.escape(name)}</h1>"
@@ -190,12 +201,12 @@ def _spreadsheet_tables(data: bytes, name: str) -> Optional[list[tuple[str, list
     except Exception as e:
         logger.info(f"Could not open the spreadsheet {name}: {type(e).__name__}: {e}")
         return None
-    tables = []
+    tables, max_rows = [], _max_sheet_rows()
     try:
         for sheet in workbook.worksheets:
             rows, truncated = [], False
             for row in sheet.iter_rows(values_only=True):
-                if len(rows) >= MAX_ROWS_PER_SHEET:
+                if len(rows) >= max_rows:
                     truncated = True
                     break
                 rows.append(["" if v is None else str(v) for v in row[:MAX_COLUMNS]])
@@ -212,8 +223,9 @@ def _csv_tables(data: bytes, name: str) -> list[tuple[str, list[list[str]], bool
     except csv.Error:
         dialect = csv.excel
     rows = list(csv.reader(text.splitlines(), dialect))
-    truncated = len(rows) > MAX_ROWS_PER_SHEET
-    return [(name, _trim([r[:MAX_COLUMNS] for r in rows[:MAX_ROWS_PER_SHEET]]), truncated)]
+    max_rows = _max_sheet_rows()
+    truncated = len(rows) > max_rows
+    return [(name, _trim([r[:MAX_COLUMNS] for r in rows[:max_rows]]), truncated)]
 
 
 def _trim(rows: list[list[str]]) -> list[list[str]]:
@@ -247,7 +259,7 @@ def _render(name: str, tables: list[tuple[str, list[list[str]], bool]]) -> tuple
             "<tr>" + "".join(f"<{tag}>{html.escape(c)}</{tag}>" for c in r) + "</tr>"
             for tag, r in [("th", header)] + [("td", r) for r in body]) + "</table>")
         if truncated:
-            note = f"(Only the first {MAX_ROWS_PER_SHEET} rows of this sheet.)"
+            note = f"(Only the first {_max_sheet_rows()} rows of this sheet.)"
             md_parts.append(note)
             html_parts.append(f"<p>{note}</p>")
     return "\n".join(html_parts), "\n\n".join(md_parts)

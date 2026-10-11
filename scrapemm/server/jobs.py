@@ -26,6 +26,7 @@ from typing import Any, Optional
 from scrapemm.common.outcome import OK, UNAVAILABLE, ERROR, classify, decisive_error
 from scrapemm.common.paths import APP_NAME
 from scrapemm.common.wire import ResponsePayload
+from .config import get_setting
 from .paths import JOBS_DB_PATH
 
 logger = logging.getLogger(APP_NAME)
@@ -763,10 +764,11 @@ def _truncate(content: dict) -> dict:
     """Caps the stored text fields, marking what was cut so the UI can say so."""
     content = dict(content)
     content["truncated"] = []
+    limit = int(get_setting("job_max_stored_kb", MAX_STORED_CONTENT // 1024)) * 1024
     for field in ("html", "markdown", "multimodal"):
         value = content.get(field)
-        if isinstance(value, str) and len(value) > MAX_STORED_CONTENT:
-            content[field] = value[:MAX_STORED_CONTENT]
+        if isinstance(value, str) and len(value) > limit:
+            content[field] = value[:limit]
             content["truncated"].append(field)
     return content
 

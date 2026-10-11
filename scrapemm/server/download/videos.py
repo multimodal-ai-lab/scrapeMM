@@ -18,7 +18,7 @@ from scrapemm.server.download.util import (looks_like_hls_url, looks_like_video_
 if TYPE_CHECKING:
     from playwright.async_api import APIRequestContext
 
-from scrapemm.server.download.images import MIN_MEDIA_SIDE, is_too_small
+from scrapemm.server.download.images import min_media_side, is_too_small
 from scrapemm.server.download.requests import fetch_headers, request_static
 from scrapemm.server.download.common import HEADERS
 
@@ -140,7 +140,7 @@ def video_from_binary(binary_data: bytes, source_url: str) -> Optional[Video]:
     video.relocate(move_not_copy=True)
     if is_too_small_video(video):
         logger.info(f"Left out the video of {source_url[:120]}: {video.width} x {video.height} px, "
-                    f"less than {MIN_MEDIA_SIDE} px on a side.")
+                    f"less than {min_media_side()} px on a side.")
         return None
     return video
 

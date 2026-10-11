@@ -8,9 +8,10 @@ from typing import Optional
 from playwright.async_api import TimeoutError, Page, Frame, Error as PlaywrightError
 
 from scrapemm.server import budget
+from scrapemm.server.config import get_setting
 from scrapemm.server.download.browser import MAX_IMAGE_BYTES, MAX_VIDEO_BYTES, BLOB_ATTR, install_stash
 from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget, settle_dom, \
-    renderer_crashed, evaluate_within, ARCHIVE_RETRIEVAL_TIMEOUT
+    renderer_crashed, evaluate_within
 from scrapemm.common import RetrievalFailed
 from scrapemm.common.exceptions import TargetUnavailableError
 from scrapemm.common.scraping_response import ScrapedContent
@@ -87,7 +88,7 @@ RETRY_BUDGET = 240
 class PermaCC(HeadedBrowser):
     name = "Perma.cc"
     domains = ["perma.cc"]
-    retrieval_timeout = ARCHIVE_RETRIEVAL_TIMEOUT
+    retrieval_timeout_setting = "archive_retrieval_timeout"
 
     # TODO: Implement PDF support, e.g., https://perma.cc/83VA-LTH9
 
@@ -111,6 +112,7 @@ class PermaCC(HeadedBrowser):
         videos of other archive replays running at the same time."""
         loop = asyncio.get_running_loop()
         start = loop.time()
+        retry_budget = float(get_setting("perma_cc_retry_budget", RETRY_BUDGET))
         shot = _screenshot_url(page.url)
         if shot and _replays_poorly(await _captured_url(page)):
             logger.info(f"{page.url} captures a YouTube player page; taking its screenshot "
@@ -137,7 +139,7 @@ class PermaCC(HeadedBrowser):
                 target, SCREENSHOT_MISS_WAIT if screenshot_view else REPLAY_MISS_WAIT)
             if target is not None and not missing and await _shows_content(target):
                 return target
-            if attempt < attempts - 1 and loop.time() - start < RETRY_BUDGET:
+            if attempt < attempts - 1 and loop.time() - start < retry_budget:
                 if missing:
                     logger.info(f"The replay at {page.url} says its page is not in the "
                                 f"archive; loading the record again.")
@@ -161,7 +163,7 @@ class PermaCC(HeadedBrowser):
             raise TargetUnavailableError(
                 f"The replay of the Perma.cc record at {page.url} says the page is not in "
                 f"its archive, twice.")
-        if shot is None or loop.time() - start >= RETRY_BUDGET:
+        if shot is None or loop.time() - start >= retry_budget:
             return None
         logger.info(f"The replay at {page.url} "
                     f"{'still says its page is not in the archive' if missing else 'shows nothing'}"
@@ -935,9 +937,10 @@ async def _timemap_newest(url: str) -> Optional[str]:
     if status == 404:
         return None
     if status == 429:
-        _rate_limited_until = time.time() + LOOKUP_RATE_LIMIT_PAUSE
+        pause = float(get_setting("perma_cc_rate_limit_pause", LOOKUP_RATE_LIMIT_PAUSE))
+        _rate_limited_until = time.time() + pause
         raise RateLimitError("Perma.cc is rate-limiting archive lookups; paused for "
-                             f"{LOOKUP_RATE_LIMIT_PAUSE // 60} min.")
+                             f"{pause / 60:.0f} min.")
     if status != 200:
         raise RetrievalFailed(f"Perma.cc answered the archive lookup with HTTP {status}.")
     try:
@@ -973,7 +976,9 @@ async def find_perma_archive(url: str, session=None) -> Optional[str]:
         for candidate in _lookup_candidates(url):
             if link := await _timemap_newest(candidate):
                 break
-    _lookups[url] = (link, time.time() + (LOOKUP_HIT_TTL if link else LOOKUP_MISS_TTL))
+    ttl = (get_setting("perma_cc_lookup_hit_ttl", LOOKUP_HIT_TTL) if link
+           else get_setting("perma_cc_lookup_miss_ttl", LOOKUP_MISS_TTL))
+    _lookups[url] = (link, time.time() + ttl)
     if len(_lookups) > 10_000:  # Keep it bounded: drop the expired ones
         for key in [k for k, (_, expiry) in _lookups.items() if expiry <= time.time()]:
             del _lookups[key]

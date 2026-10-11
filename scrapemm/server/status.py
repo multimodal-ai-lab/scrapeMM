@@ -27,6 +27,7 @@ from scrapemm.common.exceptions import CaptchaEncounteredError
 from scrapemm.common.paths import APP_NAME
 from . import registry, slots
 from .blacklist import blacklist
+from .config import get_setting
 from .cache import cache
 from .environment import ffmpeg_available, ffprobe_available
 from .jobs import SLOT, jobs
@@ -41,6 +42,11 @@ logger = logging.getLogger(APP_NAME)
 # calls and log-ins, so a reload or a second viewer reuses them; "Re-check all", a
 # changed secret or a toggled method probes afresh at once.
 STATUS_TTL = 60 * 60.0
+
+
+def _status_ttl() -> float:
+    return float(get_setting("status_ttl", STATUS_TTL))
+
 
 # How long one method may take to answer before the dashboard gives up on it
 PROBE_TIMEOUT = 20.0
@@ -136,7 +142,7 @@ def cached_status(key: str) -> tuple[Optional[IntegrationStatus], bool]:
     cached = _cache.get(key)
     if cached is None:
         return None, False
-    return cached[1], time.time() - cached[0] < STATUS_TTL
+    return cached[1], time.time() - cached[0] < _status_ttl()
 
 
 def _lock_for(name: str) -> asyncio.Lock:
@@ -183,13 +189,13 @@ async def check(name: str, force: bool = False) -> IntegrationStatus:
 
     if not force:
         cached = _cache.get(key)
-        if cached and time.time() - cached[0] < STATUS_TTL:
+        if cached and time.time() - cached[0] < _status_ttl():
             return cached[1]
 
     async with _lock_for(key):
         # Another caller may have probed while we waited for the lock
         cached = _cache.get(key)
-        if not force and cached and time.time() - cached[0] < STATUS_TTL:
+        if not force and cached and time.time() - cached[0] < _status_ttl():
             return cached[1]
 
         if key in METHOD_KEYS:

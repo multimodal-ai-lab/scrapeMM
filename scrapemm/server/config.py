@@ -52,6 +52,27 @@ SETTINGS: dict[str, type] = {
     "max_jobs": int,  # Job history: how many jobs keep their content at most (0: no limit)
     # Known consent platforms' dialogs removed in the browser before reading (default on)
     "remove_consent_dialogs": bool,
+    # Limits and lifetimes otherwise fixed in code, each read when used (see `get_setting`)
+    "browser_retrieval_timeout": float,
+    "archive_retrieval_timeout": float,
+    "platform_archive_budget": float,
+    "min_media_side": int,
+    "max_seconds_per_medium": float,
+    "job_max_stored_kb": int,
+    "test_runs_kept": int,
+    "wayback_hit_ttl": float,
+    "wayback_miss_ttl": float,
+    "wayback_backoff": float,
+    "perma_cc_lookup_hit_ttl": float,
+    "perma_cc_lookup_miss_ttl": float,
+    "perma_cc_rate_limit_pause": float,
+    "perma_cc_retry_budget": float,
+    "status_ttl": float,
+    "captcha_max_pending": int,
+    "max_pdf_pages": int,
+    "max_sheet_rows": int,
+    "screenshot_max_screens": int,
+    "failed_media_memory": float,
 }
 
 
@@ -71,6 +92,13 @@ def update_config(**kwargs):
 
 def get_config_var(name: str, default=None) -> Any:
     return _config.get(name, default)
+
+
+def get_setting(name: str, default):
+    """The setting `name`, or `default` if it is unset or was cleared (stored as None).
+    Read at each use, so that a change applies without a restart."""
+    value = _config.get(name)
+    return default if value is None else value
 
 
 def get_config() -> dict:
@@ -116,6 +144,20 @@ def schema() -> list[dict]:
     from .integrations.ytdlp import DEFAULT_YOUTUBE_PAUSE
     from .jobs import DEFAULT_MAX_JOBS, DEFAULT_RETENTION_DAYS
     from .search.base import DEFAULT_MAX_SEARCH_CONCURRENCY
+    from .cache import FAILED_MEDIA_MEMORY
+    from .challenges import MAX_PENDING
+    from .download.documents import MAX_PDF_PAGES, MAX_ROWS_PER_SHEET
+    from .download.images import MIN_MEDIA_SIDE
+    from .engine import (PLATFORM_ARCHIVE_BUDGET, WAYBACK_HIT_TTL, WAYBACK_MISS_TTL,
+                         WAYBACK_BACKOFF)
+    from .integrations.headed_browser import BROWSER_RETRIEVAL_TIMEOUT, ARCHIVE_RETRIEVAL_TIMEOUT
+    from .integrations.perma_cc import (LOOKUP_HIT_TTL, LOOKUP_MISS_TTL,
+                                        LOOKUP_RATE_LIMIT_PAUSE, RETRY_BUDGET)
+    from .jobs import MAX_STORED_CONTENT
+    from .screenshot import MAX_SCREENS
+    from .status import STATUS_TTL
+    from .testsuite import MAX_RUNS_KEPT
+    from .util import MAX_SECONDS_PER_MEDIUM
 
     def entry(key: str, default, label: str, description: str, section: str,
               **extra) -> dict:
@@ -195,6 +237,70 @@ def schema() -> list[dict]:
         entry("job_retention_days", float(DEFAULT_RETENTION_DAYS), "Content kept for",
               "Older jobs lose their page content; the jobs are kept. 0 keeps the content "
               "for ever.", "history", unit="days", min=0),
+        entry("job_max_stored_kb", MAX_STORED_CONTENT // 1024, "Content stored per field",
+              "A job's stored HTML, Markdown or multimodal text is cut beyond this; the UI "
+              "says so.", "history", unit="KB", min=16, max=16384),
+        entry("test_runs_kept", MAX_RUNS_KEPT, "Test suite runs kept",
+              "The oldest test suite reports go first.", "history", min=1, max=500),
+        entry("min_media_side", MIN_MEDIA_SIDE, "Min media size",
+              "Images and videos smaller than this on either side (icons, logos, avatars) "
+              "are left out; 0 keeps all.", "general", unit="px", min=0, max=2048),
+        entry("max_seconds_per_medium", float(MAX_SECONDS_PER_MEDIUM), "Time per medium",
+              "Longest a single image or video download may take; the page comes back "
+              "without it.", "general", unit="s", min=5, max=600),
+        entry("max_pdf_pages", MAX_PDF_PAGES, "Max PDF pages",
+              "A PDF's text beyond this many pages is left out.", "general", min=1,
+              max=100_000),
+        entry("max_sheet_rows", MAX_ROWS_PER_SHEET, "Max rows per sheet",
+              "A spreadsheet's or CSV file's rows beyond this are left out.", "general",
+              min=1, max=1_000_000),
+        entry("screenshot_max_screens", MAX_SCREENS, "Screenshot height",
+              "How many screens high a page's screenshot reaches at most, from the top.",
+              "general", unit="screens", min=1, max=20),
+        entry("status_ttl", STATUS_TTL, "Re-check methods every",
+              "How long the dashboard reuses a method's status; probes cost real API calls "
+              "and log-ins.", "general", unit="s", min=60, max=86400),
+        entry("captcha_max_pending", MAX_PENDING, "Max URLs waiting on a CAPTCHA",
+              "Per site; further URLs that hit its CAPTCHA are not queued.", "general",
+              min=10, max=100_000),
+        entry("browser_retrieval_timeout", float(BROWSER_RETRIEVAL_TIMEOUT),
+              "Browser retrieval time limit",
+              "Longest a single browser retrieval may take before its slot is freed and it "
+              "fails.", "browser", unit="s", min=30, max=900),
+        entry("archive_retrieval_timeout", float(ARCHIVE_RETRIEVAL_TIMEOUT),
+              "Archive replay time limit",
+              "Longest a replay by Perma.cc, the Internet Archive or Ghostarchive may take; "
+              "their media arrive slowly.", "archives", unit="s", min=60, max=900),
+        entry("platform_archive_budget", PLATFORM_ARCHIVE_BUDGET, "Archive time for platforms",
+              "Time all archives together get for a social media URL whose integration "
+              "failed; 0 skips them.", "archives", unit="s", min=0, max=600),
+        entry("wayback_hit_ttl", float(WAYBACK_HIT_TTL), "Wayback lookup: remember a capture",
+              "How long a found Internet Archive capture of a URL is reused without asking "
+              "again.", "archives", unit="s", min=0, max=86400),
+        entry("wayback_miss_ttl", float(WAYBACK_MISS_TTL), "Wayback lookup: remember no capture",
+              "How long the answer that a URL has no Internet Archive capture is reused.",
+              "archives", unit="s", min=0, max=86400),
+        entry("wayback_backoff", float(WAYBACK_BACKOFF), "Wayback lookup: pause on rate limit",
+              "How long lookups stop after archive.org rate-limited them twice in a row.",
+              "archives", unit="s", min=0, max=3600),
+        entry("perma_cc_lookup_hit_ttl", float(LOOKUP_HIT_TTL),
+              "Perma.cc lookup: remember a record",
+              "How long a found Perma.cc record of a URL is reused without asking again.",
+              "archives", unit="s", min=0, max=86400),
+        entry("perma_cc_lookup_miss_ttl", float(LOOKUP_MISS_TTL),
+              "Perma.cc lookup: remember no record",
+              "How long the answer that Perma.cc has no record of a URL is reused.",
+              "archives", unit="s", min=0, max=86400),
+        entry("perma_cc_rate_limit_pause", float(LOOKUP_RATE_LIMIT_PAUSE),
+              "Perma.cc lookup: pause on rate limit",
+              "How long lookups stop after Perma.cc rate-limited them.", "archives",
+              unit="s", min=0, max=3600),
+        entry("perma_cc_retry_budget", float(RETRY_BUDGET), "Perma.cc: time for reloads",
+              "How long an empty replay is loaded again before its screenshot is taken "
+              "instead.", "archives", unit="s", min=0, max=900),
+        entry("failed_media_memory", FAILED_MEDIA_MEMORY, "Remember failed archive media",
+              "How long a result missing an archived medium that failed to download is not "
+              "kept for good.", "cache", unit="s", min=0, max=86400),
     ]
     return entries  # One per setting, which `test_slots.py` checks
 

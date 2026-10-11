@@ -26,8 +26,9 @@ from markdownify import MarkdownConverter
 from playwright.async_api import APIRequestContext, Page, Frame
 
 from scrapemm.server import budget
+from scrapemm.server.config import get_setting
 from scrapemm.server.download import download_video, download_image
-from scrapemm.server.download.images import (MIN_MEDIA_SIDE, _is_svg, image_from_binary,
+from scrapemm.server.download.images import (min_media_side, _is_svg, image_from_binary,
                                              image_size, is_too_small)
 from scrapemm.server.download.util import (
     looks_like_image_file_url,
@@ -123,8 +124,6 @@ def read_urls_from_file(file_path):
     with open(file_path, 'r') as f:
         return f.read().splitlines()
 
-
-MAX_MEDIA_PER_PAGE = 32
 
 # Threads for parsing and converting HTML: CPU-bound pure Python, so off the event loop,
 # but few, as each one holds the GIL the loop needs as well (see `decode_image()`)
@@ -450,7 +449,7 @@ def _shown_small(element: Tag) -> bool:
     than `MIN_MEDIA_SIDE` pixels (the size below which media are dropped anyway)."""
     for attribute in ("width", "height"):
         value = str(element.get(attribute) or "").strip().removesuffix("px")
-        if value.isdigit() and int(value) < MIN_MEDIA_SIDE:
+        if value.isdigit() and int(value) < min_media_side():
             return True
     return False
 
@@ -850,7 +849,7 @@ async def _wait_for_medium(uri: str, task: Awaitable, pageless: set[str], skippe
         # Not these: an embedded YouTube video may queue for minutes behind the
         # others (YouTube's pacing), and still arrive
         return await task
-    seconds = budget.cap(MAX_SECONDS_PER_MEDIUM)
+    seconds = budget.cap(float(get_setting("max_seconds_per_medium", MAX_SECONDS_PER_MEDIUM)))
     if seconds <= 0:
         skipped.append(uri)
         if inspect.iscoroutine(task):

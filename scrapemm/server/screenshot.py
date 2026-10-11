@@ -26,6 +26,7 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING, Optional
 
 from scrapemm.common.paths import APP_NAME
+from scrapemm.server.config import get_setting
 
 if TYPE_CHECKING:
     from ezmm import Image
@@ -36,6 +37,11 @@ logger = logging.getLogger(APP_NAME)
 
 WIDTH, HEIGHT = 1920, 1080
 MAX_SCREENS = 3
+
+
+def _max_screens() -> int:
+    return max(1, int(get_setting("screenshot_max_screens", MAX_SCREENS)))
+
 
 # Set per retrieval: each URL is retrieved in a task of its own, which the methods' tasks
 # inherit it from
@@ -59,7 +65,7 @@ async def capture(page: "Page") -> Optional[bytes]:
         height = await page.evaluate("document.documentElement.scrollHeight") or size["height"]
         return await page.screenshot(type="png", full_page=True, clip={
             "x": 0, "y": 0, "width": size["width"],
-            "height": min(int(height), size["height"] * MAX_SCREENS)})
+            "height": min(int(height), size["height"] * _max_screens())})
     except Exception as e:
         logger.info(f"📷 No screenshot of {getattr(page, 'url', 'the page')}: "
                     f"{type(e).__name__}: {e}")
@@ -95,7 +101,7 @@ async def to_image(png: bytes, url: str) -> Optional["Image"]:
     from .download.images import decode_image
     try:
         with PillowImage.open(io.BytesIO(png)) as picture:
-            max_height = int(picture.width * HEIGHT * MAX_SCREENS / WIDTH)
+            max_height = int(picture.width * HEIGHT * _max_screens() / WIDTH)
             if picture.height > max_height:
                 buffer = io.BytesIO()
                 picture.crop((0, 0, picture.width, max_height)).save(buffer, "PNG")
