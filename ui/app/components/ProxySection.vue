@@ -100,25 +100,18 @@ const ago = (at?: number | null) => {
 </script>
 
 <template>
+  <!-- No title of its own: the Settings page heads the section -->
   <UCard>
-    <template #header>
-      <div class="flex items-center justify-between gap-2">
-        <h2 class="font-medium flex items-center gap-2">
-          <UIcon name="i-fa7-solid-shuffle" class="size-4 text-primary" />
-          Proxy
-          <UBadge v-if="dirty" color="warning" variant="subtle" size="sm" label="Unsaved" />
-          <UBadge v-else-if="entry" :color="entry.enabled ? 'success' : 'neutral'" variant="subtle" size="sm"
-            :label="entry.enabled ? 'In use' : 'Off'" />
-        </h2>
+    <UAlert v-if="error" color="error" variant="subtle" :description="error" class="mb-4" />
+
+    <div class="space-y-4">
+      <div v-if="entry" class="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <UBadge :color="entry.enabled ? 'success' : 'neutral'" variant="subtle" size="sm"
+          :label="entry.enabled ? 'In use' : 'Off'" />
         <span v-if="status?.configured" class="text-xs text-muted tabular-nums">
           {{ compact(status.requests_today) }} {{ status.requests_today === 1 ? 'retrieval' : 'retrievals' }} through it today
         </span>
       </div>
-    </template>
-
-    <UAlert v-if="error" color="error" variant="subtle" :description="error" class="mb-4" />
-
-    <div class="space-y-4">
       <p class="text-xs text-muted">
         When a method fails because a site refuses <em>this server's address</em> — YouTube refusing a
         stream or demanding its bot check, HTTP 403 or 451, a rate limit — it is retried once through the

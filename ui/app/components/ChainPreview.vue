@@ -1,12 +1,12 @@
 <script setup lang="ts">
 /**
- * What the chain does with a URL typed in: which integration or exception takes over, which
+ * What the chain does with a URL typed in: which integration or site rule takes over, which
  * methods then run in order, and why the others are skipped. Resolves the drafts of the
- * chain and the exceptions, so unsaved changes show at once.
+ * chain and the site rules, so unsaved changes show at once.
  */
 const api = useApi()
 const chainDraft = useChainDraft()
-const exceptionsDraft = useExceptionsDraft()
+const siteRulesDraft = useSiteRulesDraft()
 
 const url = ref('')
 const preview = ref<any>(null)
@@ -18,7 +18,7 @@ async function run() {
   if (!value) { preview.value = null; error.value = ''; return }
   try {
     preview.value = await api.post<any>('/v1/chain/preview', {
-      url: value, chain: chainDraft.value, exceptions: exceptionsDraft.value,
+      url: value, chain: chainDraft.value, exceptions: siteRulesDraft.value,
     })
     error.value = ''
   } catch (e: any) {
@@ -26,7 +26,7 @@ async function run() {
   }
 }
 
-watch([url, chainDraft, exceptionsDraft], () => {
+watch([url, chainDraft, siteRulesDraft], () => {
   clearTimeout(timer)
   timer = setTimeout(run, 350)
 }, { deep: true })
@@ -57,7 +57,7 @@ const icon = (key: string) => ICONS[key] || integrationIcon(key)
         <UIcon name="i-fa7-solid-eye" class="size-4 text-primary" />
         Preview
       </h2>
-      <p class="text-sm text-muted mt-0.5">What the chain and the exceptions do with a URL, unsaved changes included.</p>
+      <p class="text-sm text-muted mt-0.5">What the chain and the site rules do with a URL, unsaved changes included.</p>
     </template>
 
     <div class="flex gap-2">
@@ -85,7 +85,7 @@ const icon = (key: string) => ICONS[key] || integrationIcon(key)
           · handled by <strong>{{ preview.integrations.join(', ') }}</strong>
         </template>
         <template v-if="preview.exception">
-          · exception <code class="font-mono">{{ preview.exception.pattern }}</code>
+          · site rule <code class="font-mono">{{ preview.exception.pattern }}</code>
         </template>
       </p>
       <ol v-if="preview.steps.length" class="flex flex-wrap items-center gap-1.5">

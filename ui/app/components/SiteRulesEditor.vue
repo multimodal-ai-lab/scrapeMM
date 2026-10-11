@@ -1,9 +1,10 @@
 <script setup lang="ts">
 /**
- * Exceptions to the retrieval chain: domains whose live methods are fixed. A pattern is a
- * domain (the domain and its subdomains) or "*." and a domain (its subdomains only); the
- * most specific one matching a URL wins. Its methods replace the chain's live methods for
- * that domain, and the chain's archive methods apply as configured.
+ * Site rules: domains whose live methods are fixed, as exceptions to the retrieval chain
+ * (which is what the API still calls them). A pattern is a domain (the domain and its
+ * subdomains) or "*." and a domain (its subdomains only); the most specific one matching
+ * a URL wins. Its methods replace the chain's live methods for that domain, and the
+ * chain's archive methods apply as configured.
  *
  * Edited as a draft, saved with the page's save button.
  */
@@ -12,7 +13,7 @@ interface Rule { id?: number, pattern: string, methods: string[] }
 let seq = 0
 
 const api = useApi()
-const draftForPreview = useExceptionsDraft()
+const draftForPreview = useSiteRulesDraft()
 
 const server = ref<any>(null)
 const draft = ref<Rule[]>([])
@@ -53,7 +54,7 @@ function problem(rule: Rule, index: number): string {
   const pattern = rule.pattern.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '')
   if (!pattern) return 'Enter a domain, like example.com, or *.example.com for its subdomains.'
   if (!PATTERN.test(pattern)) return `"${rule.pattern}" is not a domain (like example.com) or *.domain.`
-  if (draft.value.some((r, i) => i !== index && r.pattern.trim().toLowerCase() === pattern)) return 'This domain has another exception already.'
+  if (draft.value.some((r, i) => i !== index && r.pattern.trim().toLowerCase() === pattern)) return 'This domain has a rule already.'
   if (!rule.methods.length) return 'Add at least one method.'
   return ''
 }
@@ -94,7 +95,7 @@ function discard() {
   if (server.value) adopt(server.value)
 }
 
-useSettingsSection({ id: 'exceptions', title: 'Exceptions', dirty, save, discard })
+useSettingsSection({ id: 'site-rules', title: 'Site rules', dirty, save, discard })
 onMounted(load)
 
 // --- Editing ------------------------------------------------------------------------
@@ -115,7 +116,7 @@ const name = (key: string) => methodInfo.value[key]?.name || key
 function add() {
   draft.value = [{ id: ++seq, pattern: '', methods: ['browser'] }, ...draft.value]
   filter.value = ''
-  nextTick(() => document.getElementById('exception-pattern-0')?.focus())
+  nextTick(() => document.getElementById('site-rule-pattern-0')?.focus())
 }
 
 function remove(index: number) {
@@ -155,42 +156,33 @@ const ORIGIN = {
 </script>
 
 <template>
+  <!-- No title of its own: the Settings page heads the section -->
   <UCard>
-    <template #header>
-      <div class="flex flex-col sm:flex-row sm:items-start gap-x-3 gap-y-2">
-        <div class="min-w-0 flex-1">
-          <h2 class="font-medium flex items-center gap-2">
-            <UIcon name="i-fa7-solid-route" class="size-4 text-primary" />
-            Exceptions
-            <UBadge v-if="dirty" color="warning" variant="subtle" size="sm" label="Unsaved" />
-          </h2>
-          <p class="text-sm text-muted mt-0.5">
-            Domains that use fixed live methods instead of the chain above: social platforms
-            only their own integration, some sites a particular scraper. The chain's archive
-            methods still apply. <code class="font-mono">example.com</code> covers its
-            subdomains too, <code class="font-mono">*.example.com</code> only them.
-          </p>
-        </div>
-        <div class="flex gap-1 self-start">
-          <UButton size="xs" icon="i-fa7-solid-plus" label="Add exception" :disabled="loading" @click="add" />
-          <UButton
-            size="xs" variant="ghost" color="neutral" icon="i-fa7-solid-arrow-rotate-left"
-            label="Reset to defaults" :disabled="loading" @click="resetToDefaults"
-          />
-        </div>
-      </div>
-    </template>
-
     <div v-if="loading && !server" class="py-6 text-center text-sm text-muted">
-      <UIcon name="i-fa7-solid-spinner" class="size-4 animate-spin" /> Loading the exceptions…
+      <UIcon name="i-fa7-solid-spinner" class="size-4 animate-spin" /> Loading the site rules…
     </div>
+    <UAlert v-else-if="error && !server" color="error" variant="subtle" :description="error" />
 
     <div v-else-if="server" class="space-y-3">
       <UAlert v-if="error" color="error" variant="subtle" :description="error" />
-      <UInput
-        v-model="filter" icon="i-fa7-solid-magnifying-glass" size="sm" class="w-full sm:w-72"
-        :placeholder="`Filter ${draft.length} exceptions`" aria-label="Filter the exceptions"
-      />
+      <p class="text-xs text-muted">
+        Social platforms get only their own integration, some sites a particular scraper.
+        The chain's archive methods still apply. <code class="font-mono">example.com</code>
+        covers its subdomains too, <code class="font-mono">*.example.com</code> only them.
+      </p>
+      <div class="flex flex-col sm:flex-row sm:items-center gap-2">
+        <UInput
+          v-model="filter" icon="i-fa7-solid-magnifying-glass" size="sm" class="w-full sm:w-72"
+          :placeholder="`Filter ${draft.length} ${draft.length === 1 ? 'rule' : 'rules'}`" aria-label="Filter the site rules"
+        />
+        <div class="flex gap-1 sm:ml-auto">
+          <UButton size="xs" icon="i-fa7-solid-plus" label="Add rule" @click="add" />
+          <UButton
+            size="xs" variant="ghost" color="neutral" icon="i-fa7-solid-arrow-rotate-left"
+            label="Reset to defaults" @click="resetToDefaults"
+          />
+        </div>
+      </div>
 
       <ul class="grid gap-2">
         <li
@@ -200,8 +192,8 @@ const ORIGIN = {
         >
           <div class="sm:w-56 shrink-0 space-y-1">
             <UInput
-              :id="`exception-pattern-${index}`" v-model="rule.pattern" size="sm" class="w-full font-mono"
-              placeholder="example.com" :aria-label="`Domain of exception ${index + 1}`"
+              :id="`site-rule-pattern-${index}`" v-model="rule.pattern" size="sm" class="w-full font-mono"
+              placeholder="example.com" :aria-label="`Domain of rule ${index + 1}`"
               :color="problem(rule, index) && rule.pattern ? 'error' : undefined"
             />
             <UBadge
@@ -236,11 +228,11 @@ const ORIGIN = {
 
           <UButton
             size="xs" variant="ghost" color="error" icon="i-fa7-solid-trash" class="self-end sm:self-start"
-            :aria-label="`Delete the exception for ${rule.pattern || 'a new domain'}`" @click="remove(index)"
+            :aria-label="`Delete the rule for ${rule.pattern || 'a new domain'}`" @click="remove(index)"
           />
         </li>
       </ul>
-      <p v-if="!shown.length" class="text-sm text-muted">No exception matches.</p>
+      <p v-if="!shown.length" class="text-sm text-muted">No rule matches.</p>
       <UButton
         v-if="!filter.trim() && matching.length > shown.length || showAll" size="xs" variant="soft" color="neutral"
         :icon="showAll ? 'i-fa7-solid-chevron-up' : 'i-fa7-solid-chevron-down'"

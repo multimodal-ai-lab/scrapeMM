@@ -189,11 +189,12 @@ def schema() -> list[dict]:
         entry("cache_immutable_max_mb", float(DEFAULT_IMMUTABLE_MAX_MB),
               "Permanent tier size", "The permanent cache tier on disk (archive captures), "
               "besides the media registry.", "cache", unit="MB", min=1, max=1024 * 1024),
-        entry("max_jobs", DEFAULT_MAX_JOBS, "Jobs kept at most",
-              "The oldest go first; 0 keeps all.", "history", min=0),
-        entry("job_retention_days", float(DEFAULT_RETENTION_DAYS), "Jobs kept for",
-              "Older jobs and search records are removed; 0 keeps them for ever.",
-              "history", unit="days", min=0),
+        entry("max_jobs", DEFAULT_MAX_JOBS, "Jobs with content at most",
+              "Older jobs lose their page content (about 110 KB per URL); the jobs and "
+              "their statistics are kept. 0 keeps all content.", "history", min=0),
+        entry("job_retention_days", float(DEFAULT_RETENTION_DAYS), "Content kept for",
+              "Older jobs lose their page content; the jobs are kept. 0 keeps the content "
+              "for ever.", "history", unit="days", min=0),
     ]
     return entries  # One per setting, which `test_slots.py` checks
 
