@@ -70,9 +70,11 @@ async def test_instagram(url: str, expected: dict[str, int]):
     ("https://www.facebook.com/reel/2038221060315031", dict(video=1)),
     ("https://www.facebook.com/reel/1954696035077530", dict(video=1)),
     ("https://www.facebook.com/reel/3466446073497470", dict(video=1)),  # restricted for misinformation
-    ("https://www.facebook.com/watch/?v=502482344935053", dict(video=1)),
-    # restricted for misinformation, accessible only with cookie:
+    # restricted for misinformation; its photo comes from the page's og:image:
     ("https://www.facebook.com/groups/1973976962823632/posts/3992825270938781/", dict(image=1)),
+    # Behind the login wall since October 2026, read off the embed:
+    ("https://www.facebook.com/permalink.php?story_fbid=pfbid02CPn7q8czyPAQpMrJ3GWDeCpM1TXDofU5NpwtaeTEieNApvtQsBjLVKFp7ShUCopvl&#038;id=100078635210746",
+     dict(image=3)),
 ])
 async def test_facebook(url: str, expected: dict[str, int]):
     """Test Facebook reel and photo retrieval"""
