@@ -46,6 +46,12 @@ export function diskTone(media: any): HealthTone {
   return share >= 0.95 ? 'error' : share >= 0.85 ? 'warning' : 'neutral'
 }
 
+/** URLs waiting for a slot: more than 100 want a look, more than 1000 are a backlog */
+export function queueTone(waiting: number | null | undefined): HealthTone {
+  if (!waiting) return 'neutral'
+  return waiting > 1000 ? 'error' : waiting > 100 ? 'warning' : 'neutral'
+}
+
 /** The worse of some tones: error over warning over success over neutral */
 export function worst(tones: HealthTone[]): HealthTone {
   for (const tone of ['error', 'warning', 'success'] as const) {
@@ -93,6 +99,7 @@ export function useAttention() {
       { label: 'Awaiting CAPTCHA', tone: env.captcha?.waiting ? 'warning' : 'neutral' },
       { label: 'Blacklisted', tone: blacklistNew.value ? 'warning' : 'neutral' },
       { label: 'Media stored', tone: diskTone(env.media) },
+      { label: 'Waiting in line', tone: queueTone(env.queue?.waiting) },
     ]
     if (env.proxy?.configured) rows.push({ label: 'Proxy', tone: proxyTone(env.proxy) })
     return rows

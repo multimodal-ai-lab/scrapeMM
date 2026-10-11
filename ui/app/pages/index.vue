@@ -310,7 +310,7 @@ const tiles = computed(() => {
         : env.media.disk_free
           ? `${compact(env.media.files)} files · ${bytes(env.media.disk_free)} free`
           : `${compact(env.media.files)} files downloaded`,
-      to: '/settings' },
+      to: '/settings?section=cache' },
     // How often a retrieval was answered from the cache instead of being scraped again:
     // relative as the value, absolute below it, alongside what the cache holds now
     { label: 'Cache hits', icon: 'i-fa7-solid-bolt',
@@ -320,12 +320,13 @@ const tiles = computed(() => {
       detail: env.jobs.urls
         ? `${compact(env.jobs.from_cache)} of ${compact(env.jobs.urls)} URLs · ${compact(env.cache.entries)} cached, ${duration(env.cache.ttl)}`
         : `${compact(env.cache.entries)} cached · ${duration(env.cache.ttl)}`,
-      to: '/settings' },
-    // URLs accepted by a job but not started yet, because every slot is taken
+      to: '/settings?section=cache' },
+    // URLs accepted but not started yet: every slot of their methods is taken (the
+    // thresholds are the sidebar logo's too, see useHealth.ts)
     { label: 'Waiting in line', icon: 'i-fa7-solid-hourglass-half',
-      value: compact(env.queue.waiting), tone: 'neutral' as const,
+      value: compact(env.queue.waiting), tone: queueTone(env.queue.waiting),
       detail: env.queue.waiting || env.queue.active || env.jobs.running
-        ? `URLs queued · ${env.queue.active}/${env.queue.limit} scraping · `
+        ? `URLs waiting for a slot · ${compact(env.queue.active)} scraping · `
           + `${env.jobs.running} job${env.jobs.running === 1 ? '' : 's'} running`
         : 'no URLs queued',
       to: '/history' },
@@ -343,7 +344,7 @@ function proxyTile(proxy: any) {
   return { label: 'Proxy', icon: 'i-fa7-solid-shuffle',
     value: proxy.enabled ? 'On' : 'Off',
     tone: proxyTone(proxy),
-    detail: parts.join(' · '), to: '/settings' }
+    detail: parts.join(' · '), to: '/settings?section=proxy' }
 }
 
 onMounted(() => {
@@ -464,6 +465,7 @@ onUnmounted(() => {
         <IntegrationCard
           v-for="item in group.items" :key="item.key" :item="item"
           :busy="busy === item.key" :checking="pending.has(item.key)"
+          :slots="environment?.slots?.[item.key]"
           @recheck="recheck" @toggle="toggle"
         />
       </div>
