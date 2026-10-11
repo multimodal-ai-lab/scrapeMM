@@ -203,6 +203,7 @@ def list_challenges() -> list[dict]:
             "last_seen": challenge.last_seen,
             "urls": [p.url for p in challenge.pending],
             "waiting": len(challenge.pending),
+            "latest": max((p.queued_at for p in challenge.pending), default=None),
             "held": store.holds(challenge.domain),
             "kind": "generic",
         })
@@ -215,7 +216,8 @@ def waiting_count() -> int:
 
 def _archive_today_challenge() -> Optional[dict]:
     try:
-        from .integrations.archive_today import get_archive_today_buffer
+        from .integrations.archive_today import (get_archive_today_buffer,
+                                                 get_archive_today_latest)
         buffered = get_archive_today_buffer()
     except Exception:
         logger.debug("Could not read the Archive.today buffer.", exc_info=True)
@@ -230,6 +232,7 @@ def _archive_today_challenge() -> Optional[dict]:
         "last_seen": None,
         "urls": buffered,
         "waiting": len(buffered),
+        "latest": get_archive_today_latest(),
         "held": False,
         "kind": "archive_today",
     }

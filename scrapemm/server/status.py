@@ -430,7 +430,10 @@ async def environment() -> dict:
         "blacklist": {
             "domains": len(blacklist),
             "ttl": blacklist.ttl,
+            # When the newest entry came: the UI tells new entries from seen ones by it
+            "latest": blacklist.latest(),
         },
+        "test": _test_summary(),
         "cache": {
             "entries": len(cache),
             "ttl": cache.ttl,
@@ -575,10 +578,22 @@ def _captcha_backlog() -> dict:
     return {
         "waiting": sum(c["waiting"] for c in listed),
         "challenges": len(listed),
+        # When the newest URL was queued: the UI tells new URLs from seen ones by it
+        "latest": max((c["latest"] for c in listed if c.get("latest")), default=None),
         # Without a display there is no way to solve one, which is worth saying when
         # something is actually waiting.
         "solvable": bool(os.getenv("DISPLAY")) or os.name == "nt",
     }
+
+
+def _test_summary() -> Optional[dict]:
+    """The test run under way, or the latest one's headline figures."""
+    from . import testsuite
+    try:
+        return testsuite.headline()
+    except Exception:
+        logger.debug("Could not read the latest test run.", exc_info=True)
+        return None
 
 
 def _display_status() -> dict:

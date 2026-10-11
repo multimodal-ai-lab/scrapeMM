@@ -88,6 +88,11 @@ class DomainBlacklist:
             self._domains = alive
             self._save()
 
+    def latest(self) -> Optional[float]:
+        """When the newest (non-expired) entry was added, None if there is none."""
+        self._prune()
+        return max((e["added"] for e in self._domains.values()), default=None)
+
     def __contains__(self, domain: str) -> bool:
         return self.reason(domain) is not None
 

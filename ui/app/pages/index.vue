@@ -3,7 +3,9 @@
 const api = useApi()
 
 const integrations = ref<any[]>([])
-const environment = ref<any>(null)
+// Shared with the sidebar, whose logo and indicators follow it on every page
+const environment = useEnvironment()
+const { blacklistNew } = useAttention()
 const loading = ref(false)
 const error = ref('')
 const busy = ref<string | null>(null)
@@ -231,40 +233,15 @@ function duration(seconds: number) {
   return `kept ${Math.round(seconds / 60)} min`
 }
 
-/** Media as a share of the room available to it: what it uses, over that plus free. */
-function mediaShare(media: any): number | null {
-  if (media.disk_free == null || media.bytes == null) return null
-  const available = media.bytes + media.disk_free
-  return available > 0 ? media.bytes / available : null
-}
-
-/** Media crowding out its own headroom is worth saying before it stops the server. */
-function diskTone(media: any) {
-  const share = mediaShare(media)
-  if (share == null) return 'neutral' as const
-  if (share >= 0.95) return 'error' as const
-  if (share >= 0.85) return 'warning' as const
-  return 'neutral' as const
-}
-
-/** >95% green, 80–95% amber, below that red. */
-function rateTone(rate: number | null) {
-  if (rate == null) return { tone: 'neutral' as const, value: '—' }
-  const percent = rate * 100
-  const tone = percent > 95 ? 'success' as const
-    : percent >= 80 ? 'warning' as const
-      : 'error' as const
-  return { tone, value: `${percent.toFixed(1)}%` }
-}
-
 const tiles = computed(() => {
   const env = environment.value
   if (!env) return []
-  const rate = rateTone(env.throughput.success_rate.rate)
+  const rate = env.throughput.success_rate.rate
   const times = env.throughput.scrape_times
   return [
     { label: 'Success rate', icon: 'i-fa7-solid-check',
-      value: rate.value, tone: rate.tone,
+      // The thresholds are the sidebar logo's too (see useHealth.ts)
+      value: rate == null ? '—' : `${(rate * 100).toFixed(1)}%`, tone: rateTone(rate),
       ring: env.throughput.success_rate.rate,
       // scrapeMM's success: a target that was unavailable counts, since scrapeMM did its
       // part (see useOutcome.ts); the breakdown says how many that were
@@ -279,12 +256,8 @@ const tiles = computed(() => {
       to: env.throughput.success_rate.outcomes?.error ? '/jobs?outcome=error' : '/jobs' },
     { label: 'Scraping time', icon: 'i-fa7-solid-stopwatch',
       value: times?.median == null ? '—' : `${times.median.toFixed(1)} s`,
-      // Judged by the median, the headline figure: fast up to 10 s, slow above, bad
-      // above 20 s (as in the Tests view)
-      tone: times?.median == null ? 'neutral' as const
-        : times.median > 20 ? 'error' as const
-          : times.median > 10 ? 'warning' as const
-            : 'success' as const,
+      // Judged by the median, the headline figure, as in the Test view
+      tone: timeTone(times?.median),
       detail: times?.total
         ? `median · 95th percentile ${times.p95.toFixed(1)} s, of the last ${compact(times.total)} scrapes`
         : 'nothing scraped yet' },
@@ -312,9 +285,10 @@ const tiles = computed(() => {
       to: env.captcha.waiting ? '/captcha' : undefined },
     { label: 'Blacklisted', icon: 'i-fa7-solid-ban',
       value: `${env.blacklist.domains}`,
-      tone: env.blacklist.domains ? 'warning' as const : 'neutral' as const,
-      detail: env.blacklist.domains ? 'domains excluded from retrieval'
-        : 'no domains excluded',
+      // Only what this browser has not seen on the Blacklist page yet wants attention
+      tone: blacklistNew.value ? 'warning' as const : 'neutral' as const,
+      detail: blacklistNew.value ? 'domains excluded · new ones since your last look'
+        : env.blacklist.domains ? 'domains excluded from retrieval' : 'no domains excluded',
       to: '/blacklist' },
     // All time: counted as they run, so pruning the history does not lower them
     { label: 'Jobs run', icon: 'i-fa7-solid-clock-rotate-left',
@@ -367,7 +341,7 @@ function proxyTile(proxy: any) {
   if (paused) parts.push(`YouTube paused until ${new Date(paused * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`)
   return { label: 'Proxy', icon: 'i-fa7-solid-shuffle',
     value: proxy.enabled ? 'On' : 'Off',
-    tone: test && !test.ok ? 'warning' as const : proxy.enabled ? 'success' as const : 'neutral' as const,
+    tone: proxyTone(proxy),
     detail: parts.join(' · '), to: '/settings' }
 }
 

@@ -30,7 +30,9 @@ HEARTBEAT = 15.0
 
 class LiveHub:
     def __init__(self):
-        self._subscribers: set[asyncio.Queue] = set()
+        # Each subscriber's queue, and whether it follows the methods too (the dashboard)
+        # or only the environment (the sidebar of every other page)
+        self._subscribers: dict[asyncio.Queue, bool] = {}
         self._last: dict[str, bytes] = {}  # Message key -> the line last sent for it
         self._task: Optional[asyncio.Task] = None
         self._wake = asyncio.Event()
@@ -41,23 +43,27 @@ class LiveHub:
         """Something changed: look now rather than at the next tick."""
         self._wake.set()
 
-    async def subscribe(self) -> AsyncIterator[bytes]:
+    async def subscribe(self, methods: bool = True) -> AsyncIterator[bytes]:
+        """Without `methods`, only the environment is sent, and the methods are not
+        probed on this subscriber's account."""
         queue: asyncio.Queue = asyncio.Queue()
-        self._subscribers.add(queue)
+        self._subscribers[queue] = methods
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run())
         try:
-            yield _line({"type": "header", "methods": status.all_methods()})
+            if methods:
+                yield _line({"type": "header", "methods": status.all_methods()})
             # What is already known, so a new viewer does not wait for the next change
-            for line in list(self._last.values()):
-                yield line
+            for key, line in list(self._last.items()):
+                if methods or key == "environment":
+                    yield line
             while True:
                 try:
                     yield await asyncio.wait_for(queue.get(), timeout=HEARTBEAT)
                 except asyncio.TimeoutError:
                     yield _line({"type": "ping", "at": time.time()})
         finally:
-            self._subscribers.discard(queue)
+            self._subscribers.pop(queue, None)
             if not self._subscribers and self._task is not None:
                 self._task.cancel()
                 self._task = None
@@ -83,6 +89,8 @@ class LiveHub:
         self._publish("environment", {"type": "environment",
                                       "payload": await status.environment()})
 
+        if not any(self._subscribers.values()):
+            return  # Nobody follows the methods: no reason to probe them
         counts = status.retrieval_counts()
         for key in status.all_keys():
             current, fresh = status.cached_status(key)
@@ -105,8 +113,9 @@ class LiveHub:
         if self._last.get(key) == line:
             return
         self._last[key] = line
-        for queue in self._subscribers:
-            queue.put_nowait(line)
+        for queue, methods in self._subscribers.items():
+            if methods or key == "environment":
+                queue.put_nowait(line)
 
 
 def _line(message: dict) -> bytes:

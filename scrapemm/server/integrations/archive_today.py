@@ -496,12 +496,15 @@ class _RequestBuffer:
     def __init__(self, path: Path = BUFFER_PATH):
         self.path = path
         self._urls: Optional[list[str]] = None
+        # When a URL was last added. Not persisted: after a restart, the file's time
+        self.latest: Optional[float] = None
 
     def _load(self) -> list[str]:
         if self._urls is None:
             try:
                 loaded = json.loads(self.path.read_text(encoding="utf-8"))
                 self._urls = [u for u in loaded if isinstance(u, str)]
+                self.latest = self.path.stat().st_mtime if self._urls else None
             except (OSError, ValueError):
                 self._urls = []
         return self._urls
@@ -522,6 +525,7 @@ class _RequestBuffer:
         if url in urls:
             return
         urls.append(url)
+        self.latest = time.time()
         self._save()
         logger.info(f"📥 Buffered {url} for the next Archive.today session "
                     f"({len(urls)} waiting).")
@@ -1231,6 +1235,11 @@ def get_archive_today_buffer() -> list[str]:
     """The snapshot URLs that were requested while the access check was up, oldest first.
     They are retrieved and cached the next time a session is established."""
     return _buffer.urls()
+
+
+def get_archive_today_latest() -> Optional[float]:
+    """When the newest URL was buffered, None if the buffer is empty."""
+    return _buffer.latest if _buffer.urls() else None
 
 
 def clear_archive_today_buffer() -> None:

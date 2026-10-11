@@ -274,3 +274,37 @@ button:disabled,
   --viz-cat-8: #e34948;
   --viz-other: #a3a29c;
 }
+
+/* ---------------------------------------------------------------------------------
+   The brand in the sidebar, tinted by scrapeMM's health (see useHealth.ts): the mark
+   and the name take the colour, and a soft glow of it. Neutral until the health is
+   known, without a glow.
+   --------------------------------------------------------------------------------- */
+.brand {
+  --brand-tone: var(--ui-text-highlighted);
+  --brand-glow: transparent;
+  color: var(--brand-tone);
+  transition: color 0.6s ease;
+}
+.brand-success { --brand-tone: var(--ui-success); }
+.brand-warning { --brand-tone: var(--ui-warning); }
+.brand-error   { --brand-tone: var(--ui-error); }
+.brand-success, .brand-warning, .brand-error {
+  --brand-glow: color-mix(in oklab, var(--brand-tone) 55%, transparent);
+}
+.brand svg {
+  filter: drop-shadow(0 0 5px var(--brand-glow));
+  transition: filter 0.6s ease;
+}
+.brand .brand-name {
+  text-shadow: 0 0 12px var(--brand-glow);
+  transition: text-shadow 0.6s ease;
+}
+/* Red asks for attention now: the glow breathes */
+.brand-error svg { animation: brand-breathe 2.4s ease-in-out infinite; }
+@keyframes brand-breathe {
+  50% { filter: drop-shadow(0 0 9px var(--brand-glow)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .brand-error svg { animation: none; }
+}
