@@ -79,6 +79,9 @@ REPLAY_MISS_WAIT = 10
 # only under load (production suite, 2026-10-06), twice in a row
 SCREENSHOT_MISS_WAIT = 30
 SCREENSHOT_ATTEMPTS = 3
+# How long a record whose replay showed nothing gets to be sent back from its screenshot
+# view to the replay -- which is how Perma.cc says it has no screenshot
+SCREENSHOT_REDIRECT_WAIT_MS = 8_000
 
 # A retrieval is not tried again after this many seconds, so that the attempts (see
 # `PermaCC._extract_content()`) stay well within the browser's 10-minute limit
@@ -175,6 +178,14 @@ class PermaCC(HeadedBrowser):
             # (`?type=standard`) -- looked as if it had one (perma.cc/55YA-N88K: an error
             # after 87 s, instead of "empty" in 9)
             await self._pass_cloudflare(page)
+            if replayed_empty:
+                # ...and behind the challenge, it does so only once the challenge passed:
+                # asked straight away, the address still read `type=image`, the record
+                # was taken for one with a screenshot, and failed after 44-138 s of
+                # looking for it (the same record: "empty" in 7-11 s otherwise)
+                with suppress(PlaywrightError):
+                    await page.wait_for_url(lambda address: "type=image" not in address,
+                                            timeout=SCREENSHOT_REDIRECT_WAIT_MS)
             if replayed_empty and "type=image" not in page.url:
                 # Perma.cc sends a record without a screenshot back to the replay
                 raise TargetUnavailableError(

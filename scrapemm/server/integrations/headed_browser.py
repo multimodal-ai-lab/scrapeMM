@@ -786,7 +786,7 @@ def _shared_state() -> dict:
         # First use, or a new event loop (e.g. tests): objects of another loop are unusable
         _shared.clear()
         _shared.update(loop=loop, lock=asyncio.Lock(), playwright=None,
-                       connection=None, generation=None)
+                       connection=None, generation=None, default_context=None)
     return _shared
 
 
@@ -800,13 +800,20 @@ async def _shared_playwright() -> Playwright:
 
 async def _shared_context(browser: Browser, generation: int) -> BrowserContext:
     """The default context of the shared browser, through the shared connection. A
-    new connection is made only when the browser was replaced or the old one broke."""
+    new connection is made only when the browser was replaced or the old one broke.
+
+    The default context is taken once, as the connection is made, and kept: the Browser
+    method's proxied attempts open contexts of their own on this connection (see
+    `proxy_browser.py`), and after that `connection.contexts[0]` is no longer the default
+    one. Pages of every method then opened in a proxied context -- Perma.cc's failed
+    within a second with ERR_PROXY_CONNECTION_FAILED, and others went through the proxy
+    without anybody asking for it."""
     state = _shared_state()
     async with state["lock"]:
         connection = state["connection"]
         if connection is not None and (state["generation"] != generation
                                        or not connection.is_connected()):
-            state["connection"] = None
+            state["connection"], state["default_context"] = None, None
             with suppress(Exception):
                 await asyncio.wait_for(connection.close(), timeout=5)
             connection = None
@@ -824,7 +831,8 @@ async def _shared_context(browser: Browser, generation: int) -> BrowserContext:
                     await asyncio.wait_for(playwright.stop(), timeout=5)
                 raise
             state["connection"], state["generation"] = connection, generation
-        return connection.contexts[0]
+            state["default_context"] = connection.contexts[0]  # Before any other exists
+        return state["default_context"]
 
 
 async def _tab_answers(session: aiohttp.ClientSession, ws_url: Optional[str]) -> bool:
