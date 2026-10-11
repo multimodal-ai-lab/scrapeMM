@@ -127,8 +127,29 @@ async def test_config_coerces_types(client):
 
 async def test_config_rejects_uncoercible_values(client):
     response = await client.patch("/v1/config", headers=AUTH,
-                                  json={"max_concurrency": "plenty"})
+                                  json={"max_browser_pages": "plenty"})
     assert response.status_code == 400
+
+
+async def test_config_merges_method_slots(client):
+    response = await client.patch("/v1/config", headers=AUTH,
+                                  json={"method_slots": {"youtube": "2", "browser": 8}})
+    assert response.status_code == 200
+    assert response.json()["config"]["method_slots"] == {"youtube": 2, "browser": 8}
+    # None resets one method to its default; the others' overrides stay
+    response = await client.patch("/v1/config", headers=AUTH,
+                                  json={"method_slots": {"browser": None}})
+    assert response.json()["config"]["method_slots"] == {"youtube": 2}
+    methods = {m["key"]: m for m in (await client.get("/v1/config", headers=AUTH)).json()["methods"]}
+    assert methods["youtube"]["slots"] == 2 and methods["browser"]["slots"] == methods["browser"]["slots_default"]
+    await client.patch("/v1/config", headers=AUTH, json={"method_slots": None})
+
+
+async def test_config_rejects_invalid_method_slots(client):
+    for body in ({"method_slots": {"nonsense": 2}}, {"method_slots": {"youtube": 0}},
+                 {"method_cooldowns": {"youtube": -1}}, {"method_slots": [1]}):
+        response = await client.patch("/v1/config", headers=AUTH, json=body)
+        assert response.status_code == 400, body
 
 
 async def test_blacklist_round_trip(client):

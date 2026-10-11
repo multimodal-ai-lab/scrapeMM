@@ -1,8 +1,9 @@
 """The server's persisted configuration (`config.yaml` in the config directory).
 
 Holds everything that is a deployment decision rather than a per-request one: the
-Firecrawl endpoints, the hedging delay, cache and blacklist lifetimes. The web UI
-edits it through the API; nothing prompts anybody for it.
+Firecrawl endpoints, the hedging delay, cache and blacklist lifetimes, each method's
+slots. The web UI edits it through the API (described to it by `schema()`); nothing
+prompts anybody for it.
 """
 
 import logging
@@ -36,12 +37,17 @@ SETTINGS: dict[str, type] = {
     "archive_today_solve_timeout": float,
     "devtools_local_port": int,
     "browser_user_agent": str,
-    "max_concurrency": int,
+    # Per retrieval method (see `slots`): {method: slots}, {method: seconds}. Only the
+    # overrides of the defaults are stored.
+    "method_slots": dict,
+    "method_cooldowns": dict,
     "max_browser_pages": int,
     "max_search_concurrency": int,
     "disabled_methods": list,
-    "youtube_min_interval": float,
-    "youtube_cooldown": float,
+    # Seconds YouTube is left alone after it refused this server. Read in its place
+    # if unset: `youtube_cooldown`, its former name. And `youtube_min_interval`, the
+    # former YouTube pace, stands in for the "youtube" entry of `method_cooldowns`.
+    "youtube_pause": float,
     "job_retention_days": float,  # Job history: how long jobs keep their content (0: for ever)
     "max_jobs": int,  # Job history: how many jobs keep their content at most (0: no limit)
     # Known consent platforms' dialogs removed in the browser before reading (default on)
@@ -97,20 +103,101 @@ def set_wait_on_rate_limit(wait: bool):
     WAIT_ON_RATE_LIMIT = wait
 
 
-def _seed_from_environment():
-    """Lets the container's .env prime the configuration on a fresh volume. Values
-    already in config.yaml win: the UI is the authority once someone has used it."""
-    seeded = {}
-    if (limit := os.getenv("SCRAPEMM_MAX_CONCURRENCY")) and not _config.get("max_concurrency"):
-        try:
-            seeded["max_concurrency"] = int(limit)
-        except ValueError:
-            logger.warning(f"Ignoring invalid SCRAPEMM_MAX_CONCURRENCY={limit!r}.")
-    if seeded:
-        update_config(**seeded)
+def schema() -> list[dict]:
+    """What the UI needs to know to edit each setting in SETTINGS: its type, its default
+    (the one the code uses when the setting is unset), a label and a one-sentence
+    description, the settings page section it belongs to, the unit the value is stored
+    in, and its bounds. A function rather than a constant: the defaults live in modules
+    that import this one."""
+    from . import slots
+    from .engine import DEFAULT_HEDGING_DELAY
+    from .integrations.archive_today import DEFAULT_SOLVE_TIMEOUT
+    from .integrations.headed_browser import DEFAULT_DEVTOOLS_LOCAL_PORT, DEFAULT_MAX_BROWSER_PAGES
+    from .integrations.ytdlp import DEFAULT_YOUTUBE_PAUSE
+    from .jobs import DEFAULT_MAX_JOBS, DEFAULT_RETENTION_DAYS
+    from .search.base import DEFAULT_MAX_SEARCH_CONCURRENCY
+
+    def entry(key: str, default, label: str, description: str, section: str,
+              **extra) -> dict:
+        return {"key": key, "type": SETTINGS[key].__name__, "default": default,
+                "label": label, "description": description, "section": section, **extra}
+
+    method_keys = slots.keys()
+    entries = [
+        entry("firecrawl_urls", [], "Firecrawl instances",
+              "scrapeMM spreads its scrapes across every instance that responds.", "general"),
+        entry("firecrawl_url", None, "Firecrawl instance (former single one)",
+              "A single Firecrawl instance, as configured before several could be; used "
+              "alongside the list.", "general"),
+        entry("hedging_delay", DEFAULT_HEDGING_DELAY, "Hedging delay",
+              "Head start of each retrieval method before the next one runs alongside it; "
+              "empty or 0 runs them one after another.", "general", unit="s", min=0),
+        entry("blacklist_ttl", DEFAULT_BLACKLIST_TTL, "Blacklist lifetime",
+              "How long automatic CAPTCHA blacklistings last; 0 never expires.", "general",
+              unit="s", min=0),
+        entry("disabled_methods", [], "Disabled methods",
+              "The retrieval methods and integrations switched off.", "chain"),
+        entry("method_slots", {k: slots.default_slots(k) for k in method_keys},
+              "Slots per method",
+              "How many retrievals each method runs at once; more wait for a free slot.",
+              "parallelism", min=1),
+        entry("method_cooldowns", {k: slots.default_cooldown(k) for k in method_keys},
+              "Cooldown per method",
+              "Seconds between the starts of two retrievals by the method (plus up to 50% "
+              "jitter); 0 for none.", "parallelism", unit="s", min=0),
+        entry("max_browser_pages", DEFAULT_MAX_BROWSER_PAGES, "Max concurrent browser pages",
+              "Pages open in the server's browser at once (the Browser method, the "
+              "archives); lower it if the server runs short of memory.", "parallelism", min=1),
+        entry("max_search_concurrency", DEFAULT_MAX_SEARCH_CONCURRENCY,
+              "Max concurrent searches",
+              "Searches with a search provider at once, across all clients; keeps bursts "
+              "within the provider's rate limit.", "parallelism", min=1),
+        entry("browser_user_agent", None, "Browser user agent",
+              "The user agent the server's browser presents; empty for Chromium's own.",
+              "browser"),
+        entry("remove_consent_dialogs", True, "Remove cookie/consent dialogs",
+              "Removes the dialogs of known consent platforms in the browser before the "
+              "page is read.", "browser"),
+        entry("devtools_local_port", DEFAULT_DEVTOOLS_LOCAL_PORT, "DevTools port",
+              "The local port of the browser's remote debugging interface.", "browser",
+              min=1, max=65535),
+        entry("youtube_pause", DEFAULT_YOUTUBE_PAUSE, "YouTube pause after a refusal",
+              "How long YouTube is left alone once it refused this server; with a proxy in "
+              "use, YouTube goes through it meanwhile.", "integrations", unit="s", min=0),
+        entry("archive_today_interactive_solve", False,
+              "Archive.today: ask for a CAPTCHA at the moment of a gated request",
+              "Sensible only for one-off, attended retrievals.", "archives"),
+        entry("archive_today_screenshot_fallback", False,
+              "Archive.today: serve the snapshot's screenshot when it is gated",
+              "Gives an unattended run something rather than an error, but a screenshot is "
+              "not the page text.", "archives"),
+        entry("archive_today_solve_timeout", float(DEFAULT_SOLVE_TIMEOUT),
+              "Archive.today: CAPTCHA solving time",
+              "How long a gated Archive.today request waits for somebody to solve its "
+              "CAPTCHA.", "archives", unit="s", min=0),
+        entry("cache_enabled", True, "Re-use recent results",
+              "Serves a recent successful retrieval of the same URL instead of scraping it "
+              "again.", "cache"),
+        entry("cache_ttl", float(DEFAULT_CACHE_TTL), "Cache lifetime",
+              "How long a result is re-used; 0 turns the cache off too.", "cache",
+              unit="s", min=0),
+        entry("cache_max_entries", DEFAULT_MAX_ENTRIES, "Max cache entries",
+              "The oldest go first.", "cache", min=1, max=1_000_000),
+        entry("cache_max_mb", float(DEFAULT_MAX_MB), "Max cache size",
+              "Page text in memory; media stay on disk.", "cache", unit="MB", min=1,
+              max=64 * 1024),
+        entry("cache_immutable_max_mb", float(DEFAULT_IMMUTABLE_MAX_MB),
+              "Permanent tier size", "The permanent cache tier on disk (archive captures), "
+              "besides the media registry.", "cache", unit="MB", min=1, max=1024 * 1024),
+        entry("max_jobs", DEFAULT_MAX_JOBS, "Jobs kept at most",
+              "The oldest go first; 0 keeps all.", "history", min=0),
+        entry("job_retention_days", float(DEFAULT_RETENTION_DAYS), "Jobs kept for",
+              "Older jobs and search records are removed; 0 keeps them for ever.",
+              "history", unit="days", min=0),
+    ]
+    return entries  # One per setting, which `test_slots.py` checks
 
 
 # Load config
 _config = load_config()
 _apply_config()
-_seed_from_environment()

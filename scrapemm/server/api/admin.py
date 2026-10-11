@@ -15,11 +15,11 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from scrapemm.common.paths import APP_NAME
-from .. import interrupts, registry, status as status_module
+from .. import interrupts, registry, slots, status as status_module
 from ..auth import Principal, require_admin, require_api_key
 from ..blacklist import blacklist
 from ..cache import cache, immutable, KINDS
-from ..config import SETTINGS, get_config, update_config
+from ..config import SETTINGS, get_config, schema, update_config
 from ..jobs import RESULT_SORTS, SEARCH_SORTS, SORTS, jobs
 from ..toggles import set_enabled
 from ..secrets import (MANAGED_SECRETS, SECRETS, describe_secrets, remove_secret,
@@ -203,8 +203,12 @@ async def rotate_secrets_key() -> dict:
 
 @router.get("/config", dependencies=ADMIN)
 async def read_config() -> dict:
+    """The stored settings, their types, the schema the UI edits them by, and every
+    retrieval method's effective and default slots and cooldown (see `slots`)."""
     return {"config": get_config(),
-            "settings": {name: kind.__name__ for name, kind in SETTINGS.items()}}
+            "settings": {name: kind.__name__ for name, kind in SETTINGS.items()},
+            "schema": schema(),
+            "methods": slots.methods()}
 
 
 @router.patch("/config", dependencies=ADMIN)
@@ -222,6 +226,13 @@ async def patch_config(body: dict[str, Any]) -> dict:
         if value is None:
             coerced[name] = None
             continue
+        if name in (slots.SLOTS_KEY, slots.COOLDOWNS_KEY):
+            # Merged into the stored overrides: {method: None} resets just that method
+            try:
+                coerced[name] = slots.merge(name, get_config().get(name), value)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            continue
         try:
             coerced[name] = value if isinstance(value, expected) else expected(value)
         except (TypeError, ValueError):
@@ -230,6 +241,7 @@ async def patch_config(body: dict[str, Any]) -> dict:
                 detail=f"'{name}' expects {expected.__name__}, got {value!r}.")
 
     update_config(**coerced)
+    slots.refresh()  # Changed slots or cooldowns apply to those waiting already
     if {"job_retention_days", "max_jobs"} & coerced.keys():
         await asyncio.to_thread(jobs.prune)  # A lower limit applies at once
     return {"config": get_config()}

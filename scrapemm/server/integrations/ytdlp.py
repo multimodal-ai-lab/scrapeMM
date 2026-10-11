@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import random
 import re
 import sys
 import tempfile
@@ -16,7 +15,7 @@ from yt_dlp.utils import (DownloadError, ExtractorError, GeoRestrictedError,
                           UnsupportedError, UserNotLive, YoutubeDLError)
 
 from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError, AccessBlockedError, RateLimitError
-from scrapemm.server import proxy
+from scrapemm.server import proxy, slots
 from scrapemm.server.config import get_config_var
 from scrapemm.server.download import download_image
 from scrapemm.server.download.videos import is_too_small_video
@@ -95,7 +94,10 @@ BGUTIL_SERVER_HOME = os.environ.get("BGUTIL_SERVER_HOME",
 # of a different address reliably gets past it, so the aim is not to trigger it: all
 # YouTube retrievals on this server start at a steady pace (yt-dlp's documented guest
 # limit is about 300 videos an hour), and once the check does come up, YouTube is left
-# alone for a while rather than asked again, which only extends the flag.
+# alone for a while rather than asked again, which only extends the flag. The pace is
+# the cooldown of the "youtube" slot (see `scrapemm.server.slots`), which every YouTube
+# download takes: the YouTube integration's, and those of YouTube videos embedded in
+# other pages. One slot covers a download's attempts, the HLS retry included.
 #
 # Once YouTube refuses this server -- the bot check, or a refused stream (HTTP 403,
 # fragments answered 404), which it serves an address it distrusts -- all of YouTube is
@@ -114,30 +116,27 @@ BGUTIL_SERVER_HOME = os.environ.get("BGUTIL_SERVER_HOME",
 # first group.
 YOUTUBE_CLIENT_GROUPS: tuple[tuple[str, ...], ...] = (("default",), ("mweb",))
 
-# Seconds between the starts of two YouTube retrievals, with up to +50% jitter
-DEFAULT_YOUTUBE_MIN_INTERVAL = 12.0
-# Seconds YouTube is not asked again after it refused this server (bot check, stream)
-DEFAULT_YOUTUBE_COOLDOWN = 30 * 60.0
+YOUTUBE_SLOT = "youtube"
+
+# Seconds YouTube is not asked again after it refused this server (bot check, stream);
+# the setting `youtube_pause`, formerly `youtube_cooldown`
+DEFAULT_YOUTUBE_PAUSE = 30 * 60.0
+
+
+def youtube_pause() -> float:
+    configured = get_config_var("youtube_pause")
+    if configured is None:
+        configured = get_config_var("youtube_cooldown")  # A config from before
+    return DEFAULT_YOUTUBE_PAUSE if configured is None else float(configured)
 
 
 class _YouTubeGate:
-    """The one pace all YouTube retrievals of this process keep, and the pause after
-    YouTube refused this server. Server-wide, because yt-dlp's own sleep options only
-    space the requests of one call, while the server runs many at once."""
+    """The pause after YouTube refused this server: server-wide, as the flag is on the
+    server's address."""
 
     def __init__(self):
-        self._lock = asyncio.Lock()
-        self._next_start = 0.0
         self.blocked_until = 0.0  # Until when YouTube is paused (0: not paused)
         self.reason = ""
-        self._tripped: Optional[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = None
-
-    def _trip_event(self) -> asyncio.Event:
-        """Set when YouTube pauses: wakes the URLs waiting for their slot."""
-        loop = asyncio.get_running_loop()
-        if self._tripped is None or self._tripped[0] is not loop:
-            self._tripped = (loop, asyncio.Event())
-        return self._tripped[1]
 
     def paused(self) -> bool:
         return self.blocked_until > time.time()
@@ -152,42 +151,25 @@ class _YouTubeGate:
                 f"Asking again now would only extend it. A proxy (Settings, Proxy) "
                 f"retrieves YouTube videos meanwhile.")
 
-    async def wait_turn(self) -> None:
-        self.check()
-        interval = float(get_config_var("youtube_min_interval", DEFAULT_YOUTUBE_MIN_INTERVAL))
-        async with self._lock:
-            # Waiting in line, a URL may see YouTube paused by the one before it
-            self.check()
-            delay = self._next_start - time.time()
-            if delay > 0:
-                logger.debug(f"Pacing YouTube: waiting {delay:.1f}s for the next slot.")
-                tripped = self._trip_event()
-                tripped.clear()  # Not paused (checked above): a set event is from a past pause
-                try:
-                    await asyncio.wait_for(tripped.wait(), timeout=delay)
-                except asyncio.TimeoutError:
-                    pass
-                self.check()
-            self._next_start = time.time() + interval * random.uniform(1.0, 1.5)
-
     def trip(self, reason: str) -> None:
         """Pauses YouTube after it refused this server."""
         if self.paused():
             return  # Already paused (by a URL in flight at the same time); one warning is enough
-        cooldown = float(get_config_var("youtube_cooldown", DEFAULT_YOUTUBE_COOLDOWN))
-        span = f"{cooldown / 60:.0f} min" if cooldown >= 60 else f"{cooldown:.0f} s"
-        self.blocked_until, self.reason = time.time() + cooldown, reason
-        if self._tripped is not None:
-            try:
-                self._tripped[0].call_soon_threadsafe(self._tripped[1].set)
-            except RuntimeError:  # That event loop is closed: nobody waits on it
-                pass
+        pause = youtube_pause()
+        span = f"{pause / 60:.0f} min" if pause >= 60 else f"{pause:.0f} s"
+        self.blocked_until, self.reason = time.time() + pause, reason
+        # The URLs waiting out the slot's cooldown: paused, they need not (see below)
+        slots.wake(YOUTUBE_SLOT)
         logger.warning(f"🤖 YouTube refused this server ({reason}). Pausing YouTube "
                        f"retrievals for {span} so the flag on this address can expire"
                        f"{'; going through the proxy meanwhile' if proxy.active() else ''}.")
 
 
 youtube_gate = _YouTubeGate()
+
+# No pace through the proxy: YouTube flags this server's address, not the proxy's. Nor
+# while YouTube is paused: a URL then goes through the proxy, or fails at once.
+slots.exempt_from_cooldown(YOUTUBE_SLOT, lambda: proxy.routed() or youtube_gate.paused())
 
 
 def _is_youtube(url: str) -> bool:
@@ -425,7 +407,17 @@ async def _run_youtube(url: str, temp_path: str, ydl_opts: dict[str, Any],
     paused and the refusal raised; while paused, the call fails at once. Through the proxy
     if the attempt goes through it, or if YouTube is paused and a proxy is in use (unless
     `divert_when_paused` is off); through the proxy, a refused client group hands over to
-    the next one, and nothing is paused."""
+    the next one, and nothing is paused.
+
+    In a "youtube" slot, which paces the starts; the YouTube integration's retrieval
+    holds it already."""
+    async with slots.hold(YOUTUBE_SLOT):
+        return await _download_youtube(url, temp_path, ydl_opts, divert_when_paused)
+
+
+async def _download_youtube(url: str, temp_path: str, ydl_opts: dict[str, Any],
+                            divert_when_paused: bool
+                            ) -> tuple[Optional[Video], Optional[dict[str, Any]]]:
     ydl_opts = dict(ydl_opts, format=_youtube_format_selector(),
                     # IPv4 only: YouTube judges an IPv6 address together with its whole
                     # /64, and more harshly
@@ -457,8 +449,6 @@ async def _run_youtube(url: str, temp_path: str, ydl_opts: dict[str, Any],
         for hls_only in (False, True):
             if hls_only:
                 opts = dict(opts, format=_YOUTUBE_HLS_ONLY)
-            if route is None:
-                await youtube_gate.wait_turn()
             try:
                 return await asyncio.to_thread(_run_ytdlp_sync, url, temp_path, opts)
             except YoutubeDLError as e:
