@@ -297,9 +297,12 @@ async function signIn() {
       </aside>
 
       <!-- The sidebar is fixed, so it is out of the flow: the margin is what keeps the
-           content beside it rather than underneath. -->
+           content beside it rather than underneath. Clipped, not `overflow-x-hidden`:
+           hidden makes <main> a scroll container, and `sticky` inside a page (the
+           Settings view's section panel) would then stick to it -- which never scrolls,
+           the window does -- and so never stick at all. -->
       <main
-        class="flex-1 p-6 overflow-x-hidden min-w-0 transition-[margin] duration-200 ease-out"
+        class="flex-1 p-6 overflow-x-clip min-w-0 transition-[margin] duration-200 ease-out"
         :class="collapsed ? 'ml-16' : 'ml-56'"
       >
         <!-- The History is kept alive: coming back from a job shows it exactly as

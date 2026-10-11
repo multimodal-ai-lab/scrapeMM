@@ -155,8 +155,14 @@ onBeforeUnmount(() => clearInterval(statsTimer))
     <h1 class="text-2xl font-semibold mb-6">Settings</h1>
 
     <div class="flex flex-col md:flex-row gap-4 md:gap-8">
-      <!-- Wide: a panel beside the content, staying in view as a long section scrolls -->
-      <nav class="hidden md:block w-48 shrink-0 sticky top-6 self-start space-y-4" aria-label="Settings sections">
+      <!-- Wide: a panel beside the content, staying in view as a long section scrolls
+           (which takes <main> not being a scroll container, see app.vue). In a window
+           too short for it, the panel scrolls by itself. -->
+      <nav
+        class="hidden md:block w-48 shrink-0 sticky top-6 self-start space-y-4
+               max-h-[calc(100vh-3rem)] overflow-y-auto"
+        aria-label="Settings sections"
+      >
         <div v-for="group in GROUPS" :key="group.label" class="space-y-1">
           <p class="px-2.5 text-xs font-semibold uppercase tracking-wider text-dimmed">{{ group.label }}</p>
           <NuxtLink
