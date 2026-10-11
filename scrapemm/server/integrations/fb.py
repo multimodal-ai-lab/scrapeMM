@@ -76,9 +76,13 @@ FB_PLUGIN_PARAMS = {
 
 JS_GET_PHOTO_IMAGE = """
     () => {
+        // Facebook's own graphics (static.xx.fbcdn.net/rsrc.php) are never the photo: its
+        // login wall shows a 1240 px illustration, which was taken for the post's photo
+        const own = (src) => /rsrc\.php|static\.xx\.fbcdn\.net/.test(src || '');
+
         // Strategy 1: data-visualcompletion attribute (legacy)
         let img = document.querySelector('img[data-visualcompletion="media-vc-image"]');
-        if (img) return img.getAttribute('src');
+        if (img && !own(img.getAttribute('src'))) return img.getAttribute('src');
 
         // Strategy 2: Large image inside the photo theater/spotlight viewer
         const viewerSelectors = [
@@ -93,12 +97,13 @@ JS_GET_PHOTO_IMAGE = """
             for (const c of candidates) {
                 const src = c.getAttribute('src') || '';
                 const w = c.naturalWidth || c.width || 0;
-                if (src && w > 200) return src;
+                if (src && w > 200 && !own(src)) return src;
             }
         }
 
         // Strategy 3: Largest image on the page with a CDN src
-        const allImgs = Array.from(document.querySelectorAll('img[src*="scontent"], img[src*="fbcdn"]'));
+        const allImgs = Array.from(document.querySelectorAll('img[src*="scontent"], img[src*="fbcdn"]'))
+            .filter(i => !own(i.getAttribute('src')));
         if (allImgs.length > 0) {
             allImgs.sort((a, b) => (b.naturalWidth || 0) - (a.naturalWidth || 0));
             const best = allImgs[0];
@@ -107,7 +112,7 @@ JS_GET_PHOTO_IMAGE = """
 
         // Strategy 4: og:image meta tag
         const og = document.querySelector('meta[property="og:image"]');
-        if (og) return og.getAttribute('content');
+        if (og && !own(og.getAttribute('content'))) return og.getAttribute('content');
 
         return null;
     }
@@ -157,6 +162,19 @@ def _shows_error_page(html: str) -> bool:
     private or restricted content), recognized by language-independent markers: the
     error route that post pages render, or a photo page whose photo came back null."""
     return any(marker in html for marker in FB_UNAVAILABLE_MARKERS)
+
+
+def _is_facebook_graphic(url: str) -> bool:
+    """Whether the image is one of Facebook's own graphics, not anybody's photo."""
+    return "rsrc.php" in url or "static.xx.fbcdn.net" in url
+
+
+def _shows_login_wall(html: str, page_url: str = "") -> bool:
+    """Whether Facebook answered with its login wall ("Log in to Facebook") instead of the
+    content: it redirected to /login, or shows the login form. Since October 2026 it does
+    so to the server's browser for photo pages (in German, by the address)."""
+    return urlparse(page_url).path.startswith("/login") or 'id="login_form"' in html \
+        or 'name="login_form"' in html
 
 
 def _is_unavailable_page(html: str) -> bool:
@@ -386,6 +404,7 @@ class Facebook(RetrievalIntegration):
                     raise TimeoutError("Timed out loading Facebook photo page.")
 
                 html = await page.content()
+                page_url = page.url
                 if not _shows_error_page(html):
                     image_url = await page.evaluate(JS_GET_PHOTO_IMAGE)
 
@@ -394,7 +413,11 @@ class Facebook(RetrievalIntegration):
 
         if _shows_error_page(html):
             raise TargetUnavailableError(UNAVAILABLE_MESSAGE)
+        if image_url and _is_facebook_graphic(image_url):
+            image_url = None
         if not image_url:
+            if _shows_login_wall(html, page_url):
+                raise AccessBlockedError("Facebook shows this photo only to logged-in users.")
             raise RetrievalFailed("Could not locate image on Facebook photo page.")
 
         async with aiohttp.ClientSession(headers=HEADERS) as session:
