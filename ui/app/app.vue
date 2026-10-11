@@ -122,7 +122,7 @@ async function signIn() {
            `min-width: auto`, so without them its content's min-content width wins over
            the collapsed width and the panel never actually narrows. -->
       <aside
-        class="fixed inset-y-0 left-0 z-40 shrink-0 min-w-0 overflow-hidden
+        class="group/sidebar fixed inset-y-0 left-0 z-40 shrink-0 min-w-0 overflow-hidden
                border-r border-default bg-default
                flex flex-col gap-2 p-3 transition-[width] duration-200 ease-out"
         :class="collapsed ? 'w-16' : 'w-56'"
@@ -144,9 +144,12 @@ async function signIn() {
           >
             <img src="/logo.webp" alt="" class="size-7">
           </button>
+          <!-- Only while the pointer is over the sidebar (or the button has the keyboard's
+               focus): otherwise it is clutter beside the brand -->
           <UButton
             v-if="!collapsed"
-            class="ml-auto transition-transform duration-200 hover:scale-110"
+            class="ml-auto opacity-0 transition duration-200 hover:scale-110
+                   group-hover/sidebar:opacity-100 focus-visible:opacity-100"
             variant="ghost" color="neutral" size="sm" square
             :icon="collapsed ? 'i-fa7-solid-chevron-right' : 'i-fa7-solid-chevron-left'"
             :aria-label="collapsed ? 'Expand the sidebar' : 'Collapse the sidebar'"
@@ -212,13 +215,20 @@ async function signIn() {
           >
             {{ me.name }} · {{ ROLE_LABELS[me.role] }}
           </div>
+          <!-- Styled like the navigation's entries above, which it sits among -->
           <UTooltip text="Log out" :disabled="!collapsed" :content="{ side: 'right' }">
-            <UButton
-              class="w-full justify-start transition-colors"
-              variant="ghost" color="neutral" size="sm" icon="i-fa7-solid-right-from-bracket"
-              :label="collapsed ? undefined : 'Log out'"
-              :square="collapsed" @click="setToken(null)"
-            />
+            <button
+              type="button"
+              class="w-full flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm
+                     hover-row text-muted hover:text-default"
+              @click="setToken(null)"
+            >
+              <UIcon name="i-fa7-solid-right-from-bracket" class="size-4 shrink-0" />
+              <span
+                class="truncate transition-opacity duration-200"
+                :class="collapsed ? 'opacity-0 w-0' : 'opacity-100'"
+              >Log out</span>
+            </button>
           </UTooltip>
         </div>
       </aside>
