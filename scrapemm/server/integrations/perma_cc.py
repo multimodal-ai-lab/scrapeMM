@@ -628,6 +628,10 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
                 timeoutMs: kind === 'image' ? opts.imageTimeoutMs : opts.videoTimeoutMs });
               // Media an earlier pass over the page gave up on are not waited for again
               const skip = new Set(opts.skipUrls || []);
+              // Videos a player downloaded: taken from that download later, not fetched here,
+              // and no fallback looks for another copy of them (`videoCovered`)
+              const playback = new Set(opts.playbackUrls || []);
+              let videoCovered = 0;
               const timedOut = [];
               window.__scrapemmStashTimeout = opts.videoTimeoutMs;
               const hasBlob = (el) => el.hasAttribute(blobAttr);
@@ -642,6 +646,7 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
                   const i = idx++;
                   if (i >= tasks.length) break;
                   const t = tasks[i];
+                  if (t.kind === 'video' && playback.has(t.url)) { videoCovered++; continue; }
                   if (skip.has(t.url)) { skipped++; continue; }
                   try {
                     const res = await stashFor(t.url, t.kind);
@@ -773,7 +778,7 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
                 } catch (_) { return false; }
               };
 
-              if (videoInlined === 0) {
+              if (videoInlined === 0 && videoCovered === 0) {
                 try { await tryInlineTikTok(); } catch (_) { /* ignore */ }
               }
 
@@ -829,13 +834,13 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
 
               const stillNeedsVideo = [...document.querySelectorAll('video')].some((v) => {
                 const s = v.getAttribute('src') || '';
-                return !hasBlob(v) && (s.startsWith('blob:') || videoInlined === 0);
+                return !hasBlob(v) && (s.startsWith('blob:') || (videoInlined === 0 && videoCovered === 0));
               });
               if (stillNeedsVideo) {
                 try { await tryInlineReplayMp4(); } catch (_) { /* ignore */ }
               }
 
-              return { total: tasks.length, inlined, skipped, videoInlined, timedOut };
+              return { total: tasks.length, inlined, skipped, videoInlined, videoCovered, timedOut };
             }
             """,
             {
@@ -845,8 +850,8 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
                 "blobAttr": BLOB_ATTR,
                 "imageTimeoutMs": int(image_seconds * 1000),
                 "videoTimeoutMs": int(video_seconds * 1000),
-                # Also what a player downloaded: completed later, not fetched again
-                "skipUrls": sorted(budget.abandoned() | _playback_urls(frame)),
+                "skipUrls": sorted(budget.abandoned()),
+                "playbackUrls": sorted(_playback_urls(frame)),
             },
         ), timeout=video_seconds + 15)
         logger.debug(f"Fetched in {frame.url[:120]}: {result}")
