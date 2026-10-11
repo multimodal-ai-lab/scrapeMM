@@ -239,6 +239,20 @@ const timeItems = computed(() => {
   }))
 })
 
+// Where the retrieval times fall: 5 s bins up to a minute, then everything slower
+const histogramItems = computed(() => {
+  const bins = data.value?.time_histogram || []
+  const total = bins.reduce((sum: number, b: any) => sum + b.count, 0)
+  return bins.map((b: any) => {
+    const range = b.to == null ? `${b.from}+ s` : `${b.from}–${b.to} s`
+    return {
+      label: b.to == null ? `${b.from}+` : `${b.from}`, value: b.count,
+      tooltip: `${range}: ${compact(b.count)} retrievals`
+        + (total ? ` (${(b.count / total * 100).toFixed(1)}%)` : ''),
+    }
+  })
+})
+
 const methodItems = computed(() => (data.value?.methods || []).slice(0, 10).map((m: any) => ({
   label: m.method, value: m.count,
   hint: `${m.method}: ${compact(m.count)} retrieved · median ${seconds(m.median_time)} · p90 ${seconds(m.p90_time)}`,
@@ -377,6 +391,14 @@ function jobsLinkFor(domain: string) {
             <p class="text-xs text-dimmed mt-0.5">Retrieved URLs, cache hits excluded; the p90 on hover</p>
           </template>
           <VizColumnChart :items="timeItems" :height="120" wide-labels :format="(v: number) => seconds(v)" />
+        </UCard>
+
+        <UCard>
+          <template #header>
+            <h2 class="font-medium text-sm">Distribution of retrieval times</h2>
+            <p class="text-xs text-dimmed mt-0.5">Retrieved URLs, cache hits excluded, in 5 s bins (seconds), {{ rangeLabel }}</p>
+          </template>
+          <VizColumnChart :items="histogramItems" :height="120" :format="(v: number) => compact(v)" />
         </UCard>
 
         <UCard>
