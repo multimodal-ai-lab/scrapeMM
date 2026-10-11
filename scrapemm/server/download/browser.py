@@ -323,7 +323,8 @@ class BrowserMedia:
             session.on("Network.dataReceived", self._on_data)
             session.on("Network.loadingFinished", self._on_finished)
             session.on("Network.loadingFailed", self._on_finished)
-        except Exception:
+        except Exception as e:
+            self.stats["player not watched"] += 1
             logger.debug("Cannot watch the page's video downloads; videos will be fetched.",
                          exc_info=True)
 
@@ -347,6 +348,7 @@ class BrowserMedia:
             if total > MAX_VIDEO_BYTES:
                 return
             capture = _Playback(total)
+            self.stats["player"] += 1  # For the log: what the players downloaded
             request_id = event["requestId"]
             self._playback_requests[request_id] = capture
             for url in {response["url"], self._request_urls.get(request_id)} - {None}:
@@ -366,6 +368,7 @@ class BrowserMedia:
             self._playback_requests.pop(request_id, None)
             capture.chunks.clear()
             capture.total = -1  # Unusable: never taken
+            self.stats["player stream failed"] += 1
             logger.debug("Could not stream a video download.", exc_info=True)
 
     def _on_data(self, event: dict) -> None:
