@@ -29,13 +29,14 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 # second at a time.
 _image_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="images")
 
-# An image is kept only if both its sides exceed this many pixels: smaller ones are icons,
-# logos, avatars and spacers, not content. The one rule for every way an image arrives.
-MIN_IMAGE_SIDE = 256
+# A medium is kept only if both its sides are at least this many pixels (an image's width
+# and height, a video's frame size): smaller ones are icons, logos, avatars and spacers,
+# not content. The one rule for every way a medium arrives.
+MIN_MEDIA_SIDE = 128
 
 
 def is_too_small(width: float, height: float) -> bool:
-    return min(width, height) <= MIN_IMAGE_SIDE
+    return min(width, height) < MIN_MEDIA_SIDE
 
 
 async def decode_image(content: bytes, source_url: str, **kwargs) -> Optional[Image]:

@@ -19,6 +19,7 @@ from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError, 
 from scrapemm.server import proxy
 from scrapemm.server.config import get_config_var
 from scrapemm.server.download import download_image
+from scrapemm.server.download.videos import is_too_small_video
 
 logger = logging.getLogger("scrapeMM")
 
@@ -323,6 +324,9 @@ def _run_ytdlp_sync(
         try:
             video = Video(file_path=temp_path + f".{ext}", source_url=url)
             video.relocate(move_not_copy=True)
+            if is_too_small_video(video):
+                logger.info(f"Left out the video of {url[:120]}: smaller than the minimum size.")
+                video = None
         except FileNotFoundError:
             logger.debug(f"yt-dlp reported ext={ext} but file was not found at {temp_path}.{ext}")
         except Exception as e:

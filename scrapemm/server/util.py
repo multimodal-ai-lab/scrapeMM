@@ -27,7 +27,8 @@ from playwright.async_api import APIRequestContext, Page, Frame
 
 from scrapemm.server import budget
 from scrapemm.server.download import download_video, download_image
-from scrapemm.server.download.images import _is_svg, image_from_binary, image_size, is_too_small
+from scrapemm.server.download.images import (MIN_MEDIA_SIDE, _is_svg, image_from_binary,
+                                             image_size, is_too_small)
 from scrapemm.server.download.util import (
     looks_like_image_file_url,
     looks_like_vector_file_url,
@@ -35,7 +36,8 @@ from scrapemm.server.download.util import (
     looks_like_video_embed_url,
 )
 from scrapemm.server.download.browser import BrowserMedia, BLOB_ATTR, BLOB_SCHEME, CURRENT_ATTR
-from scrapemm.server.download.videos import _resolve_ffmpeg_path, _resolve_ffprobe_path
+from scrapemm.server.download.videos import (_resolve_ffmpeg_path, _resolve_ffprobe_path,
+                                             is_too_small_video)
 
 if TYPE_CHECKING:
     from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
@@ -444,11 +446,11 @@ def _is_placeholder_src(src: str) -> bool:
 
 
 def _shown_small(element: Tag) -> bool:
-    """Whether the page sizes the image as an icon: a width or height attribute of at
-    most 256 pixels (the size below which images are dropped anyway)."""
+    """Whether the page sizes the image as an icon: a width or height attribute of less
+    than `MIN_MEDIA_SIDE` pixels (the size below which media are dropped anyway)."""
     for attribute in ("width", "height"):
         value = str(element.get(attribute) or "").strip().removesuffix("px")
-        if value.isdigit() and int(value) <= 256:
+        if value.isdigit() and int(value) < MIN_MEDIA_SIDE:
             return True
     return False
 
@@ -691,7 +693,8 @@ async def _resolve_media_in(
         **kwargs
 ) -> bool:
     """Downloads all media that are contained in the parsed HTML.
-    Removes images that are smaller than 256 x 256. Replaces the
+    Removes images and videos that are smaller than the minimum size (`MIN_MEDIA_SIDE`
+    pixels on a side, 128 x 128). Replaces the
     respective HTML elements with their proper item reference, in place. Returns
     whether the HTML had any media elements (and was changed).
 
@@ -874,7 +877,8 @@ def _replace_media_elements(media_elements: list[Tag], media_uris: list[Optional
         has_child_tags = any(getattr(child, "name", None) for child in element.children)
 
         if medium:
-            too_small = isinstance(medium, Image) and is_too_small(*image_size(medium))
+            too_small = ((isinstance(medium, Image) and is_too_small(*image_size(medium)))
+                         or (isinstance(medium, Video) and is_too_small_video(medium)))
 
             if not too_small:
                 if uri and uri in inserted_url_refs:
@@ -1136,7 +1140,8 @@ def from_base64(b64_data: str, mime_type: str = "image/jpeg", url: str | None = 
                 # hundreds of MB), and then held to the same minimum
                 return image_from_binary(binary_data, source_url=url)
             elif mime_type.startswith("video/"):
-                return Video(binary_data=binary_data, source_url=url)
+                video = Video(binary_data=binary_data, source_url=url)
+                return None if is_too_small_video(video) else video
             else:
                 raise ValueError(f"Unsupported base64 mime type: {mime_type}")
     except binascii.Error:  # base64 validation failed

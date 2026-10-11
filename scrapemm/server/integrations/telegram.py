@@ -12,6 +12,7 @@ from telethon.tl.types import Channel, User
 from scrapemm.common.exceptions import TargetUnavailableError, RateLimitError
 from scrapemm.common.scraping_response import ScrapedContent
 from scrapemm.server.download.images import decode_image
+from scrapemm.server.download.videos import is_too_small_video
 from scrapemm.server.secrets import get_secret
 from scrapemm.server.integrations.base import RetrievalIntegration
 from scrapemm.server.paths import TELEGRAM_SESSION_PATH
@@ -163,13 +164,17 @@ Forwards: {message.forwards}{reactions_text}
                     post_url = f"https://t.me/{chat.username}/{post.id}"
                     medium_bytes = await self.client.download_media(post, file=bytes)
                     if hasattr(medium, "photo"):
-                        # Held to the minimum size like any image (see `MIN_IMAGE_SIDE`)
+                        # Held to the minimum size like any image (see `MIN_MEDIA_SIDE`)
                         item = await decode_image(medium_bytes, source_url=post_url)
                     elif hasattr(medium, "video"):
                         item = Video(binary_data=medium_bytes, source_url=post_url)
                         if max_video_size is not None and item.size > max_video_size:
                             logger.info(f"Removing video {item.reference} because it exceeds the maximum size "
                                         f"of {max_video_size / 1024 / 1024:.2f} MB.")
+                            item = None
+                        elif is_too_small_video(item):
+                            logger.info(f"Removing video {item.reference} because it is smaller "
+                                        f"than the minimum size.")
                             item = None
                     else:
                         raise ValueError(f"Unsupported medium: {medium.__dict__}")

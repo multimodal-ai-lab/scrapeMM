@@ -231,7 +231,7 @@ class Instagram(RetrievalIntegration):
 
         items: list = [header]
         if picture_url := user.get("profile_pic_url_hd") or user.get("profile_pic_url"):
-            # Kept only if large enough, like any image (see `MIN_IMAGE_SIDE`)
+            # Kept only if large enough, like any image (see `MIN_MEDIA_SIDE`)
             if picture := await download_image(picture_url, session):
                 items.append(picture)
 

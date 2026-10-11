@@ -143,10 +143,13 @@ def _png(width: int, height: int) -> bytes:
     return buffer.getvalue()
 
 
-@pytest.mark.parametrize("width,height,kept", [(256, 400, False), (400, 256, False), (257, 257, True)])
+@pytest.mark.parametrize("width,height,kept", [
+    (127, 400, False), (400, 127, False), (64, 64, False),
+    (128, 128, True), (128, 400, True), (400, 128, True),  # The minimum itself is kept
+])
 def test_one_minimum_size_for_every_image(width, height, kept):
-    """An image is kept only if both sides exceed `MIN_IMAGE_SIDE`, whether downloaded or
-    inlined as a data URI. The data-URI path used to let an image of exactly 256 px pass."""
+    """An image is kept only if both sides are at least `MIN_MEDIA_SIDE` (128), whether
+    downloaded or inlined as a data URI."""
     import base64
     from scrapemm.server.download.images import image_from_binary
     from scrapemm.server.util import from_base64
@@ -160,3 +163,46 @@ def test_an_inline_image_too_small_once_downscaled_is_left_out():
     import base64
     from scrapemm.server.util import from_base64
     assert from_base64(base64.b64encode(_png(5000, 300)).decode(), "image/png") is None
+
+
+def _mp4(width: int, height: int) -> bytes:
+    import tempfile
+    from pathlib import Path
+    import cv2
+    import numpy as np
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "clip.mp4"
+        writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 5, (width, height))
+        for shade in range(5):
+            writer.write(np.full((height, width, 3), shade * 40, dtype=np.uint8))
+        writer.release()
+        return path.read_bytes()
+
+
+@pytest.mark.parametrize("width,height,kept", [
+    (127, 300, False), (300, 127, False), (64, 64, False),
+    (128, 128, True), (128, 300, True), (300, 128, True),
+])
+def test_the_minimum_size_holds_for_videos_too(width, height, kept):
+    """A video is kept only if both sides of its frames are at least `MIN_MEDIA_SIDE`,
+    downloaded or inlined as a data URI, like an image."""
+    import base64
+    from scrapemm.server.download.videos import video_from_binary
+    from scrapemm.server.util import from_base64
+    data = _mp4(width, height)
+    assert (video_from_binary(data, "https://e.example/clip.mp4") is not None) is kept
+    assert (from_base64(base64.b64encode(data).decode(), "video/mp4") is not None) is kept
+
+
+def test_a_video_whose_size_cannot_be_read_is_not_judged():
+    from scrapemm.server.download.videos import is_too_small_video
+
+    class Unreadable:
+        width = property(lambda self: (_ for _ in ()).throw(OSError("cannot open")))
+        height = 0
+
+    class NoVideoStream:
+        width = height = 0
+
+    assert not is_too_small_video(Unreadable())
+    assert not is_too_small_video(NoVideoStream())

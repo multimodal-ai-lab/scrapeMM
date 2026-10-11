@@ -51,7 +51,7 @@ _MEDIA_STATE_JS = """() => {
     const imgs = [...document.images];
     return {imgs: imgs.length,
             loaded: imgs.filter(i => i.complete && i.naturalWidth > 0).length,
-            large: imgs.filter(i => i.naturalWidth >= 256 && i.naturalHeight >= 256).length,
+            large: imgs.filter(i => i.naturalWidth >= 128 && i.naturalHeight >= 128).length,
             pending: imgs.filter(i => !i.complete).length,
             videos: document.querySelectorAll('video').length,
             text: document.body ? document.body.innerText.length : 0};

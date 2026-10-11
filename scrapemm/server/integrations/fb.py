@@ -509,7 +509,7 @@ class Facebook(RetrievalIntegration):
             header += f"\n\n{postprocess_markdown(html_lib.unescape(description.group(1)))}"
         items: list = [header]
         if picture_url := FB_OG_IMAGE_REGEX.search(html):
-            # Kept only if large enough, like any image (see `MIN_IMAGE_SIDE`)
+            # Kept only if large enough, like any image (see `MIN_MEDIA_SIDE`)
             picture = await download_image(html_lib.unescape(picture_url.group(1)),
                                            kwargs.get("session"))
             if picture:
