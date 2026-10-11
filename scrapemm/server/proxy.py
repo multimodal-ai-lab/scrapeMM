@@ -197,6 +197,13 @@ def route() -> Optional[Proxy]:
     return current.proxy
 
 
+def routed() -> bool:
+    """Whether the current attempt goes through the proxy. Unlike `route()`, asking does
+    not count as using it."""
+    current = _attempt.get()
+    return current is not None and current.proxy is not None
+
+
 def divert() -> Optional[Proxy]:
     """Sends the rest of the current attempt through the proxy, if one is in use: for a
     method that knows beforehand that going direct is pointless (YouTube while paused for

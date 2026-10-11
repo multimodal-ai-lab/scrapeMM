@@ -25,7 +25,7 @@ from typing import Optional
 
 from scrapemm.common.exceptions import CaptchaEncounteredError
 from scrapemm.common.paths import APP_NAME
-from . import registry
+from . import registry, slots
 from .blacklist import blacklist
 from .cache import cache
 from .environment import ffmpeg_available, ffprobe_available
@@ -422,6 +422,7 @@ async def environment() -> dict:
         "display": _display_status(),
         "captcha": _captcha_backlog(),
         "queue": _queue(),
+        "slots": slots.snapshot(),
         "media": _media_usage(),
         "address": _address(),
         "proxy": proxy_status(),
@@ -545,19 +546,15 @@ def _address() -> dict:
 
 
 def _queue() -> dict:
-    """The URLs waiting in line: accepted by a running job but not yet started, because
-    the server's concurrency limit is full. URLs parked with a CAPTCHA challenge are not
-    in line (see `_captcha_backlog()`); they wait for a human, not for a free slot."""
+    """The URLs waiting in line -- accepted by a running job, but waiting for a slot of
+    the first method they try (see `slots`) -- and those being retrieved. URLs parked
+    with a CAPTCHA challenge are not in line (see `_captcha_backlog()`); they wait for a
+    human, not for a free slot."""
     from . import engine
-    from .config import get_config_var
-    in_flight = len(getattr(engine, "_in_flight", {}))
-    active = getattr(engine, "_active", 0)
-    return {
-        "waiting": max(0, in_flight - active),
-        "active": active,
-        "limit": int(get_config_var("max_concurrency",
-                                    getattr(engine, "DEFAULT_MAX_CONCURRENCY", 40))),
-    }
+    retrievals = list(engine._retrievals)
+    waiting = sum(1 for clock in retrievals
+                  if clock.admitted is None and clock.waiting_for_slot > 0)
+    return {"waiting": waiting, "active": len(retrievals) - waiting}
 
 
 def _captcha_backlog() -> dict:

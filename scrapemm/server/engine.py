@@ -23,7 +23,7 @@ from scrapemm.common import (ScrapingResponse, ScrapedContent, OutputFormat, OUT
 from scrapemm.common.exceptions import RetrievalFailed, UnsupportedDomainError, \
     DomainBlacklistedError, DiskFull, TargetUnavailableError, QuotaExceededError, \
     AccessBlockedError, CaptchaEncounteredError, PaywallError, RegionBlockedError
-from scrapemm.server import challenges, reachability, chain, proxy, timing
+from scrapemm.server import challenges, reachability, chain, proxy, slots, timing
 from scrapemm.server.download.documents import (document_extension, is_document_content_type,
                                                 to_content as documents_to_content)
 from scrapemm.server import screenshot as screenshot_module
@@ -54,7 +54,8 @@ DEFAULT_HEDGING_DELAY = None
 # The order of the methods, the domain routes and which methods run at all are the
 # retrieval chain's business (see `chain.py`); the engine executes its plan.
 BROWSER = "browser"
-PLAIN_HTTP = chain.label("plain_http")
+PLAIN_HTTP_KEY = "plain_http"
+PLAIN_HTTP = chain.label(PLAIN_HTTP_KEY)
 
 UNSUPPORTED_DOMAINS = []
 
@@ -198,25 +199,6 @@ async def retrieve(
             return [results[url] for url in urls_to_retrieve]
 
 
-DEFAULT_MAX_CONCURRENCY = 40
-
-_semaphore: Optional[asyncio.Semaphore] = None
-_semaphore_limit: Optional[int] = None
-
-
-def _concurrency_gate() -> asyncio.Semaphore:
-    """The server's global limit on URLs in flight. `retrieve()` applies its own limit
-    per batch; the API streams URLs individually, so the limit has to live here instead
-    -- otherwise ten concurrent API calls of fifty URLs each would launch five hundred
-    retrievals at once."""
-    global _semaphore, _semaphore_limit
-    limit = int(get_config_var("max_concurrency", DEFAULT_MAX_CONCURRENCY))
-    if _semaphore is None or _semaphore_limit != limit:
-        _semaphore = asyncio.Semaphore(limit)
-        _semaphore_limit = limit
-    return _semaphore
-
-
 async def retrieve_one(
         url: str,
         session: aiohttp.ClientSession,
@@ -231,9 +213,10 @@ async def retrieve_one(
         screenshot: bool = False,
         enable_archives_fallback: bool | None = None,
 ) -> ScrapingResponse:
-    """Retrieves a single URL, subject to the server's concurrency limit. This is what
-    the API streams over: it needs results one at a time, as they finish, rather than
-    the whole batch at once."""
+    """Retrieves a single URL. This is what the API streams over: it needs results one
+    at a time, as they finish, rather than the whole batch at once. How many run at once
+    is up to each method's slots (see `slots`): ten concurrent API calls of fifty URLs
+    each launch five hundred retrievals, which then wait for their methods' slots."""
     if methods is None:
         methods = "auto"
     if hedging_delay is None:
@@ -251,7 +234,7 @@ async def retrieve_one(
     shared = _in_flight.get(key)
     joined = shared is not None
     if shared is None:
-        shared = _InFlight(asyncio.create_task(_gated_retrieve(
+        shared = _InFlight(asyncio.create_task(_shared_retrieve(
             url, session, methods, actions, output_format, max_video_size, prioritize,
             use_cache, hedging_delay, screenshot, enable_archives_fallback)))
         _in_flight[key] = shared
@@ -304,27 +287,27 @@ def _forget(key: tuple, shared: _InFlight) -> None:
         del _in_flight[key]
 
 
-async def _gated_retrieve(url, session, methods, actions, output_format, max_video_size,
-                          prioritize, use_cache, hedging_delay, screenshot,
-                          enable_archives_fallback) -> ScrapingResponse:
+async def _shared_retrieve(url, session, methods, actions, output_format, max_video_size,
+                           prioritize, use_cache, hedging_delay, screenshot,
+                           enable_archives_fallback) -> ScrapingResponse:
     # Its own HTTP session rather than the first caller's: that one closes when its job
     # ends or its client disconnects, while others may still be waiting on this result
-    global _active
     clock = timing.start_clock()  # Queue time starts here, see `timing`
-    async with (_concurrency_gate(),
-                aiohttp.ClientSession(headers=HEADERS, trace_configs=[timing.request_trace()]) as own):
-        clock.admit()
-        _active += 1
-        try:
+    _retrievals.add(clock)
+    try:
+        async with aiohttp.ClientSession(headers=HEADERS,
+                                         trace_configs=[timing.request_trace()]) as own:
             return await _retrieve_single(url, own, methods, actions, output_format,
                                           max_video_size, prioritize, use_cache, hedging_delay,
                                           screenshot, enable_archives_fallback)
-        finally:
-            _active -= 1
-            _release_media_memory()
+    finally:
+        _retrievals.discard(clock)
+        _release_media_memory()
 
 
-_active = 0  # Retrievals under way, see `_gated_retrieve()`
+# The clocks of the retrievals under way (see `_shared_retrieve()`): those not yet
+# admitted and waiting for a slot are the URLs waiting in line (see `status._queue()`)
+_retrievals: set[timing.RetrievalClock] = set()
 
 
 def _release_media_memory() -> None:
@@ -339,7 +322,7 @@ def _release_media_memory() -> None:
     for item in list(item_registry.cache.values()):
         if isinstance(item, Image) and item._image is not None:
             item._image = None
-    if _active == 0 and _libc is not None:
+    if not _retrievals and _libc is not None:
         _libc.malloc_trim(0)
 
 
@@ -351,11 +334,10 @@ except OSError:
 
 async def _retrieve_single(url: str, session: aiohttp.ClientSession, *args) -> ScrapingResponse:
     """Retrieves the URL, its response timed from its first outgoing request on (see
-    `timing`). In a batch of `retrieve()`, the URL counts as admitted when this runs."""
+    `timing`). The URL is admitted once its first method has a slot (see `slots`)."""
     clock = timing.current()
-    if clock is None:
+    if clock is None:  # In a batch of `retrieve()`
         clock = timing.start_clock()
-    clock.admit()
     return clock.stamp(await _retrieve(url, session, *args))
 
 
@@ -495,12 +477,14 @@ async def _retrieve(
         if output_format == "multimodal":
             medium = None
             if looks_like_image_file_url(url) or looks_like_video_file_url(url) or looks_like_hls_url(url):
-                timing.work_started()
-            if looks_like_image_file_url(url):
-                medium = await download_image(url, session=session)
-            elif looks_like_video_file_url(url) or looks_like_hls_url(url):
-                medium = await download_video(url, session=session,
-                                              max_video_size=max_video_size)
+                # A plain request of the file, in one of that method's slots
+                async with slots.hold(PLAIN_HTTP_KEY):
+                    timing.work_started()
+                    if looks_like_image_file_url(url):
+                        medium = await download_image(url, session=session)
+                    else:
+                        medium = await download_video(url, session=session,
+                                                      max_video_size=max_video_size)
             if medium:
                 content = ScrapedContent(multimodal=MultimodalSequence(medium))
                 response = ScrapingResponse(url=url, content=content, method="Direct download",
@@ -888,12 +872,14 @@ async def _run_archives(archives: list[str], url: str, session: aiohttp.ClientSe
     for key in archives:
         name = chain.label(key)
         if key == "wayback":
-            routine = _wayback(url, session, errors, output_format, max_video_size)
+            archive = _wayback
         elif key == "perma_cc":
-            routine = _perma_cc(url, session, errors, output_format, max_video_size)
+            archive = _perma_cc
         else:
             errors[name] = NotImplementedError(f"No archive method '{key}'.")
             continue
+        # In one of the archive method's slots; waiting for it counts against the deadline
+        routine = _in_slot(key, archive, url, session, errors, output_format, max_video_size)
         try:
             if deadline is None:
                 content = await routine
@@ -928,6 +914,14 @@ async def _run_archives(archives: list[str], url: str, session: aiohttp.ClientSe
             continue
         return name, content
     return None
+
+
+async def _in_slot(key: str, routine: Callable[..., Coroutine], *args, **kwargs):
+    """`routine(*args, **kwargs)`, run in one of the method's slots (see `slots`). Takes
+    the function rather than its coroutine: a coroutine whose task is cancelled while
+    waiting for the slot would never be awaited."""
+    async with slots.hold(key):
+        return await routine(*args, **kwargs)
 
 
 # Seconds the archive stage may take for a platform URL, all archives together. Its
@@ -1365,8 +1359,8 @@ async def _cloudflare_fallback(url: str, domain: str, session: aiohttp.ClientSes
 
     logger.info(f"☁️ {url} is behind a Cloudflare challenge; trying the browser.")
     try:
-        content = await browser._get(url, output_format=output_format,
-                                     max_video_size=max_video_size)
+        content = await _in_slot(BROWSER, browser._get, url, output_format=output_format,
+                                 max_video_size=max_video_size)
     except Exception as e:
         errors[BROWSER] = e
         return None
@@ -1461,11 +1455,14 @@ async def _execute(
         url: str, method_to_routine: Callable[[str], Coroutine], method_name: str,
         session: aiohttp.ClientSession, attempts_remaining: int = 1,
 ) -> ScrapedContent | Exception | None:
-    """Executes a retrieval routine and handles exceptions. If an error occurred, returns
-    the exception object in place of the result."""
+    """Executes a retrieval routine in one of its method's slots (see `slots`) and
+    handles exceptions. If an error occurred, returns the exception object in place of
+    the result."""
     try:
-        routine = method_to_routine(method_name)  # Apply factory to get the actual routine
-        return await routine
+        async with slots.hold(slot_key(method_name)):
+            # The factory is applied only now: its coroutine would never be awaited if
+            # the task were cancelled while waiting for the slot
+            return await method_to_routine(method_name)
 
     except NotImplementedError as e:
         logger.info("Reached a method that is not implemented.", exc_info=True)
@@ -1532,6 +1529,12 @@ async def _execute(
         else:
             logger.warning(f"Error while retrieving with method {method_name}.", exc_info=True)
         return e
+
+
+def slot_key(method_name: str) -> str:
+    """The slots' key of a method named as responses name it: "Plain HTTP" ->
+    "plain_http", "Facebook" -> "facebook" (see `slots`)."""
+    return chain.key_of(method_name).lower()
 
 
 def resolve_best_methods(url: str, allowed_methods: Literal["auto"] | list[str]) -> list[str]:
