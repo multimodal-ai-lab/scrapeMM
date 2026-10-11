@@ -6,8 +6,9 @@ from playwright.async_api import async_playwright
 
 from scrapemm.common import RetrievalFailed
 from scrapemm.common.exceptions import TargetUnavailableError
-from scrapemm.server.integrations.fb import (JS_GET_PHOTO_IMAGE, _is_facebook_graphic,
-                                             _parse_embed, _shows_login_wall)
+from scrapemm.server.integrations.fb import (JS_GET_PHOTO_IMAGE, Facebook,
+                                             _is_facebook_graphic, _parse_embed,
+                                             _shows_login_wall)
 
 pytestmark = pytest.mark.server
 
@@ -60,7 +61,7 @@ POST_EMBED = f"""
 <div class="_5pcr userContentWrapper">
   <a class="_5pb8"><img class="_s0 _4ooo img" src="{AVATAR}"></a>
   <div class="_6a"><div class="_2_79 _50f4 _50f7">Some Page</div></div>
-  <abbr data-utime="1743515870">about 2 years ago</abbr>
+  <a href="/TheWolverLing/posts/1225874212228936?ref=embed_post"><abbr data-utime="1743515870">about 2 years ago</abbr></a>
   <div class="_5pbx userContent _3576"><p>First line</p><p>Second line</p>
     <a class="see_more_link">See more</a></div>
   <img class="img" src="{ICON}" width="24" height="24">
@@ -70,8 +71,10 @@ POST_EMBED = f"""
 PHOTO_EMBED = f"""
 <div class="_2iem"><a><span class="_2_79 _50f7">Some Person</span></a></div>
 <img class="_s0 _4ooo img" src="{AVATAR}">
+<a href="https://www.facebook.com/photo.php?fbid=1721085455188778&amp;ref=embed_post"></a>
 <abbr data-utime="1750289122">about a year ago</abbr>
 <div class="_5pbx userContent _3576"><p>Breaking: a caption</p></div>
+<a href="https://www.facebook.com/bhim.upadhyaya.180/posts/1721085478522109?ref=embed_post">a year ago</a>
 <img class="_1p6f _1p6g img" src="{PHOTO}" width="497" height="498">"""
 GONE_EMBED = """<div><img class="_1q3x img" src="https://static.xx.fbcdn.net/rsrc.php/ya/r/x.webp">
 This Facebook post is no longer available. It may have been removed or the privacy
@@ -79,16 +82,19 @@ settings of the post may have changed.</div>"""
 
 
 def test_a_posts_embed_yields_its_text_and_photos_but_no_avatar_or_icon():
-    header, photos = _parse_embed(POST_EMBED)
+    header, photos, post_url = _parse_embed(POST_EMBED)
     assert photos == [f"{PHOTO}&a=1", f"{PHOTO}&a=2"]
+    assert post_url == "https://www.facebook.com/TheWolverLing/posts/1225874212228936"
     assert "Author: Some Page" in header and "Posted: 2025-04-01 13:57 UTC" in header
     assert "First line" in header and "Second line" in header
     assert header.endswith("…")  # Cut short by the embed
 
 
 def test_a_photos_embed_yields_the_photo_and_its_caption():
-    header, photos = _parse_embed(PHOTO_EMBED)
+    header, photos, post_url = _parse_embed(PHOTO_EMBED)
     assert photos == [PHOTO]
+    # The post the photo belongs to, whose page has the caption in full
+    assert post_url == "https://www.facebook.com/bhim.upadhyaya.180/posts/1721085478522109"
     assert "Author: Some Person" in header and "Breaking: a caption" in header
     assert not header.endswith("…")
 
@@ -98,3 +104,15 @@ def test_an_embed_of_a_removed_post_is_unavailable_and_an_empty_one_a_failure():
         _parse_embed(GONE_EMBED)
     with pytest.raises(RetrievalFailed):
         _parse_embed("<html><body>Something else entirely</body></html>")
+
+
+def test_a_permalink_becomes_the_posts_page_the_server_may_see():
+    """permalink.php redirects the server to the login page; /<owner>/posts/<id> does not."""
+    normalize = Facebook.__new__(Facebook)._normalize_url
+    assert normalize("https://www.facebook.com/permalink.php?story_fbid=pfbid02CP&#038;id=100078635210746") \
+        == "https://www.facebook.com/100078635210746/posts/pfbid02CP"
+    assert normalize("https://m.facebook.com/permalink.php?id=7&story_fbid=123") \
+        == "https://www.facebook.com/7/posts/123"
+    # Without both parts, it stays as it is
+    assert normalize("https://www.facebook.com/permalink.php?story_fbid=123") \
+        == "https://www.facebook.com/permalink.php?story_fbid=123"

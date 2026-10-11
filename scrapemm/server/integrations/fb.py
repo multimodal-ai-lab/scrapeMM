@@ -5,7 +5,8 @@ import asyncio
 import contextlib
 import re
 from datetime import datetime, timezone
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from typing import Optional
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -66,9 +67,11 @@ UNAVAILABLE_MESSAGE = ("The Facebook content is not available: it was removed, i
                        "visibility was restricted, or it never existed.")
 
 # Facebook's embed of a post or photo (plugins/post.php), made for other websites' readers
-# and so public: since October 2026, Facebook shows logged-out visitors -- the server --
-# its login wall on photo pages and permalink.php posts, but not on their embeds. At the
-# widest embed Facebook renders, its images come in full resolution (up to 1440 px).
+# and so public: since October 2026, Facebook redirects the server -- by its address,
+# cookies or not -- to the login page for photo pages and permalink.php posts, but not for
+# their embeds (nor for /<owner>/posts/<id> pages). At the widest embed Facebook renders,
+# its images come in full resolution (up to 1440 px). Its text, though, is cut short
+# ("See more"), so the text comes from the post's own page wherever that loads.
 FB_EMBED_URL = "https://www.facebook.com/plugins/post.php?href={href}&show_text=true&width=750"
 # What an embed of a removed or restricted post shows instead ("This Facebook post is no
 # longer available"): its icon's class, and the message, in case the class changes
@@ -197,11 +200,12 @@ def _is_unavailable_page(html: str) -> bool:
             and '"__typename":"Video"' not in html)
 
 
-def _parse_embed(html: str) -> tuple[str, list[str]]:
+def _parse_embed(html: str) -> tuple[str, list[str], Optional[str]]:
     """Reads a post off Facebook's embed of it (see `FB_EMBED_URL`): its header (author,
-    date, text) as Markdown, and the URLs of its photos. The embed of a single photo and
-    that of a post are laid out differently, but share these classes. Raises
-    TargetUnavailableError if the embed says the post is gone."""
+    date, text) as Markdown, the URLs of its photos, and the URL of the post's own page
+    (/<owner>/posts/<id>; for a photo, the post it belongs to) if the embed links one.
+    The embed of a single photo and that of a post are laid out differently, but share
+    these classes. Raises TargetUnavailableError if the embed says the post is gone."""
     soup = BeautifulSoup(html, "html.parser")
     posted = soup.select_one("abbr[data-utime]")
     text = soup.select_one(".userContent")
@@ -231,7 +235,14 @@ def _parse_embed(html: str) -> tuple[str, list[str]]:
         if ("scontent" in src or "fbcdn" in src) and not _is_facebook_graphic(src) \
                 and "_s0" not in (img.get("class") or []) and src not in photos:
             photos.append(src)
-    return header, photos
+
+    post_url = None
+    for link in soup.select("a[href]"):
+        target = urlparse(urljoin("https://www.facebook.com/", link["href"]))
+        if target.netloc == "www.facebook.com" and re.fullmatch(r"/[^/]+/posts/[^/]+/?", target.path):
+            post_url = f"https://www.facebook.com{target.path}"
+            break
+    return header, photos, post_url
 
 
 def _extract_post_header(html: str) -> str:
@@ -297,8 +308,9 @@ class Facebook(RetrievalIntegration):
 
         # The URL is not indicative, so try all methods
 
-        # Get the text first, straight from the page: it is public for public posts (not
-        # for permalink.php ones, which show the login wall; their embed has the text)
+        # Get the text first, straight from the page: it is public for public posts, and
+        # complete (permalink.php URLs, which redirect to the login page, are rewritten to
+        # their /<owner>/posts/<id> form by `_normalize_url()`)
         content = []
         html = await self._fetch_page(url)
         if html and _shows_error_page(html):
@@ -314,7 +326,7 @@ class Facebook(RetrievalIntegration):
         # The photos, from the post's embed
         embed_header, photos = "", []
         try:
-            embed_header, photos = await self._get_from_embed(url, **kwargs)
+            embed_header, photos, _ = await self._get_from_embed(url, **kwargs)
         except TargetUnavailableError:
             if not header and not video:
                 raise
@@ -323,7 +335,8 @@ class Facebook(RetrievalIntegration):
         if not photos and not video and (photo := await self._page_photo(html or "", **kwargs)):
             photos = [photo]  # A group's post has no embed, but its page names its photo
 
-        # The page's text is the whole of it, the embed's may be cut short
+        # The page's text is the whole of it; the embed's, possibly cut short, only stands
+        # in for a page that has none
         if header := header or embed_header:
             content.append(header)
         if video:
@@ -431,8 +444,11 @@ class Facebook(RetrievalIntegration):
         """Retrieves a Facebook photo: from its embed, or else from the photo page in a
         browser, with the session cookies if there are any."""
         try:
-            header, photos = await self._get_from_embed(url, **kwargs)
+            header, photos, post_url = await self._get_from_embed(url, **kwargs)
             if photos:
+                # The caption in full, from the page of the post the photo belongs to
+                if post_url and (full := _extract_post_header(await self._fetch_page(post_url) or "")):
+                    header = full
                 return ScrapedContent(multimodal=MultimodalSequence([header, *photos]))
         except TargetUnavailableError:
             raise
@@ -458,13 +474,14 @@ class Facebook(RetrievalIntegration):
                 aiohttp.ClientSession(headers=HEADERS))
             return await download_image(photo_url, session)
 
-    async def _get_from_embed(self, url: str, **kwargs) -> tuple[str, list[Image]]:
+    async def _get_from_embed(self, url: str, **kwargs) -> tuple[str, list[Image], Optional[str]]:
         """The post or photo as Facebook's embed shows it (see `FB_EMBED_URL`): its
-        header as Markdown, and its photos, downloaded."""
+        header as Markdown (the text possibly cut short), its photos, downloaded, and the
+        URL of the post's own page, if linked."""
         html = await self._fetch_page(FB_EMBED_URL.format(href=quote(url, safe="")))
         if not html:
             raise RetrievalFailed(f"Could not load Facebook's embed of {url}.")
-        header, photo_urls = await run_light(_parse_embed, html)
+        header, photo_urls, post_url = await run_light(_parse_embed, html)
         photos = []
         async with contextlib.AsyncExitStack() as stack:
             session = kwargs.get("session") or await stack.enter_async_context(
@@ -473,7 +490,7 @@ class Facebook(RetrievalIntegration):
                 # Kept only if large enough, like any image (see `MIN_MEDIA_SIDE`)
                 if photo := await download_image(photo_url, session):
                     photos.append(photo)
-        return header, photos
+        return header, photos, post_url
 
     async def _get_photo_from_regular_post(
             self, url, cookies: list[dict[str, str]]
@@ -578,6 +595,13 @@ class Facebook(RetrievalIntegration):
         if parsed.path.startswith("/plugins/"):
             target = self._extract_plugin_href(parsed.query)
             return self._normalize_url(target) if target.startswith("http") else url
+        if parsed.path == "/permalink.php":
+            # Redirects the server to the login page; the same post's /<owner>/posts/<id>
+            # page does not
+            query = parse_qs(parsed.query)
+            story, owner = query.get("story_fbid", [""])[0], query.get("id", [""])[0]
+            if story and owner:
+                return f"https://www.facebook.com/{owner}/posts/{story}"
         return url
 
     @staticmethod
