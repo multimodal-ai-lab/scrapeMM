@@ -5,9 +5,10 @@ Search APIs have little in common, so each provider has a route of its own, POST
 as its body and answers with the provider's response, in the provider's own format.
 One search is one short call, so the answer is a plain JSON object, not a stream.
 
-Searches are not recorded as jobs: the job history is about URLs retrieved, and a
-search retrieves none. Each one is counted, though (`JobStore.record_search`: provider,
-status and number of results, nothing of the query), for the dashboard.
+Searches are not recorded as jobs: a job is about URLs retrieved, and a search
+retrieves none. Each one is recorded on its own, though (`JobStore.record_search`:
+provider, status, the query, how long it took and the URLs it found), for the
+dashboard's counts and the History's Searches view.
 
 Every failure carries a string `detail`, for the UI, and the exception it stands for
 in `error`, from which the client rebuilds it -- a rate limit arrives in the caller's
@@ -19,6 +20,7 @@ code as the RateLimitError it is.
 
 import asyncio
 import logging
+import time
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends
@@ -60,13 +62,16 @@ async def list_providers() -> dict:
 def _endpoint(provider: SearchProvider):
     async def run_search(query: provider.query_class,
                          principal: Principal = Depends(require_api_key)) -> Any:
+        started = time.time()
         try:
             response = await provider.search(query)
         except Exception as e:
             failure = _failure(provider, e)
-            await _count(provider, failure.status_code, None, principal)
+            await _count(provider, failure.status_code, None, principal, query,
+                         time.time() - started, error=str(e))
             return failure
-        await _count(provider, 200, len(response.urls), principal)
+        await _count(provider, 200, len(response.urls), principal, query,
+                     time.time() - started, urls=response.urls)
         return response.to_dict()
 
     return run_search
@@ -90,9 +95,12 @@ async def unknown_provider(provider: str) -> JSONResponse:
 
 
 async def _count(provider: SearchProvider, status: int, results: Optional[int],
-                 principal: Principal) -> None:
+                 principal: Principal, query, duration: float, error: Optional[str] = None,
+                 urls: Optional[list[str]] = None) -> None:
     try:
-        await asyncio.to_thread(jobs.record_search, provider.name, status, results, principal.id)
+        await asyncio.to_thread(jobs.record_search, provider.name, status, results,
+                                principal.id, query.to_dict(), provider.summarize(query),
+                                error, duration, urls)
     except Exception:  # A search must not fail over its bookkeeping
         logger.warning("Could not record a search request.", exc_info=True)
 

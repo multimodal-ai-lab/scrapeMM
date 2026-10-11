@@ -253,7 +253,8 @@ const tiles = computed(() => {
             + `of the last ${compact(env.throughput.success_rate.total)}`
           : `of the last ${compact(env.throughput.success_rate.total)} retrievals`)
         : 'nothing retrieved yet',
-      to: env.throughput.success_rate.outcomes?.error ? '/jobs?outcome=error' : '/jobs' },
+      to: env.throughput.success_rate.outcomes?.error
+        ? '/history?view=retrievals&outcome=error' : '/history?view=retrievals' },
     { label: 'Scraping time', icon: 'i-fa7-solid-stopwatch',
       value: times?.median == null ? '—' : `${times.median.toFixed(1)} s`,
       // Judged by the median, the headline figure, as in the Test view
@@ -273,7 +274,7 @@ const tiles = computed(() => {
           .map((p) => `${p.name} ${compact(p.ok + p.failed)}${p.failed ? ` (${compact(p.failed)} failed)` : ''}`)
           .join(' · ')
         : `none since midnight · ${compact(env.searches?.total ?? 0)} all time`,
-      to: '/playground/search' },
+      to: '/history?view=searches&since=today' },
     { label: 'Awaiting CAPTCHA', icon: 'i-fa7-solid-lock',
       value: `${env.captcha.waiting}`,
       tone: env.captcha.waiting ? 'warning' as const : 'neutral' as const,
@@ -295,7 +296,7 @@ const tiles = computed(() => {
       value: compact(env.jobs.all_time?.jobs ?? env.jobs.jobs), tone: 'neutral' as const,
       detail: `${compact(env.jobs.all_time?.urls ?? env.jobs.urls)} URLs all time · `
         + `${compact(env.jobs.jobs)} jobs kept`,
-      to: '/jobs' },
+      to: '/history' },
     { label: 'Media stored', icon: 'i-fa7-solid-photo-film',
       // Null until the server's first background measurement is done
       value: env.media.bytes == null ? '…' : bytes(env.media.bytes),
@@ -327,7 +328,7 @@ const tiles = computed(() => {
         ? `URLs queued · ${env.queue.active}/${env.queue.limit} scraping · `
           + `${env.jobs.running} job${env.jobs.running === 1 ? '' : 's'} running`
         : 'no URLs queued',
-      to: '/jobs' },
+      to: '/history' },
     // The proxy for when this server's address is blocked: only once one is configured
     ...(env.proxy?.configured ? [proxyTile(env.proxy)] : []),
   ]

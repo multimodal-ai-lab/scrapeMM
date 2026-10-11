@@ -20,7 +20,7 @@ from ..auth import Principal, require_admin, require_api_key
 from ..blacklist import blacklist
 from ..cache import cache, immutable, KINDS
 from ..config import SETTINGS, get_config, update_config
-from ..jobs import SORTS, jobs
+from ..jobs import RESULT_SORTS, SEARCH_SORTS, SORTS, jobs
 from ..toggles import set_enabled
 from ..secrets import (MANAGED_SECRETS, SECRETS, describe_secrets, remove_secret,
                        rotate_key, set_secret)
@@ -361,6 +361,69 @@ async def list_jobs(
             "stats": jobs.stats(),
             "methods": jobs.known_methods(),
         }
+    return await asyncio.to_thread(answer)
+
+
+@router.get("/retrievals")
+async def list_retrievals(
+        limit: int = Query(default=25, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+        url: Optional[str] = Query(default=None, description="Substring match on the URL"),
+        output_format: Optional[str] = Query(default=None),
+        method: Optional[str] = Query(default=None),
+        outcome: Optional[str] = Query(default=None, description="As for /v1/jobs"),
+        since: Optional[float] = Query(default=None, description="UNIX timestamp, inclusive"),
+        until: Optional[float] = Query(default=None, description="UNIX timestamp, inclusive"),
+        sort: str = Query(default="newest", description="newest, oldest, slowest or fastest"),
+        version: Optional[int] = Query(default=None, description="As for /v1/jobs"),
+) -> dict:
+    """The history one URL at a time: every retrieval of every job, as the UI's History
+    lists them under Retrievals."""
+    if version is not None and version == jobs.version:
+        return {"unchanged": True, "version": jobs.version}
+    if sort not in RESULT_SORTS:
+        raise HTTPException(status_code=400, detail=f"Unknown sort '{sort}'. Allowed: "
+                                                    f"{', '.join(RESULT_SORTS)}.")
+    criteria = dict(url=url, output_format=output_format, method=method, outcome=outcome,
+                    since=since, until=until)
+
+    def answer() -> dict:  # In a thread, as for /v1/jobs
+        return {"version": jobs.version,
+                "retrievals": jobs.list_results(limit=limit, offset=offset, sort=sort, **criteria),
+                "total": jobs.count_results(**criteria), "stats": jobs.stats(),
+                "methods": jobs.known_methods()}
+    return await asyncio.to_thread(answer)
+
+
+@router.get("/searches")
+async def list_searches(
+        limit: int = Query(default=25, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+        query: Optional[str] = Query(default=None, description="Substring match on the query"),
+        provider: Optional[str] = Query(default=None),
+        search_status: Optional[str] = Query(
+            default=None, alias="status",
+            description="ok, failed, or an HTTP status code (429: rate-limited, ...)"),
+        since: Optional[float] = Query(default=None, description="UNIX timestamp, inclusive"),
+        until: Optional[float] = Query(default=None, description="UNIX timestamp, inclusive"),
+        sort: str = Query(default="newest", description=", ".join(SEARCH_SORTS)),
+        version: Optional[int] = Query(default=None, description="As for /v1/jobs"),
+) -> dict:
+    """The search requests made through this server, as the UI's History lists them
+    under Searches. Queries are recorded since version 1.8.28; older rows have none."""
+    if version is not None and version == jobs.version:
+        return {"unchanged": True, "version": jobs.version}
+    if sort not in SEARCH_SORTS:
+        raise HTTPException(status_code=400, detail=f"Unknown sort '{sort}'. Allowed: "
+                                                    f"{', '.join(SEARCH_SORTS)}.")
+    criteria = dict(query=query, provider=provider, status=search_status, since=since,
+                    until=until)
+
+    def answer() -> dict:
+        return {"version": jobs.version,
+                "searches": jobs.list_searches(limit=limit, offset=offset, sort=sort, **criteria),
+                "total": jobs.count_searches(**criteria), "stats": jobs.search_stats(),
+                "providers": jobs.search_providers()}
     return await asyncio.to_thread(answer)
 
 

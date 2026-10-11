@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Tone } from '~/composables/useHealth'
+import type { HealthTone } from '~/composables/useHealth'
 
 /**
  * Measuring scrapeMM: one button runs the whole suite of known URLs as a job, the page
@@ -180,7 +180,7 @@ function secs(value: number | null | undefined) {
 
 // Colours for the thresholds, which are the same wherever a measure appears: here, on
 // the dashboard and in the sidebar's indicator for this page (see useHealth.ts)
-const TONE_COLOR: Record<Tone, string> = {
+const TONE_COLOR: Record<HealthTone, string> = {
   success: 'var(--viz-good)', warning: 'var(--viz-warning)',
   error: 'var(--viz-critical)', neutral: 'var(--viz-seq)',
 }

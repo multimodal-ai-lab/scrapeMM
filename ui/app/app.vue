@@ -40,7 +40,7 @@ const links: NavLink[] = [
       { label: 'Search', icon: 'i-fa7-solid-magnifying-glass', to: '/playground/search' },
     ],
   },
-  { label: 'Jobs', icon: 'i-fa7-solid-clock-rotate-left', to: '/jobs' },
+  { label: 'History', icon: 'i-fa7-solid-clock-rotate-left', to: '/history' },
   { label: 'Statistics', icon: 'i-fa7-solid-chart-column', to: '/statistics' },
   { label: 'Test', icon: 'i-fa7-solid-flask', to: '/test' },
   { label: 'CAPTCHA', icon: 'i-fa7-solid-shield-halved', to: '/captcha' },
@@ -302,7 +302,7 @@ async function signIn() {
         class="flex-1 p-6 overflow-x-hidden min-w-0 transition-[margin] duration-200 ease-out"
         :class="collapsed ? 'ml-16' : 'ml-56'"
       >
-        <!-- The jobs overview is kept alive: coming back from a job shows it exactly as
+        <!-- The History is kept alive: coming back from a job shows it exactly as
              it was left -- filters, sorting, everything loaded and the scroll position,
              which the router restores once the page is there again -->
         <template v-if="adminPage && !isAdmin">
@@ -312,7 +312,7 @@ async function signIn() {
             description="This page needs an Admin or Root API key. Ask an admin of this server for one, or sign in with one."
           />
         </template>
-        <NuxtPage v-else :keepalive="{ include: ['JobsOverview'] }" />
+        <NuxtPage v-else :keepalive="{ include: ['HistoryOverview'] }" />
       </main>
     </div>
   </UApp>

@@ -6,28 +6,28 @@
  * The rule for the sidebar's indicators: yellow means something wants attention at some
  * point (something new turned up), red means something went wrong and wants it now.
  */
-export type Tone = 'success' | 'warning' | 'error' | 'neutral'
+export type HealthTone = 'success' | 'warning' | 'error' | 'neutral'
 
 /** Up to 10 s is fast, up to 20 s acceptable, beyond that slow */
-export function timeTone(value: number | null | undefined): Tone {
+export function timeTone(value: number | null | undefined): HealthTone {
   if (value == null) return 'neutral'
   return value <= 10 ? 'success' : value <= 20 ? 'warning' : 'error'
 }
 
 /** Test coverage: at least 95% is good, at least 70% acceptable, below that poor */
-export function coverageTone(value: number | null | undefined): Tone {
+export function coverageTone(value: number | null | undefined): HealthTone {
   if (value == null) return 'neutral'
   return value >= 0.95 ? 'success' : value >= 0.7 ? 'warning' : 'error'
 }
 
 /** At least 95% is good, at least 80% acceptable, below that poor */
-export function shareTone(value: number | null | undefined): Tone {
+export function shareTone(value: number | null | undefined): HealthTone {
   if (value == null) return 'neutral'
   return value >= 0.95 ? 'success' : value >= 0.8 ? 'warning' : 'error'
 }
 
 /** The success rate: above 95% good, from 80% acceptable, below that poor */
-export function rateTone(rate: number | null | undefined): Tone {
+export function rateTone(rate: number | null | undefined): HealthTone {
   if (rate == null) return 'neutral'
   return rate > 0.95 ? 'success' : rate >= 0.8 ? 'warning' : 'error'
 }
@@ -40,14 +40,14 @@ export function mediaShare(media: any): number | null {
 }
 
 /** Media crowding out its own headroom is worth saying before it stops the server */
-export function diskTone(media: any): Tone {
+export function diskTone(media: any): HealthTone {
   const share = mediaShare(media)
   if (share == null) return 'neutral'
   return share >= 0.95 ? 'error' : share >= 0.85 ? 'warning' : 'neutral'
 }
 
 /** The worse of some tones: error over warning over success over neutral */
-export function worst(tones: Tone[]): Tone {
+export function worst(tones: HealthTone[]): HealthTone {
   for (const tone of ['error', 'warning', 'success'] as const) {
     if (tones.includes(tone)) return tone
   }
@@ -72,7 +72,7 @@ export function useAttention() {
   })
 
   /** A run under way, or how the latest one went until the Test page was opened */
-  const test = computed<'running' | Tone | null>(() => {
+  const test = computed<'running' | HealthTone | null>(() => {
     const t = environment.value?.test
     if (!t) return null
     if (t.running) return 'running'
@@ -87,7 +87,7 @@ export function useAttention() {
   const statuses = computed(() => {
     const env = environment.value
     if (!env) return []
-    const rows: { label: string, tone: Tone }[] = [
+    const rows: { label: string, tone: HealthTone }[] = [
       { label: 'Success rate', tone: rateTone(env.throughput?.success_rate?.rate) },
       { label: 'Scraping time', tone: timeTone(env.throughput?.scrape_times?.median) },
       { label: 'Awaiting CAPTCHA', tone: env.captcha?.waiting ? 'warning' : 'neutral' },
@@ -99,7 +99,7 @@ export function useAttention() {
   })
 
   /** The logo's colour: green unless a status card is yellow or red. Neutral until known. */
-  const health = computed<Tone>(() => {
+  const health = computed<HealthTone>(() => {
     if (!statuses.value.length) return 'neutral'
     const tone = worst(statuses.value.map((s) => s.tone))
     return tone === 'neutral' ? 'success' : tone
@@ -108,7 +108,7 @@ export function useAttention() {
   return { captchaNew, blacklistNew, test, statuses, health }
 }
 
-export function proxyTone(proxy: any): Tone {
+export function proxyTone(proxy: any): HealthTone {
   const test = proxy.last_test
   return test && !test.ok ? 'warning' : proxy.enabled ? 'success' : 'neutral'
 }

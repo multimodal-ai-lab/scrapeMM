@@ -266,7 +266,7 @@ const domainItems = computed(() => (data.value?.failing_domains || []).map((d: a
 })))
 
 function jobsLinkFor(domain: string) {
-  return { path: '/jobs', query: { url: domain, outcome: 'error' } }
+  return { path: '/history', query: { view: 'retrievals', url: domain, outcome: 'error' } }
 }
 </script>
 

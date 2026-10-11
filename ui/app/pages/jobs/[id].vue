@@ -41,12 +41,12 @@ async function loadContent(url: string) {
   return (await api.get<any>(`/v1/jobs/${route.params.id}/content?${query}`)).content
 }
 
-/** Back to the overview as it was left -- the browser's back, when that is where we
+/** Back to the History as it was left -- the browser's back, when that is where we
  *  came from; a fresh navigation would start the list over at the top. */
-function backToJobs() {
+function backToHistory() {
   const previous = (window.history.state as any)?.back as string | undefined
-  if (previous?.startsWith('/jobs') && !previous.startsWith('/jobs/')) router.back()
-  else router.push('/jobs')
+  if (previous?.startsWith('/history')) router.back()
+  else router.push('/history')
 }
 
 const { acting, urlAction, runUrlAction } = useUrlActions()
@@ -85,7 +85,7 @@ async function interrupt() {
 async function remove() {
   try {
     await api.del(`/v1/jobs/${route.params.id}`)
-    router.push('/jobs')
+    router.push('/history')
   } catch (e: any) {
     error.value = e.message
   }
@@ -160,7 +160,7 @@ onBeforeUnmount(stopFollowing)
       <div class="min-w-0">
         <UButton
           class="-ml-3 mb-1 transition-transform duration-150 hover:-translate-x-0.5"
-          variant="link" icon="i-fa7-solid-arrow-left" label="All jobs" @click="backToJobs"
+          variant="link" icon="i-fa7-solid-arrow-left" label="History" @click="backToHistory"
         />
         <!-- From the requested URLs, which exist before any result does -->
         <h1 class="text-2xl font-semibold flex items-baseline gap-2 min-w-0">

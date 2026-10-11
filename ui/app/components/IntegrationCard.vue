@@ -63,9 +63,10 @@ const retrievals = computed(() => compact(props.item.retrievals || 0))
 const explanation = computed(() => props.item.detail || tone.value.label)
 
 // Retrieval methods are recorded in the history under their lower-case name; search
-// providers retrieve nothing, so they have no jobs to show
-const historyLink = computed(() => props.item.kind === 'search' ? undefined
-  : `/jobs?method=${encodeURIComponent(props.item.name.toLowerCase())}`)
+// providers have their searches
+const historyLink = computed(() => props.item.kind === 'search'
+  ? `/history?view=searches&provider=${encodeURIComponent(props.item.key)}`
+  : `/history?view=retrievals&method=${encodeURIComponent(props.item.name.toLowerCase())}`)
 
 function open() {
   if (historyLink.value) navigateTo(historyLink.value)
@@ -76,7 +77,7 @@ function open() {
   <div
     class="group relative surface-card rounded-xl p-3.5 flex flex-col h-full"
     :class="[tone.surface, historyLink ? 'cursor-pointer' : '']"
-    :title="historyLink ? 'Show the jobs that used this method' : undefined"
+    :title="item.kind === 'search' ? 'Show the searches made with this provider' : 'Show the retrievals of this method'"
     @click="open"
   >
     <div class="flex items-start gap-3.5">
