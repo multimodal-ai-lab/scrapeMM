@@ -1,6 +1,6 @@
 """The time a browser retrieval has left, so that its media give up before it does.
 
-A browser retrieval is cut off after `BROWSER_RETRIEVAL_TIMEOUT` seconds, and a page that
+A browser retrieval is cut off after its `retrieval_timeout` (120 s, archives 180 s), and a page that
 is cut off is lost as a whole. A medium that is slow (a video trickling in through an
 archive's replay) used to hold the retrieval until that limit, which failed the page
 (perma.cc/75EG-E5GK: ten minutes, then nothing). Everything that waits for a medium is

@@ -570,6 +570,10 @@ TAB_ANSWER_TIMEOUT = 3
 # What is slow to arrive (a video in an archive's replay) gives up before this, so that
 # the page comes back without it instead of failing as a whole (see `budget`).
 BROWSER_RETRIEVAL_TIMEOUT = 120
+# The archives that replay a capture (Perma.cc, the Internet Archive, Ghostarchive) render
+# it in nested frames and serve its media slowly (web.archive.org: ~330 KB/s for a client):
+# a capture with a video took up to 115 s and was cut off at 120 s now and then
+ARCHIVE_RETRIEVAL_TIMEOUT = 180
 
 # The tabs that running retrievals opened (CDP target ids). Any other tab showing a
 # page may be left over -- see `_close_orphaned_tabs()`.
@@ -1234,6 +1238,7 @@ class HeadedBrowser(RetrievalIntegration):
     # the archive integrations: a replay may pass on the archived page's own status.
     fails_on_not_found = False
     waits_for_browser_slot = True  # Its time starts with a slot, see `_get()`
+    retrieval_timeout: ClassVar[float] = BROWSER_RETRIEVAL_TIMEOUT  # Seconds, see `_get()`
     # Seconds a page gets to load its document, and whether a page that missed that is
     # tried once more on a new tab (under load, a page that is quick alone can miss it)
     navigation_timeout: ClassVar[float] = 60
@@ -1522,12 +1527,12 @@ class HeadedBrowser(RetrievalIntegration):
             await slot.acquire()
             timing.wait_for_slot(time.time() - waiting_since)
             timing.work_started()
-            budget.start(BROWSER_RETRIEVAL_TIMEOUT)  # Inherited by the task below
+            budget.start(self.retrieval_timeout)  # Inherited by the task below
             # Not asyncio.wait_for(): that waits for the cancelled retrieval to wind
             # down, and a stuck one may never do so. The slot is freed right away instead.
             task = asyncio.ensure_future(self._browse(url, slot=slot, **kwargs))
             try:
-                done, _ = await asyncio.wait({task}, timeout=BROWSER_RETRIEVAL_TIMEOUT)
+                done, _ = await asyncio.wait({task}, timeout=self.retrieval_timeout)
             except asyncio.CancelledError:
                 task.cancel()  # The caller gave up (e.g. a run was stopped): so does this
                 raise
@@ -1536,7 +1541,7 @@ class HeadedBrowser(RetrievalIntegration):
             task.cancel()
             task.add_done_callback(lambda t: t.cancelled() or t.exception())  # No "never retrieved" noise
             raise RetrievalFailed(f"{self.name} did not finish retrieving {url} within "
-                                  f"{BROWSER_RETRIEVAL_TIMEOUT // 60} minutes; given up.")
+                                  f"{self.retrieval_timeout:.0f} s; given up.")
         finally:
             slot.release()
 

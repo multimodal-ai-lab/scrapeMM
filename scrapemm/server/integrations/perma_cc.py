@@ -10,7 +10,7 @@ from playwright.async_api import TimeoutError, Page, Frame, Error as PlaywrightE
 from scrapemm.server import budget
 from scrapemm.server.download.browser import MAX_IMAGE_BYTES, MAX_VIDEO_BYTES, BLOB_ATTR, install_stash
 from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget, settle_dom, \
-    renderer_crashed, evaluate_within
+    renderer_crashed, evaluate_within, ARCHIVE_RETRIEVAL_TIMEOUT
 from scrapemm.common import RetrievalFailed
 from scrapemm.common.exceptions import TargetUnavailableError
 from scrapemm.common.scraping_response import ScrapedContent
@@ -87,6 +87,7 @@ RETRY_BUDGET = 240
 class PermaCC(HeadedBrowser):
     name = "Perma.cc"
     domains = ["perma.cc"]
+    retrieval_timeout = ARCHIVE_RETRIEVAL_TIMEOUT
 
     # TODO: Implement PDF support, e.g., https://perma.cc/83VA-LTH9
 

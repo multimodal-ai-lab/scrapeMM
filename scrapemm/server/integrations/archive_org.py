@@ -11,7 +11,8 @@ from playwright.async_api import TimeoutError, Page, Frame, Error as PlaywrightE
 
 from scrapemm.common import RetrievalFailed
 from scrapemm.common.exceptions import TargetUnavailableError
-from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget, settle_dom
+from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget, settle_dom, \
+    ARCHIVE_RETRIEVAL_TIMEOUT
 from scrapemm.server.download.browser import (BLOB_ATTR, MAX_VIDEO_BYTES, install_stash,
                                               _WAYBACK_URL)
 from scrapemm.server.integrations.perma_cc import _stash_media_in_frame
@@ -201,6 +202,7 @@ class ArchiveOrg(HeadedBrowser):
     """Integration for retrieving content from archive.org (Internet Archive)."""
     name = "Internet Archive"
     domains = ["archive.org"]
+    retrieval_timeout = ARCHIVE_RETRIEVAL_TIMEOUT
 
     def _watch_page(self, page: Page) -> None:
         """Records the video responses the archive actually served while the page loaded.
