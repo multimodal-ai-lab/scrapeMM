@@ -203,8 +203,6 @@ class ArchiveOrg(HeadedBrowser):
     name = "Internet Archive"
     domains = ["archive.org"]
     retrieval_timeout = ARCHIVE_RETRIEVAL_TIMEOUT
-    captures_playback = True
-    playback_ignore = _VIDEO_DECOYS
 
     def _watch_page(self, page: Page) -> None:
         """Records the video responses the archive actually served while the page loaded.
@@ -252,9 +250,6 @@ class ArchiveOrg(HeadedBrowser):
             if fetched:
                 return
             size, url = max(videos)  # The largest is the content, not a preview
-            media = getattr(page, "_scrapemm_media", None)
-            if media is not None and media.has_playback(url):
-                return  # The player downloaded it: completed later, not fetched again
             result = await _stash_video(frame, url)
             if result == "ok":
                 logger.debug(f"Fetched the video the archive served at {url}.")

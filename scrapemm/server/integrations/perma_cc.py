@@ -466,29 +466,10 @@ def _playback_urls(frame) -> set[str]:
     return media.playback_urls() if media is not None else set()
 
 
-_VIDEO_URLS_JS = """() => [...document.querySelectorAll('video, video source')]
-    .map(v => v.currentSrc || v.getAttribute('src') || '')
-    .filter(u => /^https?:/.test(u))"""
-
-
-async def _prefetch_videos(frames) -> None:
-    """Has this server download the frames' videos that are not downloading yet (see
-    `BrowserMedia.prefetch_video()`): those the page never requested itself."""
-    page = getattr(frames[0], "page", None)
-    media = getattr(page, "_scrapemm_media", None)
-    if media is None or not media.watching:
-        return  # Not a page whose videos are downloaded alongside (`captures_playback`)
-    for f in frames:
-        with suppress(PlaywrightError, asyncio.TimeoutError):
-            for url in await asyncio.wait_for(f.evaluate(_VIDEO_URLS_JS), 5):
-                media.prefetch_video(url)
-
-
 async def _stop_playback(frame: Frame) -> None:
     """Pauses the media of the frame and of the frames within it. Best-effort: a frame
     that does not answer keeps playing, which costs time, not the retrieval."""
     frames = [frame, *frame.child_frames]
-    await _prefetch_videos(frames)
     for f in frames:
         with suppress(PlaywrightError, asyncio.TimeoutError):
             await asyncio.wait_for(f.evaluate(_STOP_PLAYBACK_JS), 5)
@@ -647,10 +628,6 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
                 timeoutMs: kind === 'image' ? opts.imageTimeoutMs : opts.videoTimeoutMs });
               // Media an earlier pass over the page gave up on are not waited for again
               const skip = new Set(opts.skipUrls || []);
-              // Videos a player downloaded: taken from that download later, not fetched here,
-              // and no fallback looks for another copy of them (`videoCovered`)
-              const playback = new Set(opts.playbackUrls || []);
-              let videoCovered = 0;
               const timedOut = [];
               window.__scrapemmStashTimeout = opts.videoTimeoutMs;
               const hasBlob = (el) => el.hasAttribute(blobAttr);
@@ -665,7 +642,6 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
                   const i = idx++;
                   if (i >= tasks.length) break;
                   const t = tasks[i];
-                  if (t.kind === 'video' && playback.has(t.url)) { videoCovered++; continue; }
                   if (skip.has(t.url)) { skipped++; continue; }
                   try {
                     const res = await stashFor(t.url, t.kind);
@@ -797,7 +773,7 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
                 } catch (_) { return false; }
               };
 
-              if (videoInlined === 0 && videoCovered === 0) {
+              if (videoInlined === 0) {
                 try { await tryInlineTikTok(); } catch (_) { /* ignore */ }
               }
 
@@ -853,13 +829,13 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
 
               const stillNeedsVideo = [...document.querySelectorAll('video')].some((v) => {
                 const s = v.getAttribute('src') || '';
-                return !hasBlob(v) && (s.startsWith('blob:') || (videoInlined === 0 && videoCovered === 0));
+                return !hasBlob(v) && (s.startsWith('blob:') || videoInlined === 0);
               });
               if (stillNeedsVideo) {
                 try { await tryInlineReplayMp4(); } catch (_) { /* ignore */ }
               }
 
-              return { total: tasks.length, inlined, skipped, videoInlined, videoCovered, timedOut };
+              return { total: tasks.length, inlined, skipped, videoInlined, timedOut };
             }
             """,
             {
@@ -869,8 +845,8 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
                 "blobAttr": BLOB_ATTR,
                 "imageTimeoutMs": int(image_seconds * 1000),
                 "videoTimeoutMs": int(video_seconds * 1000),
-                "skipUrls": sorted(budget.abandoned()),
-                "playbackUrls": sorted(_playback_urls(frame)),
+                # Also what a player downloaded: completed later, not fetched again
+                "skipUrls": sorted(budget.abandoned() | _playback_urls(frame)),
             },
         ), timeout=video_seconds + 15)
         logger.debug(f"Fetched in {frame.url[:120]}: {result}")

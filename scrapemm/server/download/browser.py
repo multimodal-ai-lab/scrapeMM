@@ -40,11 +40,6 @@ logger = logging.getLogger("scrapeMM")
 MAX_IMAGE_BYTES = 50 * 1024 * 1024  # 50 MB
 MAX_VIDEO_BYTES = 250 * 1024 * 1024  # 250 MB
 
-# Seconds for the rest of a video a player had begun downloading (see `_from_playback()`)
-PLAYBACK_REST_TIMEOUT = 90
-# Seconds for a video this server downloads alongside the page (see `prefetch_video()`)
-PREFETCH_TIMEOUT = 120
-
 # Attributes the page-side scripts leave on media elements for `resolve_media()`
 BLOB_ATTR = "data-scrapemm-blob"  # Id of a Blob already fetched inside the frame
 CURRENT_ATTR = "data-scrapemm-current"  # The URL the browser actually rendered
@@ -203,20 +198,6 @@ def _too_large(headers: dict, limit: Optional[int]) -> bool:
     return bool(limit and length and length.isdigit() and int(length) > limit)
 
 
-class _Playback:
-    """What a page's player downloaded of one video, as it arrived (see
-    `BrowserMedia.watch_playback()`)."""
-
-    def __init__(self, total: int):
-        self.total = total  # Bytes of the whole file, 0 if unknown, -1 if unusable
-        self.chunks: list[bytes] = []
-        self.done = False  # The player's request ended (finished, or aborted)
-
-    @property
-    def received(self) -> int:
-        return sum(len(chunk) for chunk in self.chunks)
-
-
 class BrowserMedia:
     """The media of one page, as the browser has them. Create it before navigating, so it
     sees every response the page receives."""
@@ -233,14 +214,6 @@ class BrowserMedia:
         self._cookie_hosts: set[str] = set()
         self.stats: Counter = Counter()  # Where the media came from, for the log
         self._last_failure: dict[str, str] = {}  # Why fetching a medium failed, by URL
-        # The players' video downloads, by URL (see `watch_playback()`)
-        self._playback: dict[str, list[_Playback]] = {}
-        self._playback_requests: dict[str, _Playback] = {}  # By CDP request id
-        self._request_urls: dict[str, str] = {}  # The first URL of each request id
-        # Videos downloaded by this server alongside the page, by URL (see `prefetch_video()`)
-        self._prefetches: dict[str, asyncio.Task] = {}
-        self._prefetch_ignore: tuple[str, ...] = ()
-        self.watching = False  # Whether the page's videos are downloaded alongside it
         try:
             page.on("response", self._record)
         except Exception:
@@ -269,12 +242,6 @@ class BrowserMedia:
             self.page.remove_listener("response", self._record)
         self._loaded.clear()
         self._replay_frames.clear()
-        self._playback.clear()
-        self._playback_requests.clear()
-        self._request_urls.clear()
-        for task in self._prefetches.values():
-            task.cancel()
-        self._prefetches.clear()
         session, self._session = self._session, None
         if session is not None:
             with suppress(Exception):
@@ -312,185 +279,6 @@ class BrowserMedia:
                 logger.debug(f"Could not take over the browser's cookies for {host}.",
                              exc_info=True)
         return self._http
-
-    # --- The players' own downloads -------------------------------------------------
-
-    async def watch_playback(self, ignore: tuple[str, ...] = ()) -> None:
-        """Records the videos the page's players download, as the bytes arrive (CDP's
-        `Network.streamResourceContent`), so that a video is not downloaded a second time.
-
-        An archive serves a client only so fast (web.archive.org ~330 KB/s), and fetching
-        a replay's video only once the page was ready cost a minute for a few MB -- while
-        the player had been downloading that very file since the page loaded. A player
-        requests the whole file, but stops once it has buffered enough: what it has is
-        taken, and only the rest is fetched (`_from_playback()`). Call before navigating.
-
-        Where the browser cannot play the video, its player downloads nothing: the
-        server's Chromium for Testing lacks the H.264 codec, so a replayed TikTok player
-        stayed at `readyState` 0. The page still requests the video, so that request
-        starts this server's own download of it (`prefetch_video()`). URLs containing one
-        of `ignore` (e.g. a login page's decoy clip) are not downloaded."""
-        self._prefetch_ignore = ignore
-        self.watching = True
-        try:
-            session = await self._cdp()
-            await session.send("Network.enable")
-            session.on("Network.requestWillBeSent", self._on_request)
-            session.on("Network.responseReceived", self._on_video_response)
-            session.on("Network.dataReceived", self._on_data)
-            session.on("Network.loadingFinished", self._on_finished)
-            session.on("Network.loadingFailed", self._on_finished)
-        except Exception as e:
-            self.stats["player not watched"] += 1
-            logger.debug("Cannot watch the page's video downloads; videos will be fetched.",
-                         exc_info=True)
-
-    def _on_request(self, event: dict) -> None:
-        # Redirects keep the request id: the URL the page asked for is the first one
-        self._request_urls.setdefault(event["requestId"], event["request"]["url"])
-        if event.get("type") == "Media":
-            self.prefetch_video(event["request"]["url"])
-
-    def prefetch_video(self, url: str) -> None:
-        """Starts downloading the video at `url` with this server's own HTTP client, unless
-        that is under way already: alongside the page, which goes on loading and settling
-        meanwhile, and outside the browser, whose connection the page's other requests
-        share. The archive answers a client of its own at full speed (web.archive.org: a
-        1 MB video in 2.5 s from the server)."""
-        if (not url.startswith(("http://", "https://")) or url in self._prefetches
-                or any(part in url.lower() for part in self._prefetch_ignore)):
-            return
-        self._prefetches[url] = asyncio.ensure_future(self._download_video(url))
-
-    async def _download_video(self, url: str) -> Optional[bytes]:
-        try:
-            session = await self._http_session(url)
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=PREFETCH_TIMEOUT)) as response:
-                content_type = response.headers.get("Content-Type", "")
-                if response.status not in (200, 206) or not content_type.startswith("video/"):
-                    logger.debug(f"Not prefetching {url[:100]}: HTTP {response.status} {content_type}.")
-                    return None
-                span = response.headers.get("Content-Range", "")
-                if response.status == 206 and not span.startswith("bytes 0-"):
-                    return None
-                if _too_large(response.headers, MAX_VIDEO_BYTES):
-                    return None
-                data = await response.read()
-                size = span.rpartition("/")[2]
-                if size.isdigit() and len(data) != int(size):
-                    return None  # Only part of it
-                return data
-        except Exception as e:
-            logger.debug(f"Prefetching {url[:100]} failed: {type(e).__name__}: {e}")
-            return None
-
-    def _on_video_response(self, event: dict) -> None:
-        try:
-            response = event["response"]
-            headers = {k.lower(): v for k, v in response.get("headers", {}).items()}
-            is_video = (response.get("mimeType", "").startswith("video/")
-                        or headers.get("content-type", "").startswith("video/"))
-            span = headers.get("content-range", "")
-            # The whole file from its start: a range further in is of no use on its own
-            if not is_video or not (response["status"] == 200
-                                    or (response["status"] == 206 and span.startswith("bytes 0-"))):
-                return
-            size = span.rpartition("/")[2]
-            total = int(size) if size.isdigit() else int(headers.get("content-length") or 0)
-            if total > MAX_VIDEO_BYTES:
-                return
-            capture = _Playback(total)
-            self.stats["player"] += 1  # For the log: what the players downloaded
-            request_id = event["requestId"]
-            self._playback_requests[request_id] = capture
-            for url in {response["url"], self._request_urls.get(request_id)} - {None}:
-                self._playback.setdefault(url, []).append(capture)
-            asyncio.ensure_future(self._stream(request_id, capture))
-        except Exception:
-            logger.debug("Could not watch a video download.", exc_info=True)
-
-    async def _stream(self, request_id: str, capture: _Playback) -> None:
-        """Has the browser pass on the bytes of a request: those it buffered until now,
-        and from then on each chunk with its `dataReceived` event."""
-        try:
-            answer = await self._session.send("Network.streamResourceContent",
-                                              {"requestId": request_id})
-            capture.chunks.insert(0, base64.b64decode(answer.get("bufferedData") or ""))
-        except Exception:
-            self._playback_requests.pop(request_id, None)
-            capture.chunks.clear()
-            capture.total = -1  # Unusable: never taken
-            self.stats["player stream failed"] += 1
-            logger.debug("Could not stream a video download.", exc_info=True)
-
-    def _on_data(self, event: dict) -> None:
-        capture = self._playback_requests.get(event["requestId"])
-        if capture is not None and event.get("data"):
-            capture.chunks.append(base64.b64decode(event["data"]))
-
-    def _on_finished(self, event: dict) -> None:
-        if (capture := self._playback_requests.get(event["requestId"])) is not None:
-            capture.done = True
-
-    def has_playback(self, url: str) -> bool:
-        """Whether a player downloaded (some of) the video at `url`, or this server is
-        downloading it (`prefetch_video()`)."""
-        if (task := self._prefetches.get(url)) is not None and task.done()                 and not task.cancelled() and task.result() is not None:
-            # Only once it arrived: one still under way may yet fail, and the frame's own
-            # fallbacks (e.g. TikTok's video address in the page data) must not be skipped
-            return True
-        return any(c.total >= 0 and c.received for c in self._playback.get(url, []))
-
-    def playback_urls(self) -> set[str]:
-        return {url for url in (*self._playback, *self._prefetches) if self.has_playback(url)}
-
-    async def _from_playback(self, url: str, limit: Optional[int]) -> Optional[bytes]:
-        """The video at `url` as this server downloaded it alongside the page, or as a
-        player downloaded it, completed by a request for what it had not downloaded yet.
-        None if neither has it, or the parts do not fit together (then the video is
-        fetched as usual)."""
-        if (task := self._prefetches.get(url)) is not None:
-            seconds = budget.cap(PREFETCH_TIMEOUT)
-            data = None
-            if seconds > 0:
-                with suppress(Exception):
-                    data = await asyncio.wait_for(asyncio.shield(task), seconds)
-            if data is not None and not (limit and len(data) > limit):
-                self.stats["prefetched"] += 1
-                return data
-        captures = [c for c in self._playback.get(url, []) if c.total >= 0 and c.received]
-        if not captures:
-            return None
-        capture = max(captures, key=lambda c: c.received)
-        data = b"".join(capture.chunks)
-        if capture.total and len(data) > capture.total:
-            return None
-        if capture.total and len(data) < capture.total:
-            try:
-                session = await self._http_session(url)
-                seconds = budget.cap(PLAYBACK_REST_TIMEOUT)
-                if seconds <= 0:
-                    return None
-                async with session.get(url, headers={"Range": f"bytes={len(data)}-"},
-                                       timeout=aiohttp.ClientTimeout(total=seconds)) as response:
-                    span = response.headers.get("Content-Range", "")
-                    if response.status != 206 or not span.startswith(f"bytes {len(data)}-"):
-                        logger.debug(f"The rest of {url[:100]} did not come as a range: "
-                                     f"HTTP {response.status} {span!r}.")
-                        return None
-                    rest = await response.read()
-            except Exception as e:
-                logger.debug(f"Could not fetch the rest of {url[:100]}: {type(e).__name__}: {e}")
-                return None
-            logger.debug(f"Took {len(data) / 1e6:.1f} of {capture.total / 1e6:.1f} MB of "
-                         f"{url[:100]} from the player; fetched the rest.")
-            data += rest
-        elif not capture.total and not capture.done:
-            return None  # Of unknown size and still arriving: cannot be completed
-        if (capture.total and len(data) != capture.total) or (limit and len(data) > limit):
-            return None
-        self.stats["playback"] += 1
-        return data
 
     def has_copy(self, url: str) -> bool:
         """Whether the browser holds a complete copy of the medium at `url`."""
@@ -530,10 +318,6 @@ class BrowserMedia:
                            max_size: Optional[int], source_url: Optional[str],
                            timeout: float) -> Optional[Video]:
         limit = max_size or MAX_VIDEO_BYTES
-        # What a player downloaded first: an archive serves a video only once at speed
-        for candidate in (url, fallback):
-            if candidate and (content := await self._from_playback(candidate, limit)) is not None:
-                return await asyncio.to_thread(video_from_binary, content, source_url or url)
         content, content_type = await self.get(url, frame, limit, fallback, timeout)
 
         if content is None and (capture := await _nearest_wayback_video(self.page, url)):
