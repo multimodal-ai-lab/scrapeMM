@@ -117,6 +117,7 @@ class PermaCC(HeadedBrowser):
                         f"({shot}).")
             with suppress(PlaywrightError):
                 await page.goto(shot, wait_until="domcontentloaded", timeout=60_000)
+                await self._pass_cloudflare(page)  # Asks again for the new address
         missing = False
         screenshot_view = "type=image" in page.url
         attempts = SCREENSHOT_ATTEMPTS if screenshot_view else 2
@@ -167,6 +168,11 @@ class PermaCC(HeadedBrowser):
                     f"; taking the capture's screenshot ({shot}).")
         try:
             await page.goto(shot, wait_until="domcontentloaded", timeout=60_000)
+            # First: on the challenge page, the address is still the one asked for, and a
+            # record without a screenshot -- which Perma.cc redirects back to its replay
+            # (`?type=standard`) -- looked as if it had one (perma.cc/55YA-N88K: an error
+            # after 87 s, instead of "empty" in 9)
+            await self._pass_cloudflare(page)
             if replayed_empty and "type=image" not in page.url:
                 # Perma.cc sends a record without a screenshot back to the replay
                 raise TargetUnavailableError(
@@ -180,28 +186,9 @@ class PermaCC(HeadedBrowser):
         return target if target is not None and await _shows_content(target) else None
 
     async def _extract_capture(self, page: Page) -> Optional[ContentTarget]:
-        # Check for Cloudflare challenge (passive check)
-        body_text = await page.content()
-        if "Just a moment" in body_text or "Performing security verification" in body_text:
-            logger.info("\rCloudflare challenge detected. Waiting for UC mode to handle it...")
-            try:
-                # Move mouse slightly to simulate interaction if stuck
-                await page.mouse.move(500, 500)
-                # document.body can be null while the challenge page navigates/replaces the DOM.
-                await page.wait_for_function(
-                    """() => {
-                        const body = document.body;
-                        if (!body) return false;
-                        const text = body.innerText || '';
-                        return !text.includes('Just a moment')
-                            && !text.includes('Performing security verification');
-                    }""",
-                    timeout=45000
-                )
-                logger.info("\rCloudflare challenge resolved.")
-                await page.wait_for_timeout(2000)  # Wait for page to settle
-            except TimeoutError:
-                logger.warning("\rCloudflare challenge did not resolve in time.")
+        # A Cloudflare challenge is solved, not waited out: waiting for it to clear by
+        # itself took the full 45 s whenever it asked for the click (perma.cc, since 10-10)
+        await self._pass_cloudflare(page)
 
         # Prefer the content of the Perma.cc archive iframe specifically
         outer_iframe_el = await self._archive_iframe(page)
@@ -470,6 +457,13 @@ async def _settle_media_frame(frame: Frame) -> None:
 _STOP_PLAYBACK_JS = """() => document.querySelectorAll('video, audio').forEach(m => {
     try { m.pause(); m.autoplay = false; m.preload = 'none'; } catch (_) {}
 })"""
+
+
+def _playback_urls(frame) -> set[str]:
+    """The videos the page's players downloaded (see `BrowserMedia.watch_playback()`)."""
+    page = frame if isinstance(frame, Page) else getattr(frame, "page", None)
+    media = getattr(page, "_scrapemm_media", None)
+    return media.playback_urls() if media is not None else set()
 
 
 async def _stop_playback(frame: Frame) -> None:
@@ -851,7 +845,8 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
                 "blobAttr": BLOB_ATTR,
                 "imageTimeoutMs": int(image_seconds * 1000),
                 "videoTimeoutMs": int(video_seconds * 1000),
-                "skipUrls": sorted(budget.abandoned()),
+                # Also what a player downloaded: completed later, not fetched again
+                "skipUrls": sorted(budget.abandoned() | _playback_urls(frame)),
             },
         ), timeout=video_seconds + 15)
         logger.debug(f"Fetched in {frame.url[:120]}: {result}")
