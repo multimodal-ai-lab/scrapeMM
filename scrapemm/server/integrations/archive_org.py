@@ -95,9 +95,10 @@ def _raw_video_candidates(markup: str) -> list[str]:
     return found[:MAX_RAW_VIDEOS]
 
 
-async def _video_from_raw_capture(page: Page, frame: Frame) -> bool:
-    """The last resort for a video page whose replayed player yielded no video: the video
-    its archived markup names, fetched from the Wayback Machine directly.
+async def _video_from_raw_capture(page: Page, frame: Frame) -> tuple[bool, Optional[int]]:
+    """For a video page whose replayed player yielded no video: the video its archived
+    markup names, fetched from the Wayback Machine directly. Returns whether a video was
+    taken, and how many the markup names (None if the markup could not be read).
 
     The markup is the capture as the archive stored it (`id_` mode), before any script
     ran -- so neither a replayed app that went wrong nor a player that never mounted
@@ -107,7 +108,7 @@ async def _video_from_raw_capture(page: Page, frame: Frame) -> bool:
     file (looked up by its path, see `_captured_video()`)."""
     match = _WAYBACK_URL.match(page.url or "")
     if not match:
-        return False
+        return False, None
     timestamp, original = match.groups()
     raw_url = f"https://web.archive.org/web/{timestamp}id_/{original}"
     try:
@@ -122,7 +123,7 @@ async def _video_from_raw_capture(page: Page, frame: Frame) -> bool:
         markup = None
     if not markup:
         logger.info(f"Could not read the raw capture {raw_url}.")
-        return False
+        return False, None
 
     candidates = _raw_video_candidates(markup)
     for video in candidates:
@@ -131,15 +132,15 @@ async def _video_from_raw_capture(page: Page, frame: Frame) -> bool:
             result = await _stash_video(frame, url)
             if result == "ok":
                 logger.info(f"Took the video of {page.url} from its capture's markup: {url}")
-                return True
+                return True, len(candidates)
             logger.debug(f"The video {url} named in the capture could not be fetched: {result}")
         if nearest := await _captured_video(page, timestamp, video):
             if await _stash_video(frame, nearest) == "ok":
                 logger.info(f"Took the video of {page.url} from its capture's markup: {nearest}")
-                return True
+                return True, len(candidates)
     logger.info(f"The capture's markup at {raw_url} names {len(candidates)} video(s); "
                 f"none could be fetched.")
-    return False
+    return False, len(candidates)
 
 
 async def _captured_video(page: Page, timestamp: str, video: str) -> Optional[str]:
@@ -365,22 +366,31 @@ class ArchiveOrg(HeadedBrowser):
             await self._inline_served_video(frame, page)
             if await _collected_video(frame):
                 return frame
-            state = await _page_state(frame)
-            if attempt == 0:
-                logger.info(f"No video collected at {page.url} ({state}); loading the "
-                            f"capture once more.")
-                try:
-                    await page.reload(wait_until="domcontentloaded", timeout=60_000)
-                except PlaywrightError:
-                    logger.debug(f"Reloading {page.url} failed.", exc_info=True)
-                    break
-                await self._settle_after_goto(page)
-                frame = await self._replay_frame(page)
-                await self._wait_playback_frame_ready(frame)
-            else:
-                logger.info(f"The archived player at {page.url} yielded no video ({state}); "
-                            f"looking in the capture's markup.")
-                await _video_from_raw_capture(page, frame)
+            if attempt == 1:
+                logger.info(f"The archived player at {page.url} yielded no video "
+                            f"({await _page_state(frame)}) after loading the capture again.")
+                break
+            # The capture's own markup first: one request, and it does not depend on the
+            # replayed player -- which on the server mostly never gets its video. Loading
+            # the capture again and waiting for the player once more cost 35 s or more,
+            # and was in vain where the capture names no video at all.
+            logger.info(f"No video collected at {page.url} ({await _page_state(frame)}); "
+                        f"looking in the capture's markup.")
+            taken, named = await _video_from_raw_capture(page, frame)
+            if taken:
+                return frame
+            if named == 0:
+                logger.info(f"The capture at {page.url} names no video; not loading it again.")
+                break
+            logger.info(f"Loading the capture at {page.url} once more.")
+            try:
+                await page.reload(wait_until="domcontentloaded", timeout=60_000)
+            except PlaywrightError:
+                logger.debug(f"Reloading {page.url} failed.", exc_info=True)
+                break
+            await self._settle_after_goto(page)
+            frame = await self._replay_frame(page)
+            await self._wait_playback_frame_ready(frame)
         return frame
 
     @staticmethod
