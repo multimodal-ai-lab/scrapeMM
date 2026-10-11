@@ -183,16 +183,16 @@ const TONE_COLOR: Record<Tone, string> = {
   error: 'var(--viz-critical)', neutral: 'var(--viz-seq)',
 }
 
-/** Up to 5 s is fast, up to 20 s acceptable, beyond that slow */
+/** Up to 10 s is fast, up to 20 s acceptable, beyond that slow (as on the dashboard) */
 function timeTone(value: number | null | undefined): Tone {
   if (value == null) return 'neutral'
-  return value <= 5 ? 'success' : value <= 20 ? 'warning' : 'error'
+  return value <= 10 ? 'success' : value <= 20 ? 'warning' : 'error'
 }
 
-/** Coverage: at least 90% is good, at least 70% acceptable, below that poor */
+/** Coverage: at least 95% is good, at least 70% acceptable, below that poor */
 function coverageTone(value: number | null | undefined): Tone {
   if (value == null) return 'neutral'
-  return value >= 0.9 ? 'success' : value >= 0.7 ? 'warning' : 'error'
+  return value >= 0.95 ? 'success' : value >= 0.7 ? 'warning' : 'error'
 }
 
 /** At least 95% is good, at least 80% acceptable, below that poor */
