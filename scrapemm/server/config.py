@@ -188,8 +188,10 @@ def schema() -> list[dict]:
               "Seconds between the starts of two retrievals by the method (plus up to 50% "
               "jitter); 0 for none.", "parallelism", unit="s", min=0),
         entry("max_browser_pages", DEFAULT_MAX_BROWSER_PAGES, "Max concurrent browser pages",
-              "Pages open in the server's browser at once (the Browser method, the "
-              "archives); lower it if the server runs short of memory.", "parallelism", min=1),
+              "Pages open at once in the server's one shared browser, whichever method "
+              "opened them: the Browser method and the archive replays (Wayback, Perma.cc, "
+              "Ghostarchive, Archive.today) draw on the same pages. Each page costs memory: "
+              "lower this if the server runs short of it.", "parallelism", min=1),
         entry("max_search_concurrency", DEFAULT_MAX_SEARCH_CONCURRENCY,
               "Max concurrent searches",
               "Searches with a search provider at once, across all clients; keeps bursts "

@@ -231,6 +231,17 @@ onBeforeUnmount(() => clearInterval(statsTimer))
 
           <template v-else-if="e.id === 'parallelism'">
             <ParallelismEditor />
+            <!-- The one place where two limits stack, which the table alone does not show -->
+            <UAlert
+              color="neutral" variant="subtle" icon="i-fa7-solid-circle-info"
+              title="Browser slots and browser pages"
+              description="Slots are per method; pages are the shared browser's. A Browser
+                retrieval needs a Browser slot, then a free page — and the archive replays
+                (Wayback, Perma.cc, Ghostarchive, Archive.today) take pages from the same
+                pool. With as many Browser slots as pages, the Browser method alone can fill
+                the browser and leave the archives waiting: give it fewer slots than there
+                are pages to keep some for them."
+            />
             <SettingsFields section="parallelism" title="Parallelism: settings" />
             <p v-if="server && !server.methods.length && !scalarCount('parallelism')" class="text-sm text-muted">
               This server does not tell the methods' limits yet.
