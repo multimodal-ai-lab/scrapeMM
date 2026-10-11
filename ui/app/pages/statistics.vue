@@ -245,8 +245,11 @@ const histogramItems = computed(() => {
   const total = bins.reduce((sum: number, b: any) => sum + b.count, 0)
   return bins.map((b: any) => {
     const range = b.to == null ? `${b.from}+ s` : `${b.from}–${b.to} s`
+    // The thresholds of the median time cards: fast up to 10 s, slow up to 20 s, beyond bad
+    const color = b.to != null && b.to <= 10 ? 'var(--viz-good)'
+      : b.to != null && b.to <= 20 ? 'var(--viz-warning)' : 'var(--viz-critical)'
     return {
-      label: b.to == null ? `${b.from}+` : `${b.from}`, value: b.count,
+      label: b.to == null ? `${b.from}+` : `${b.from}`, value: b.count, color,
       tooltip: `${range}: ${compact(b.count)} retrievals`
         + (total ? ` (${(b.count / total * 100).toFixed(1)}%)` : ''),
     }
@@ -396,7 +399,7 @@ function jobsLinkFor(domain: string) {
         <UCard>
           <template #header>
             <h2 class="font-medium text-sm">Distribution of retrieval times</h2>
-            <p class="text-xs text-dimmed mt-0.5">Retrieved URLs, cache hits excluded, in 5 s bins (seconds), {{ rangeLabel }}</p>
+            <p class="text-xs text-dimmed mt-0.5">Retrieved URLs, cache hits excluded, in 5 s bins (seconds), green up to 10 s, yellow up to 20 s, {{ rangeLabel }}</p>
           </template>
           <VizColumnChart :items="histogramItems" :height="120" :format="(v: number) => compact(v)" />
         </UCard>
