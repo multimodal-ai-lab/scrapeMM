@@ -107,3 +107,15 @@ def test_registry_info_defaults_are_safe():
 def test_server_error_is_transportable():
     restored = exception_from_wire(exception_to_wire(ServerError("down")))
     assert isinstance(restored, ServerError)
+
+
+def test_an_unavailable_service_keeps_its_name_and_stays_a_failed_retrieval():
+    """An archive that is down or overloaded (HTTP 503): its own error type, not a plain
+    RetrievalFailed, so a client can tell "try again later" from a method that failed."""
+    from scrapemm.common.exceptions import (RetrievalFailed, ServiceUnavailableError,
+                                            exception_from_wire, exception_to_wire)
+    from scrapemm.common.outcome import classify
+    error = ServiceUnavailableError("Internet Archive is unavailable right now (HTTP 503).")
+    back = exception_from_wire(exception_to_wire(error))
+    assert type(back) is ServiceUnavailableError and isinstance(back, RetrievalFailed)
+    assert classify(False, {"Internet Archive": exception_to_wire(error)}) == ("error", "error")

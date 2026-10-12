@@ -28,7 +28,7 @@ from seleniumbase import cdp_driver
 from seleniumbase.undetected.cdp_driver.browser import Browser
 
 from scrapemm.common import RetrievalFailed
-from scrapemm.common.exceptions import TargetUnavailableError, RegionBlockedError
+from scrapemm.common.exceptions import TargetUnavailableError, RegionBlockedError, ServiceUnavailableError
 from scrapemm.server.download.documents import document_extension
 from scrapemm.server import screenshot, timing
 from scrapemm.server.config import get_config_var, get_setting
@@ -1698,8 +1698,9 @@ class HeadedBrowser(RetrievalIntegration):
                     # an archive, it is the archive that is down, not the capture gone.
                     if self.fails_on_not_found:
                         raise RetrievalFailed(f"{url} answered HTTP {statuses[-1]}.")
-                    raise RetrievalFailed(f"{self.name} is unavailable right now: it answered "
-                                          f"HTTP {statuses[-1]} for {url}.")
+                    raise ServiceUnavailableError(
+                        f"{self.name} is unavailable right now (HTTP {statuses[-1]}): it is "
+                        f"down or overloaded, the capture is not gone. Try again later.")
 
                 phases.enter("read")
                 if target := await self._extract_content(page):

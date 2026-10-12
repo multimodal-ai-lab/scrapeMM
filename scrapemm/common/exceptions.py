@@ -56,6 +56,12 @@ class DiskFull(Exception):
     before continuing."""
 
 
+class ServiceUnavailableError(RetrievalFailed):
+    """A service scrapeMM retrieves through -- an archive such as the Wayback Machine --
+    is down or overloaded right now (it answered HTTP 5xx). The target itself is not
+    gone; asking again later may well succeed."""
+
+
 class RetrievalInterrupted(RetrievalFailed):
     """A user stopped the retrieval of this URL (in the web UI or through the API)."""
 
@@ -75,6 +81,7 @@ WIRE_EXCEPTIONS: dict[str, type[Exception]] = {
         RateLimitError,
         QuotaExceededError,
         RetrievalFailed,
+        ServiceUnavailableError,
         RetrievalInterrupted,
         AccessBlockedError,
         RegionBlockedError,
