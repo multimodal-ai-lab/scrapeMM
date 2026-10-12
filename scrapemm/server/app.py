@@ -88,16 +88,33 @@ async def _prune_regularly() -> None:
 
 
 async def _warm_caches() -> None:
-    """Pre-computes the slow, rarely-changing parts of the dashboard's environment."""
+    """Pre-computes the slow, rarely-changing parts of the dashboard's environment, and
+    starts the shared browser."""
     try:
         from . import status
         await status._playwright_status()
         registry.refresh()  # Measured in a thread of its own
+        await _warm_browser()
     except asyncio.CancelledError:
         raise
     except Exception:
         # A warm-up is an optimisation; failing it must not affect the server at all.
         logger.debug("Warming the dashboard caches failed.", exc_info=True)
+
+
+async def _warm_browser() -> None:
+    """Starts the shared browser and its connection now, rather than on the first
+    retrieval that needs it: after a restart, the first burst of browser retrievals
+    (a test run's) each waited 9-11 s for its tab while the browser came up. Only where
+    the deployment provides a display for it (the container's Xvfb), so that starting
+    the server elsewhere -- tests, a development machine -- starts no browser."""
+    if not os.getenv("DISPLAY"):
+        return
+    from .integrations import browser
+    from .integrations.headed_browser import release_page
+    page, _ = await browser._new_page()
+    await release_page(page)
+    logger.info("Started the shared browser.")
 
 
 def _warn_if_exposed() -> None:

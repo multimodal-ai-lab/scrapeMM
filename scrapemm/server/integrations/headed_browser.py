@@ -2073,6 +2073,15 @@ DOM_LOAD_WAIT = 4
 DOM_SETTLE_TIMEOUT = 8
 DOM_THIN_TEXT = 1000
 DOM_THIN_TIMEOUT = 15
+# ...unless it is a media page: little text (under MEDIA_PAGE_TEXT characters) beside a
+# medium it already shows -- a video with a source, or an image at least
+# MEDIA_PAGE_IMAGE_WIDTH pixels wide or covering MEDIA_PAGE_IMAGE_SHARE of the viewport.
+# Media hosts (mvau.lt: 300-400 characters, a 1080 px image or a video) waited out the
+# full DOM_THIN_TIMEOUT for text that never comes. An article's shell sits at more text
+# than that (Animal Politico's: 600 characters, before its text arrived).
+MEDIA_PAGE_TEXT = 500
+MEDIA_PAGE_IMAGE_WIDTH = 800
+MEDIA_PAGE_IMAGE_SHARE = 0.10
 
 _DOM_STATE_JS = ("() => [document.documentElement ? document.documentElement.outerHTML.length : 0,"
                  " document.readyState]")
@@ -2097,12 +2106,29 @@ async def evaluate_within(target: Page | Frame, script: str, arg=None,
         raise PlaywrightTimeoutError(f"The frame did not answer within {timeout:.0f} s.") from None
 
 
+_THIN_STATE_JS = """({imageWidth, imageShare}) => {
+    const text = document.body ? document.body.innerText.length : 0;
+    const viewport = window.innerWidth * window.innerHeight;
+    const share = e => { const r = e.getBoundingClientRect();
+        const w = Math.max(0, Math.min(r.right, window.innerWidth) - Math.max(r.left, 0));
+        const h = Math.max(0, Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0));
+        return viewport ? w * h / viewport : 0; };
+    const media = [...document.querySelectorAll('video')].some(v => v.currentSrc || v.src)
+        || [...document.images].some(i => i.naturalWidth >= imageWidth || share(i) >= imageShare);
+    return [text, media];
+}"""
+
+
 async def _is_thin(target: Page | Frame, min_text: int) -> bool:
+    """Whether the document has less text than `min_text` and so is most likely a shell
+    still waiting for its content -- unless it is a media page (see MEDIA_PAGE_*)."""
     try:
-        return await evaluate_within(
-            target, "() => (document.body ? document.body.innerText.length : 0)") < min_text
+        text, media = await evaluate_within(
+            target, _THIN_STATE_JS,
+            {"imageWidth": MEDIA_PAGE_IMAGE_WIDTH, "imageShare": MEDIA_PAGE_IMAGE_SHARE})
     except PlaywrightError:
         return True  # Mid-navigation: the next document is still to come
+    return text < min_text and not (text < MEDIA_PAGE_TEXT and media)
 
 
 async def settle_dom(target: Page | Frame, min_text: int = 0) -> None:
