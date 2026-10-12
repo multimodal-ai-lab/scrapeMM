@@ -2082,6 +2082,12 @@ DOM_THIN_TIMEOUT = 15
 MEDIA_PAGE_TEXT = 500
 MEDIA_PAGE_IMAGE_WIDTH = 800
 MEDIA_PAGE_IMAGE_SHARE = 0.10
+# ...nor is an error page, titled so: no text is coming (nbcnewyork.com's "Access Denied"
+# waited out the full DOM_THIN_TIMEOUT). Not Cloudflare's "Just a moment...": that one
+# does turn into the page by itself.
+ERROR_PAGE_TITLE = (r"^\W*(access denied|forbidden|403\b|404\b|not found|page not found|"
+                    r"request unsuccessful|attention required|error\b|bad request|"
+                    r"service unavailable|502\b|503\b)")
 
 _DOM_STATE_JS = ("() => [document.documentElement ? document.documentElement.outerHTML.length : 0,"
                  " document.readyState]")
@@ -2106,8 +2112,9 @@ async def evaluate_within(target: Page | Frame, script: str, arg=None,
         raise PlaywrightTimeoutError(f"The frame did not answer within {timeout:.0f} s.") from None
 
 
-_THIN_STATE_JS = """({imageWidth, imageShare}) => {
+_THIN_STATE_JS = """({imageWidth, imageShare, errorTitle}) => {
     const text = document.body ? document.body.innerText.length : 0;
+    if (new RegExp(errorTitle, 'i').test(document.title || '')) return [text, false, true];
     const viewport = window.innerWidth * window.innerHeight;
     const share = e => { const r = e.getBoundingClientRect();
         const w = Math.max(0, Math.min(r.right, window.innerWidth) - Math.max(r.left, 0));
@@ -2115,20 +2122,22 @@ _THIN_STATE_JS = """({imageWidth, imageShare}) => {
         return viewport ? w * h / viewport : 0; };
     const media = [...document.querySelectorAll('video')].some(v => v.currentSrc || v.src)
         || [...document.images].some(i => i.naturalWidth >= imageWidth || share(i) >= imageShare);
-    return [text, media];
+    return [text, media, false];
 }"""
 
 
 async def _is_thin(target: Page | Frame, min_text: int) -> bool:
     """Whether the document has less text than `min_text` and so is most likely a shell
-    still waiting for its content -- unless it is a media page (see MEDIA_PAGE_*)."""
+    still waiting for its content -- unless it is a media page (see MEDIA_PAGE_*) or an
+    error page (ERROR_PAGE_TITLE)."""
     try:
-        text, media = await evaluate_within(
+        text, media, error_page = await evaluate_within(
             target, _THIN_STATE_JS,
-            {"imageWidth": MEDIA_PAGE_IMAGE_WIDTH, "imageShare": MEDIA_PAGE_IMAGE_SHARE})
+            {"imageWidth": MEDIA_PAGE_IMAGE_WIDTH, "imageShare": MEDIA_PAGE_IMAGE_SHARE,
+             "errorTitle": ERROR_PAGE_TITLE})
     except PlaywrightError:
         return True  # Mid-navigation: the next document is still to come
-    return text < min_text and not (text < MEDIA_PAGE_TEXT and media)
+    return text < min_text and not error_page and not (text < MEDIA_PAGE_TEXT and media)
 
 
 async def settle_dom(target: Page | Frame, min_text: int = 0) -> None:

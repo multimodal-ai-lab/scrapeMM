@@ -433,6 +433,10 @@ async def _retrieve(
     # Set once a method found the page withheld from this server's region (HTTP 451):
     # the other methods fetching from here would be too, the others may not
     region_blocked: list[RegionBlockedError] = []
+    # Set once a method fetching from here was refused by the site (access denied, HTTP
+    # 403): the other methods fetching from here would be too -- the self-hosted Firecrawl
+    # got the same 403 after the browser had (nbcnewyork.com, Akamai)
+    refused_here: list[AccessBlockedError] = []
     # The methods that go through the proxy right away (see `scrapemm.server.proxy`)
     proxy_first: set[str] = set()
     if domain not in DOMAIN_TO_INTEGRATION:
@@ -552,8 +556,19 @@ async def _retrieve(
             if not (method_name in proxy.PROXY_METHODS and proxy.active()):
                 return "error", RegionBlockedError(f"Skipped: {region_blocked[0]}")
             via_proxy = True  # From the proxy's region instead
+        if refused_here and local and not via_proxy:
+            if not (method_name in proxy.PROXY_METHODS and proxy.active()):
+                return "error", AccessBlockedError(f"Skipped: {refused_here[0]}")
+            via_proxy = True  # From the proxy's address instead
         logger.debug(f"Now executing {method_name}{' through the proxy' if via_proxy else ''}...")
         outcome, used = await run_attempt(method_name, via_proxy)
+        if (local and not used and isinstance(outcome[1], AccessBlockedError)
+                and proxy.ip_blocked(outcome[1])):
+            if not refused_here:
+                logger.info(f"⛔ {url} refuses this server; skipping the other methods that "
+                            f"fetch from here"
+                            f"{' (or going through the proxy)' if proxy.active() else ''}.")
+            refused_here.append(outcome[1])
         if outcome[0] == "error" and not used and proxy.retry_worthy(method_name, outcome[1]):
             logger.info(f"🔀 Retrying {method_name} for {url} through the proxy: "
                         f"{str(outcome[1]).splitlines()[0][:200]}")
@@ -656,6 +671,15 @@ def _classify(url: str, method_name: str, content: Optional[ScrapedContent],
         return "error", RegionBlockedError(f"Method {method_name}: the page is blocked in "
                                             f"this region (\"{notice}\").")
 
+    # ...nor a CDN's or firewall's "access denied" page: the site refused this server
+    # (an AccessBlockedError, so the method is retried through the proxy, if one is in
+    # use, and the chain goes on to the methods that fetch from elsewhere)
+    if blocker := _access_denied_page(content):
+        logger.info(f"⛔ Method {method_name} got {blocker}'s \"access denied\" page for {url}.")
+        return "error", AccessBlockedError(
+            f"Method {method_name}: access denied -- {blocker} refused to serve this "
+            f"server the page.")
+
     # Ensure the method returned the actual content and not a CAPTCHA challenge
     if captcha := detect_captcha(content):
         if document_extension(url):
@@ -731,6 +755,38 @@ def _region_block_notice(content: ScrapedContent) -> Optional[str]:
         return None
     text = " ".join(text.split())
     return next((m for m in REGION_BLOCK_MARKERS if m in text), None)
+
+
+# What CDNs and web application firewalls show a visitor they refuse, by who shows it:
+# each a set of phrases that must all be there. Only short pages count (see
+# `_access_denied_page()`): an article about blocking quotes them in a long text.
+ACCESS_DENIED_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # nbcnewyork.com: "Access Denied ... You don't have permission to access ... on this
+    # server. Reference #18.d4b31402... https://errors.edgesuite.net/..."
+    ("Akamai", ("you don't have permission to access", "reference #")),
+    ("Akamai", ("errors.edgesuite.net",)),
+    ("Imperva", ("request unsuccessful", "incapsula incident id")),
+    ("Sucuri", ("sucuri website firewall", "access denied")),
+    ("CloudFront", ("the request could not be satisfied", "cloudfront")),
+    ("Cloudflare", ("sorry, you have been blocked", "cloudflare")),
+    ("the server", ("403 forbidden",)),
+)
+ACCESS_DENIED_MAX_CHARS = 2000
+
+
+def _access_denied_page(content: ScrapedContent) -> Optional[str]:
+    """Who refused this server the page, if the content is a CDN's or firewall's "access
+    denied" page: a short page with that one's phrases (see ACCESS_DENIED_MARKERS)."""
+    text = content.markdown or (str(content.multimodal) if content.multimodal else "")
+    if content.html:
+        text += " " + content.html[:20_000]  # The reference link may be in the markup only
+    text = " ".join(text.lower().replace("\u2019", "'").split())
+    visible = content.markdown or (str(content.multimodal) if content.multimodal else "") \
+        or _TAGS.sub(" ", content.html or "")
+    if len(" ".join(visible.split())) > ACCESS_DENIED_MAX_CHARS:
+        return None
+    return next((who for who, phrases in ACCESS_DENIED_MARKERS
+                 if all(phrase in text for phrase in phrases)), None)
 
 
 # What the replayers show for a capture they do not have: pywb (Perma.cc, and archives

@@ -43,3 +43,11 @@ async def test_a_shell_waits_for_its_text_even_beside_an_image():
     assert await _thin(caption + _image(200, 100))  # A logo is no medium
     shell = "<p>" + "Navigation and teaser text. " * 22 + "</p>"  # ~600 characters
     assert await _thin(shell + _image(1080, 600))  # An article's shell with its hero image
+
+
+@pytest.mark.asyncio
+async def test_an_error_page_does_not_wait_for_text():
+    """nbcnewyork.com's "Access Denied" waited out the full 15 s for text."""
+    assert not await _thin("<title>Access Denied</title><h1>Access Denied</h1><p>Reference #18.d4</p>")
+    assert not await _thin("<title>403 Forbidden</title><h1>403 Forbidden</h1>")
+    assert await _thin("<title>Just a moment...</title><p>Checking your browser</p>")  # Clears by itself
