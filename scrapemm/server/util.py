@@ -52,6 +52,7 @@ DOMAIN_REGEX = r"(?:https?:\/\/)?(?:www\.)?([-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA
 # answers every URL with a redirect to a host that does not exist
 # (https://malayalam.factcrescendo.comslug: the slash lost); without the www. the page
 # is served. Retrieving it as given sent every method after the dead end in turn.
+KEEP_ENCODED = re.compile(r"^https?://(?:www\.)?(?:megalodon\.jp|gyo\.tc)(?=[/:?#]|$)", re.IGNORECASE)
 HOST_FIXES = {"www.malayalam.factcrescendo.com": "malayalam.factcrescendo.com"}
 _HOST_FIX_REGEX = re.compile(
     r"^(https?://)(" + "|".join(re.escape(host) for host in HOST_FIXES) + r")(?=[/:?#]|$)",
@@ -62,7 +63,12 @@ def preprocess_url(url: str) -> str:
     """Decodes a URL and removes unwanted symbols from it such
     as surrounding whitespace, non-breaking spaces, etc. A host that is known to need
     another form is given it (see `HOST_FIXES`)."""
-    url = unquote(str(url)).strip()
+    url = str(url).strip()
+    # A Megalodon address holds the archived URL as it is, its own encoded parts included
+    # (an embed's `href=https%3A%2F%2F...%26id%3D...`): decoded, it names another address
+    # and Megalodon has no capture of it (see `integrations.megalodon`)
+    if not KEEP_ENCODED.match(url):
+        url = unquote(url).strip()
     return _HOST_FIX_REGEX.sub(lambda m: m.group(1) + HOST_FIXES[m.group(2).lower()], url, count=1)
 
 

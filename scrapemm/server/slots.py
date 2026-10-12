@@ -82,6 +82,7 @@ DEFAULT_SLOTS: dict[str, int] = {
     "youtube": 4,
     "archive.today": 4,
     "ghostarchive": 4,
+    "megalodon": 4,
     "perma_cc": 4,
     "wayback": 4,
 }

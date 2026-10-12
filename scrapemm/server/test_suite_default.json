@@ -587,6 +587,32 @@
   "category": "Other archives"
  },
  {
+  "url": "https://megalodon.jp/2026-0417-1631-38/https://x.com:443/grafbobbes/status/2040916396326912344",
+  "expected": {},
+  "category": "Other archives"
+ },
+ {
+  "url": "https://megalodon.jp/2026-0213-1925-45/https://scontent-fra5-2.xx.fbcdn.net:443/v/t39.30808-6/615177696_1311822287653026_3592925460182018647_n.jpg?_nc_cat=107&ccb=1-7&_nc_sid=833d8c&_nc_ohc=TGsOI0TpFWIQ7kNvwF3sWdL&_nc_oc=AdmjeasJWa7ppK3xTc9TR5qmj3_yKiMn_U9ntuah191DL41yTuf9dj1f2fX7Crdi62o&_nc_zt=23&_nc_ht=scontent-fra5-2.xx&_nc_gid=udAgO77FejKdXVVwb4IoVg&oh=00_AfuQqTqlLhdGo3sAD8BC-RHBDqAJiNVUnBD0XNAysNqUvg&oe=6994BA1A",
+  "expected": {
+   "image": 1
+  },
+  "category": "Other archives"
+ },
+ {
+  "url": "https://megalodon.jp/2026-0223-2237-14/https://www.facebook.com:443/plugins/post.php?href=https%3A%2F%2Fwww.facebook.com%2Fpermalink.php%3Fstory_fbid%3Dpfbid02kC8MLAX9sEFro1yxHM3Kyp5oZgSAXgYTXgtHqtMTVcbE7ywxuynikMEytV6evKHCl%26id%3D100067844997065&show_text=true&",
+  "expected": {
+   "image": 1
+  },
+  "category": "Other archives"
+ },
+ {
+  "url": "https://megalodon.jp/2026-0511-2314-12/https://www.facebook.com:443/plugins/video.php?height=314&href=https%3A%2F%2Fwww.facebook.com%2Freel%2F2056037321792419%2F&show_text=true&width=800",
+  "expected": {
+   "image": 1
+  },
+  "category": "Other archives"
+ },
+ {
   "url": "https://factcheckarabic.afp.com/doc.afp.com.9DD6J8",
   "expected": {
    "image": 5

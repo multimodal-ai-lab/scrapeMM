@@ -16,6 +16,7 @@ from .perma_cc import PermaCC
 from .archive_today import ArchiveToday
 from .headed_browser import HeadedBrowser, Browser
 from .ghostarchive import Ghostarchive
+from .megalodon import Megalodon
 from .awesomescreenshot import AwesomeScreenshot
 from .ncbi import NCBI
 
@@ -33,6 +34,7 @@ RETRIEVAL_INTEGRATIONS = [
     ArchiveToday(),
     ArchiveOrg(),
     Ghostarchive(),
+    Megalodon(),
     AwesomeScreenshot(),
     NCBI(),
 ]

@@ -105,6 +105,7 @@ const ICONS: Record<string, string> = {
   'archive.today': 'i-fa7-solid-box-archive',
   'internet archive': 'i-fa7-solid-building-columns',
   'ghostarchive': 'i-fa7-solid-ghost',
+  'megalodon': 'i-fa7-solid-fish',
   'awesomescreenshot': 'i-fa7-solid-camera',
   'ncbi': 'i-fa7-solid-book-medical',
   'browser': 'i-fa7-solid-window-maximize',
