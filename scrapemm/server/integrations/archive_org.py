@@ -78,6 +78,10 @@ _RAW_VIDEO_PATTERNS = [
 # At most this many named videos are tried: the first ones are the page's own
 MAX_RAW_VIDEOS = 4
 
+# How long the raw capture may take: the Wayback Machine, when overloaded, took 30 s for
+# one it serves in one or two otherwise (10-12)
+RAW_TIMEOUT = 60
+
 # Whether this retrieval read the raw capture already (see `ArchiveOrg._get()`), so the
 # browser replay does not look there a second time
 _raw_capture_tried: contextvars.ContextVar[bool] = contextvars.ContextVar(
@@ -118,7 +122,7 @@ async def _raw_capture(timestamp: str, original: str) -> Optional[tuple[str, str
     async def fetch(ts: str, address: str) -> Optional[str]:
         raw_url = f"https://web.archive.org/web/{ts}id_/{address}"
         try:
-            response = await curl_get(raw_url, impersonate="chrome124", timeout=30)
+            response = await curl_get(raw_url, impersonate="chrome124", timeout=RAW_TIMEOUT)
         except Exception as e:
             logger.debug(f"Could not fetch the raw capture {raw_url}: {type(e).__name__}: {e}")
             return None
