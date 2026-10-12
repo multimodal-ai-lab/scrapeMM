@@ -57,6 +57,7 @@ SETTINGS: dict[str, type] = {
     "archive_retrieval_timeout": float,
     "platform_archive_budget": float,
     "min_media_side": int,
+    "min_post_media_side": int,  # The same for platform posts' own media (see `post_media`)
     "max_seconds_per_medium": float,
     "job_max_stored_kb": int,
     "test_runs_kept": int,
@@ -147,7 +148,7 @@ def schema() -> list[dict]:
     from .cache import FAILED_MEDIA_MEMORY
     from .challenges import MAX_PENDING
     from .download.documents import MAX_PDF_PAGES, MAX_ROWS_PER_SHEET
-    from .download.images import MIN_MEDIA_SIDE
+    from .download.images import MIN_MEDIA_SIDE, MIN_POST_MEDIA_SIDE
     from .engine import (PLATFORM_ARCHIVE_BUDGET, WAYBACK_HIT_TTL, WAYBACK_MISS_TTL,
                          WAYBACK_BACKOFF)
     from .integrations.headed_browser import BROWSER_RETRIEVAL_TIMEOUT, ARCHIVE_RETRIEVAL_TIMEOUT
@@ -244,12 +245,18 @@ def schema() -> list[dict]:
               "says so.", "history", unit="KB", min=16, max=16384),
         entry("test_runs_kept", MAX_RUNS_KEPT, "Test suite runs kept",
               "The oldest test suite reports go first.", "history", min=1, max=500),
-        entry("min_media_side", MIN_MEDIA_SIDE, "Min media size",
-              "Images and videos smaller than this on either side (icons, logos, avatars) "
-              "are left out; 0 keeps all.", "general", unit="px", min=0, max=2048),
+        entry("min_media_side", MIN_MEDIA_SIDE, "Minimum size of page media",
+              "On web pages and archived copies, images and videos smaller than this on "
+              "either side are left out as icons, logos and avatars; 0 keeps all.", "media",
+              unit="px", min=0, max=2048),
+        entry("min_post_media_side", MIN_POST_MEDIA_SIDE, "Minimum size of post media",
+              "The same for the media a platform integration takes from a post (X, "
+              "Telegram, Bluesky, Instagram, Facebook, Threads, Reddit, TikTok, YouTube): "
+              "they are the post's own, so 0 keeps every one.", "media", unit="px", min=0,
+              max=2048),
         entry("max_seconds_per_medium", float(MAX_SECONDS_PER_MEDIUM), "Time per medium",
               "Longest a single image or video download may take; the page comes back "
-              "without it.", "general", unit="s", min=5, max=600),
+              "without it.", "media", unit="s", min=5, max=600),
         entry("max_pdf_pages", MAX_PDF_PAGES, "Max PDF pages",
               "A PDF's text beyond this many pages is left out.", "general", min=1,
               max=100_000),

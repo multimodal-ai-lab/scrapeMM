@@ -51,6 +51,7 @@ class TikTok(RetrievalIntegration):
     """
 
     name = "TikTok"
+    post_media = True
     domains = ["tiktok.com"]
 
     async def _connect(self):

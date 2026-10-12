@@ -129,6 +129,19 @@ def cooldown_of(key: str) -> float:
 _exemptions: dict[str, Callable[[], bool]] = {}
 
 
+# Checks that fail a method's retrieval at once, before it waits for a slot (see
+# `fail_fast()`)
+_fail_fast: dict[str, Callable[[], None]] = {}
+
+
+def fail_fast(key: str, check: Callable[[], None]) -> None:
+    """Has `check()` asked before a retrieval by the method waits for a slot and on every
+    wake-up while it waits: if it raises, the retrieval fails with that at once, instead
+    of waiting for a slot and a cooldown to learn the same (YouTube, while it refuses this
+    server and the proxy alike)."""
+    _fail_fast[key] = check
+
+
 def exempt_from_cooldown(key: str, predicate: Callable[[], bool]) -> None:
     """Lets the method start without its cooldown whenever `predicate()` says so, asked in
     the waiting task: YouTube through the proxy, whose address is not the one YouTube
@@ -157,6 +170,8 @@ class Gate:
         clock = timing.current()
         first = clock is not None and clock.admitted is None
         since = time.time()
+        if check := _fail_fast.get(self.key):
+            check()
         if self.in_use >= limit_of(self.key) or (self._paced() and self.next_start > since):
             self.waiting += 1
             if first:
@@ -200,6 +215,8 @@ class Gate:
             finally:
                 if wakeup in self._wakeups:
                     self._wakeups.remove(wakeup)
+            if check := _fail_fast.get(self.key):
+                check()  # It may have become hopeless while it waited
 
     def release(self) -> None:
         self.in_use -= 1

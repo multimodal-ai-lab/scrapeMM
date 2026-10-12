@@ -12,6 +12,7 @@ class YouTube(RetrievalIntegration):
     YouTube is rate-limited to 333 videos per hour."""
 
     name = "YouTube"
+    post_media = True
     domains = [
         "youtube.com",
         "youtu.be",

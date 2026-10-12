@@ -262,6 +262,7 @@ def _extract_post_header(html: str) -> str:
 
 class Facebook(RetrievalIntegration):
     name = "Facebook"
+    post_media = True
     domains = ["facebook.com", "fb.watch"]
     cookie_file = CONFIG_DIR / "facebook_cookie.txt"
 

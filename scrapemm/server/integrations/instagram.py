@@ -42,6 +42,7 @@ EMBED_MEDIA_MARKER = "EmbeddedMediaImage"
 
 class Instagram(RetrievalIntegration):
     name = "Instagram"
+    post_media = True
     domains = ["instagram.com"]
     cookie_file = CONFIG_DIR / "instagram_cookie.txt"
 

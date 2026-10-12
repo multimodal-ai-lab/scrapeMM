@@ -2,6 +2,8 @@ import asyncio
 import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from contextvars import ContextVar
 from io import BytesIO
 from typing import Optional, Union, TYPE_CHECKING
 
@@ -32,11 +34,33 @@ _image_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="images")
 
 # A medium is kept only if both its sides are at least this many pixels (an image's width
 # and height, a video's frame size): smaller ones are icons, logos, avatars and spacers,
-# not content. The one rule for every way a medium arrives.
+# not content. The one rule for every way a medium arrives -- on a web page, that is.
 MIN_MEDIA_SIDE = 128
+# The same for the media a platform integration takes for a post (see `post_media()`):
+# they are the post's own, not the page's furniture, so by default every one is kept --
+# Telegram's small photos and stickers were dropped as if they were icons.
+MIN_POST_MEDIA_SIDE = 0
+
+# Whether the media now being collected are a post's own (set by the platform
+# integrations, see `RetrievalIntegration.post_media`)
+_post_media: ContextVar[bool] = ContextVar("scrapemm_post_media", default=False)
+
+
+@contextmanager
+def post_media():
+    """Marks the media collected within as a post's own: they get the minimum size of
+    post media, not that of a web page's."""
+    token = _post_media.set(True)
+    try:
+        yield
+    finally:
+        _post_media.reset(token)
 
 
 def min_media_side() -> int:
+    """The smaller side below which a medium is left out, for the media now collected."""
+    if _post_media.get():
+        return int(get_setting("min_post_media_side", MIN_POST_MEDIA_SIDE))
     return int(get_setting("min_media_side", MIN_MEDIA_SIDE))
 
 
@@ -62,6 +86,9 @@ async def download_image(
     `ImmutableCache.item()`)."""
     from scrapemm.server.cache import immutable
     variant = image_variant(max_size)
+    # Without a minimum here (a post's media, by default), an image the cache knows as too
+    # small for a page is downloaded after all
+    ignore_small_images = ignore_small_images and min_media_side() > 0
     hit, image = await immutable.item(image_url, variant=variant, ignore_small=ignore_small_images)
     if hit:
         return image

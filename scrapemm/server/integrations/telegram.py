@@ -24,6 +24,7 @@ class Telegram(RetrievalIntegration):
     """The Telegram integration for retrieving post contents from Telegram channels and groups."""
 
     name = "Telegram"
+    post_media = True
     domains = ["t.me", "telegram.me"]
     session_path = str(TELEGRAM_SESSION_PATH)
 

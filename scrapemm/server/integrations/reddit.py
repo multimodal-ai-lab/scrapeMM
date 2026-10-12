@@ -45,6 +45,7 @@ class Reddit(RetrievalIntegration):
     https://www.reddit.com/prefs/apps to obtain them."""
 
     name = "Reddit"
+    post_media = True
     domains = ["reddit.com", "redd.it"]
 
     async def _connect(self):

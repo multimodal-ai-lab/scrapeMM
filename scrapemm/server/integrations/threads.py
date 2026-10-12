@@ -35,6 +35,7 @@ class Threads(RetrievalIntegration):
     its media, so no credentials are needed."""
 
     name = "Threads"
+    post_media = True
     domains = ["threads.com", "threads.net"]
 
     async def _connect(self):

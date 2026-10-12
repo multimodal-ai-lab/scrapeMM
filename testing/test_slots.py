@@ -18,6 +18,7 @@ def settings(monkeypatch):
     monkeypatch.setattr(config, "_config", values)
     monkeypatch.setattr(slots, "_gates", {})
     monkeypatch.setattr(slots, "_exemptions", {})
+    monkeypatch.setattr(slots, "_fail_fast", {})
     return values
 
 
@@ -229,8 +230,36 @@ def test_schema_covers_every_setting():
     assert [e["key"] for e in entries if e["key"] not in config.SETTINGS] == []
     assert {e["key"] for e in entries} == set(config.SETTINGS)
     sections = {"general", "chain", "site-rules", "parallelism", "browser", "integrations",
-                "archives", "cache", "history", "secrets", "proxy"}
+                "archives", "cache", "media", "history", "secrets", "proxy"}
     for e in entries:
         assert e["section"] in sections, e
         assert e["type"] == config.SETTINGS[e["key"]].__name__, e
         assert e["label"] and e["description"], e
+
+
+async def test_a_hopeless_retrieval_fails_at_once_instead_of_waiting(settings):
+    """YouTube, while it refuses this server and the proxy: its URLs must not queue for
+    the slot only to fail (with one slot, they waited up to 33 s each)."""
+    settings["method_slots"] = {"m": 1}
+    hopeless = []
+
+    def check():
+        if hopeless:
+            raise RuntimeError("would fail anyway")
+    slots.fail_fast("m", check)
+    release, started = asyncio.Event(), []
+    holder = asyncio.create_task(_hold_until("m", release, started))
+    waiter = asyncio.create_task(_hold_until("m", release, started))
+    await _settle()
+    assert slots.gate("m").waiting == 1
+    hopeless.append(True)
+    slots.wake("m")  # As the YouTube pause does when it learns the proxy is refused too
+    await _settle()
+    with pytest.raises(RuntimeError):
+        await waiter  # Failed while waiting, without the slot
+    assert slots.gate("m").waiting == 0 and slots.gate("m").in_use == 1
+    with pytest.raises(RuntimeError):
+        async with slots.hold("m"):  # A new one fails before it waits at all
+            pass
+    release.set()
+    await holder

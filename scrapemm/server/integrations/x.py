@@ -26,6 +26,7 @@ class X(RetrievalIntegration):
     https://developer.x.com/en/docs/twitter-api/getting-started/about-twitter-api#v2-access-level
     "Free" API access does NOT include reading Tweets."""
     name = "X (Twitter)"
+    post_media = True
     domains = ["twitter.com", "x.com", "t.co"]
 
     account_explanation = """X accounts having a "blue" verification fulfill a basic set of criteria,

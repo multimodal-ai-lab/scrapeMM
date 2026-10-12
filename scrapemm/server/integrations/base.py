@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 
 from scrapemm.common.scraping_response import ScrapedContent
 from scrapemm.server import timing
+from scrapemm.server.download.images import post_media
 from scrapemm.server.util import get_domain
 
 logger = logging.getLogger("scrapeMM")
@@ -15,6 +16,11 @@ class RetrievalIntegration(ABC):
 
     name: str
     domains: list[str]  # The domains supported by this integration
+    # Whether what this integration collects is a post's own media (a platform's API or
+    # post page), which keep the minimum size of post media rather than of a web page's
+    # (see `download.images.post_media()`). Not for whole pages -- the browser, the
+    # archives' replays -- whose small media are icons, logos and avatars.
+    post_media: bool = False
     connected: bool | None = None
     # Whether its first request waits for a browser slot, which then starts the URL's
     # retrieval time (see `timing`); otherwise calling the integration does
@@ -75,7 +81,10 @@ class RetrievalIntegration(ABC):
         logger.debug(f"Calling {self.name} service for {url}")
         if not self.waits_for_browser_slot:
             timing.work_started()
-        return await self._get(url, **kwargs)
+        if not self.post_media:
+            return await self._get(url, **kwargs)
+        with post_media():
+            return await self._get(url, **kwargs)
 
     async def probe(self) -> None:
         """Checks whether this integration could be used right now, for the dashboard.
