@@ -45,7 +45,7 @@ const GROUPS: { label: string, entries: Entry[] }[] = [
     { id: 'cache', label: 'Cache', icon: 'i-fa7-solid-database',
       blurb: 'Recent results served again for the same URL, and archive captures kept for good.' },
     { id: 'media', label: 'Media', icon: 'i-fa7-solid-photo-film',
-      blurb: 'Which images and videos a result keeps: small ones on web pages are left out as icons and logos, a post's own media are kept.' },
+      blurb: 'Which images and videos a result keeps: small ones on web pages are left out as icons and logos, a post\'s own media are kept.' },
     { id: 'history', label: 'History', icon: 'i-fa7-solid-clock-rotate-left',
       blurb: 'How far back the Jobs and Statistics views reach. The Dashboard\'s totals count everything ever run.' },
   ] },
