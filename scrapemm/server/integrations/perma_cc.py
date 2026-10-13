@@ -29,6 +29,11 @@ STASH_IMAGE_TIMEOUT = 30
 STASH_VIDEO_TIMEOUT = 75
 # Large WARCs (e.g. 80MB+ Telegram videos) need a long wait for the innermost iframe.
 INNERMOST_FRAME_TIMEOUT_MS = 120_000
+# ...a record's screenshot view (`?type=image`) does not: it is one image, shown in 5 s.
+# Under load it sometimes stayed empty, and the full wait above went by before it was
+# loaded again -- which then took seconds (perma.cc/FD9Q-4S9Y: 130 s in a test run, 5 s
+# alone)
+SCREENSHOT_FRAME_TIMEOUT_MS = 20_000
 # How long Perma.cc's page gets to show its archive iframe, a reload included (see
 # `_archive_iframe()`). 20 s without a reload was not enough with dozens of other pages
 # loading at once: the whole retrieval then failed.
@@ -244,7 +249,13 @@ class PermaCC(HeadedBrowser):
 
         # Critical: wait until the third (innermost) iframe under replay-app-main
         # has loaded usable archived content — do not fall back early on large WARCs.
-        inner_frame = await self._wait_for_innermost_frame(middle_frame)
+        started = time.monotonic()
+        inner_frame = await self._wait_for_innermost_frame(
+            middle_frame, SCREENSHOT_FRAME_TIMEOUT_MS if "type=image" in page.url
+            else INNERMOST_FRAME_TIMEOUT_MS)
+        if inner_frame is None or not await self._frame_has_usable_content(inner_frame):
+            logger.info(f"Perma.cc's replay at {page.url} showed no content after "
+                        f"{time.monotonic() - started:.0f} s.")
         if inner_frame is None:
             logger.debug("Perma.cc inner iframe not ready; falling back to middle iframe.")
             await _stash_media_in_frame(middle_frame)
