@@ -18,7 +18,8 @@ const error = ref('')
 const testing = ref(false)
 const testResult = ref<any>(null)
 
-const URL_PATTERN = /^(https?|socks5h?):\/\/[A-Za-z0-9.\-[\]:]+:\d{1,5}$/
+// Host and port; the scheme is optional (the server takes none as http://)
+const URL_PATTERN = /^((https?|socks5h?):\/\/)?[A-Za-z0-9.\-[\]:]+:\d{1,5}$/i
 
 const entry = computed(() => server.value?.proxies?.[0] ?? null)
 const status = computed(() => server.value?.status ?? null)
@@ -35,7 +36,7 @@ const problem = computed(() => {
   const url = draft.value.url.trim().replace(/\/$/, '')
   if (!url) return ''
   if (/^[a-z0-9+]+:\/\/[^/]*@/i.test(url)) return 'Put the username and password in their own fields, not in the URL.'
-  if (!URL_PATTERN.test(url)) return 'The URL must look like scheme://host:port, with http, https or socks5 as the scheme.'
+  if (!URL_PATTERN.test(url)) return 'The URL must look like host:port, optionally with http://, https:// or socks5:// in front.'
   const port = Number(url.split(':').pop())
   if (port < 1 || port > 65535) return `${port} is not a valid port.`
   return ''
@@ -122,7 +123,7 @@ const ago = (at?: number | null) => {
 
       <USwitch v-model="draft.enabled" label="Use the proxy" :disabled="!draft.url.trim()" />
 
-      <UFormField label="Proxy URL" description="http://, https:// or socks5:// with host and port."
+      <UFormField label="Proxy URL" description="Host and port. For an HTTP proxy, http://, https:// or nothing in front all work the same; socks5:// for a SOCKS proxy."
         :error="problem || undefined">
         <UInput v-model="draft.url" class="w-full font-mono" placeholder="http://proxy.example.com:8080"
           autocomplete="off" spellcheck="false" />

@@ -47,7 +47,8 @@ logger = logging.getLogger(APP_NAME)
 CONFIG_KEY = "proxies"
 USERNAME_SECRET, PASSWORD_SECRET = "proxy_username", "proxy_password"
 SCHEMES = ("http", "https", "socks5", "socks5h")
-URL_PATTERN = re.compile(r"^(https?|socks5h?)://[A-Za-z0-9.\-\[\]:]+:\d{1,5}$")
+# A proxy's address: host and port, the scheme optional (see `validate_url()`)
+URL_PATTERN = re.compile(r"^((https?|socks5h?)://)?[A-Za-z0-9.\-\[\]:]+:\d{1,5}$", re.IGNORECASE)
 
 # The methods a proxy retry makes sense for: those whose requests go through the
 # transports that honour the route (the browser, plain requests, and the integrations
@@ -89,7 +90,16 @@ class Proxy:
         return f"{parts.scheme}://{auth}@{parts.netloc}"
 
     def for_playwright(self) -> dict:
-        proxy = {"server": self.url}
+        """The proxy as the browser takes it. An HTTP proxy is always spoken to as
+        http://, whichever of http:// and https:// was entered: with https://, every page
+        of the browser's proxied contexts failed at once with ERR_PROXY_CONNECTION_FAILED
+        (Decodo's proxy, 10-12), while yt-dlp, aiohttp and curl went through it either
+        way -- and http:// went through in the browser too. The pages themselves stay
+        encrypted end to end; only the proxy's login travels in the clear."""
+        server = self.url
+        if self.scheme == "https":
+            server = "http://" + server.split("://", 1)[1]
+        proxy = {"server": server}
         if self.username:
             proxy |= {"username": self.username, "password": self.password or ""}
         return proxy
@@ -103,10 +113,17 @@ class Proxy:
 # --- Configuration ------------------------------------------------------------------
 
 def validate_url(url: str) -> str:
+    """The proxy's address as stored: scheme://host:port. Without a scheme, an HTTP proxy
+    is meant (http://); which of http:// and https:// is entered makes no difference to
+    the browser either (see `Proxy.for_playwright()`)."""
     url = (url or "").strip().rstrip("/")
     if not URL_PATTERN.match(url):
-        raise ValueError("The proxy URL must look like scheme://host:port, with http, https "
-                         "or socks5 as the scheme (credentials go in the fields below).")
+        raise ValueError("The proxy URL must look like host:port, optionally with http://, "
+                         "https:// or socks5:// in front (credentials go in the fields below).")
+    if "://" not in url:
+        url = "http://" + url
+    scheme, rest = url.split("://", 1)
+    url = f"{scheme.lower()}://{rest}"
     port = int(url.rsplit(":", 1)[1])
     if not 1 <= port <= 65535:
         raise ValueError(f"{port} is not a valid port.")
