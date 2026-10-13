@@ -48,6 +48,22 @@ def test_remove_ui_elements():
         assert content in html
 
 
+def test_a_header_inside_the_main_content_is_the_articles_own():
+    """news.uzh.ch has no <article>: its date, title, teaser and author sit in a <header>
+    inside <main>, and were stripped as if they were the site's banner."""
+    html = remove_ui_elements("""<html><body>
+      <header class="Header"><a href="/">Logo</a> <nav>Alle News</nav></header>
+      <main id="main-content">
+        <header class="NewsArticleIntro"><p>10.05.2023</p><h1>Scheibe oder Kugel?</h1>
+          <p>Warum ist die Erde nicht flach?</p><p>Autor: Victoria Watts</p></header>
+        <p>Die Mitglieder der Flat Earth Society ...</p>
+      </main></body></html>""")
+    for content in ("10.05.2023", "Scheibe oder Kugel?", "Warum ist die Erde", "Victoria Watts",
+                    "Flat Earth Society"):
+        assert content in html
+    assert "Logo" not in html and "Alle News" not in html  # The site's banner still goes
+
+
 @pytest.mark.parametrize("main", [
     '<div class="side"><div id="main"><p>Content</p></div></div>',
     '<div class="side"><main><p>Content</p></main></div>',

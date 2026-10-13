@@ -279,8 +279,13 @@ def _remove_ui_elements(html: str) -> tuple[str, list[str]]:
             continue
         if id(element) in keep:
             continue  # Is or wraps the main content
-        if element.name == "header" and element.find_parent("article"):
-            continue  # An article's own header: its headline and byline
+        if element.name == "header" and (element.find_parent("article")
+                                         or any(map(_is_main_content, element.parents))):
+            # An article's own header: its headline and byline. Inside the main content
+            # too, which is where pages without an <article> put it (news.uzh.ch: date,
+            # title, teaser and author in a <header> in <main>); the site's banner is
+            # outside it
+            continue
         removed_media += [str(m["src"]) for m in _extract_media_elements(element) if m.get("src")]
         element.decompose()
         removed_any = True
