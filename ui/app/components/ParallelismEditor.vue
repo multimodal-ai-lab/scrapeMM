@@ -126,6 +126,9 @@ const KIND = { integration: 'Integration', method: 'Method', archive: 'Archive' 
                 :placeholder="String(m.slots_default)" :color="slotProblem(m) ? 'error' : undefined"
                 :aria-label="`${m.name}: slots`" :title="slotProblem(m) || undefined"
               />
+              <p v-if="m.extra_slots" class="text-xs text-dimmed mt-0.5" :title="`One per usable proxy, unpaced: each is an address of its own`">
+                + {{ m.extra_slots }} via proxies
+              </p>
             </td>
             <td class="px-2 py-1.5">
               <UInput

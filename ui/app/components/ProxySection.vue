@@ -231,10 +231,14 @@ const usableCount = computed(() => status.value?.usable_count ?? 0)
       </p>
       <p class="text-xs text-muted">
         <strong class="font-medium">Which proxy:</strong> every endpoint keeps a record per method: how often
-        it got through and how often it was refused (its <em>reputation</em>, older outcomes counting less).
-        One the method refused rests from it for a while; one whose test failed, or that failed as a proxy,
-        is left out. Of the rest, the best reputation wins, and among equals the one used longest ago, so
-        that the load spreads across the addresses.
+        it got through and how often it was refused (its <em>reputation</em>: the share that got through,
+        older outcomes counting less, 50% knowing nothing). One a platform refused rests from that platform
+        for a while, one a website refused from that website only; one whose test failed, or that failed as
+        a proxy, is left out. Of the rest, an idle one comes first, then the best reputation, then the one
+        used longest ago. A site that blocks a region (HTTP 451) is tried next from another region — for
+        Europe, from outside Europe — without marring anyone's reputation.
+        <strong class="font-medium">YouTube</strong> runs one retrieval per usable proxy in parallel to its own
+        paced slots.
       </p>
 
       <div class="flex flex-wrap items-center gap-2">

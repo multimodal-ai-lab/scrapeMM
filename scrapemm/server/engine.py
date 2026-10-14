@@ -454,7 +454,7 @@ async def _retrieve(
                 # ...unless they can go through a proxy: from its address, the host may
                 # well answer
                 proxy_first = {m for m in methods if m in local and m in proxy.PROXY_METHODS
-                               and proxy.available(m)}
+                               and proxy.available(m, domain)}
                 local = local - proxy_first
                 if proxy_first:
                     logger.info(f"🔀 {url} is unreachable from this server; trying "
@@ -551,7 +551,7 @@ async def _retrieve(
             outcome = await run_light(_classify, url, method_name, content, output_format)
         if current.used:  # Its record: how this proxy fares with this method
             proxy.learn(current.proxy, method_name,
-                        outcome[1] if outcome[0] == "error" else None)
+                        outcome[1] if outcome[0] == "error" else None, site=domain)
         return outcome, current
 
     async def evaluate(method_name: str) -> tuple[str, object]:
@@ -559,7 +559,9 @@ async def _retrieve(
         this server's address is retried through a proxy, if one is usable for it -- and
         refused there too, through the next, up to `proxy_tries` proxies."""
         local = method_name in _local_methods()
-        proxy_ok = method_name in proxy.PROXY_METHODS and proxy.available(method_name)
+        proxy_ok = method_name in proxy.PROXY_METHODS and proxy.available(method_name, domain)
+        # Where the site turned out to be blocked: the next proxy exits elsewhere
+        avoid: set = {proxy.region_of(None)} if region_blocked else set()
         via_proxy = method_name in proxy_first
         if region_blocked and local:
             if not proxy_ok:
@@ -570,8 +572,9 @@ async def _retrieve(
                 return "error", AccessBlockedError(f"Skipped: {refused_here[0]}")
             via_proxy = True  # From the proxy's address instead
         logger.debug(f"Now executing {method_name}{' through a proxy' if via_proxy else ''}...")
-        outcome, current = await run_attempt(method_name,
-                                             proxy.pick(method_name) if via_proxy else None)
+        outcome, current = await run_attempt(
+            method_name, proxy.pick(method_name, site=domain, avoid_regions=avoid)
+            if via_proxy else None)
         if (local and not current.used and isinstance(outcome[1], AccessBlockedError)
                 and proxy.ip_blocked(outcome[1])):
             if not refused_here:
@@ -580,14 +583,21 @@ async def _retrieve(
                             f"{' (or going through a proxy)' if proxy_ok else ''}.")
             refused_here.append(outcome[1])
         tried = [current.proxy.url] if current.used else []
+
+        def note_region() -> None:
+            if isinstance(outcome[1], RegionBlockedError):
+                avoid.add(proxy.region_of(current.proxy if current.used else None))
+        note_region()
         while (outcome[0] == "error" and method_name in proxy.PROXY_METHODS
                and proxy.ip_blocked(outcome[1]) and len(tried) < proxy.tries()
-               and (via := proxy.pick(method_name, exclude=tried))):
+               and (via := proxy.pick(method_name, exclude=tried, site=domain,
+                                      avoid_regions=avoid))):
             logger.info(f"🔀 Retrying {method_name} for {url} through the proxy {via.url}: "
                         f"{str(outcome[1]).splitlines()[0][:200]}")
             if not current.used:
                 direct_errors[method_name] = outcome[1]
             outcome, current = await run_attempt(method_name, via)
+            note_region()
             if current.used:
                 tried.append(current.proxy.url)
             else:

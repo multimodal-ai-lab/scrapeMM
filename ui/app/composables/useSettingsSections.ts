@@ -64,6 +64,7 @@ export interface MethodLimits {
   kind: 'integration' | 'method' | 'archive'
   slots: number
   slots_default: number
+  extra_slots?: number  // On top of `slots`, e.g. YouTube's one per usable proxy
   cooldown: number
   cooldown_default: number
 }

@@ -809,8 +809,10 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
                 if (!needs.length) return false;
 
                 const loc = location.href || '';
+                // Since 10-2026 with a segment of its own in front of /replay-web-page/
+                // (rejouer.perma.cc/6a1b84c3250d/replay-web-page/...)
                 const prefixMatch = loc.match(
-                  /^(https:\\/\\/rejouer\\.perma\\.cc\\/replay-web-page\\/w\\/id-[^/]+)\\//
+                  /^(https:\\/\\/rejouer\\.perma\\.cc\\/(?:[^/]+\\/)?replay-web-page\\/w\\/id-[^/]+)\\//
                 );
                 if (!prefixMatch) return false;
                 const replayBase = prefixMatch[1];

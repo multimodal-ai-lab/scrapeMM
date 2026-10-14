@@ -19,6 +19,7 @@ def settings(monkeypatch):
     monkeypatch.setattr(slots, "_gates", {})
     monkeypatch.setattr(slots, "_exemptions", {})
     monkeypatch.setattr(slots, "_fail_fast", {})
+    monkeypatch.setattr(slots, "_extra", {})
     return values
 
 
@@ -45,6 +46,35 @@ async def test_limit_and_counts(settings):
     await asyncio.gather(*tasks)
     snap = slots.gate("m").snapshot()
     assert (snap["in_use"], snap["waiting"], len(started)) == (0, 0, 3)
+
+
+async def test_extra_slots_add_to_the_setting(settings):
+    """YouTube: one slot per usable proxy besides its own."""
+    settings["method_slots"] = {"m": 1}
+    proxies = [1, 2]
+    slots.extra_slots("m", lambda: len(proxies))
+    release, started = asyncio.Event(), []
+    tasks = [asyncio.create_task(_hold_until("m", release, started)) for _ in range(4)]
+    await _settle()
+    assert len(started) == 3 and slots.gate("m").snapshot()["limit"] == 3
+    proxies.append(3)
+    slots.refresh()
+    await _settle()
+    assert len(started) == 4
+    release.set()
+    await asyncio.gather(*tasks)
+
+
+async def test_a_start_exempt_from_the_cooldown_says_so(settings):
+    settings["method_cooldowns"] = {"m": 60}
+    exempt = []
+    slots.exempt_from_cooldown("m", lambda: bool(exempt))
+    async with slots.hold("m"):
+        assert not slots.started_unpaced("m")  # The paced start
+    exempt.append(True)
+    async with slots.hold("m"):  # Within the cooldown, yet at once: exempt
+        assert slots.started_unpaced("m")
+    assert not slots.started_unpaced("m")
 
 
 async def test_defaults_and_overrides(settings):

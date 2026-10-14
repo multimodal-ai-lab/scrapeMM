@@ -197,9 +197,23 @@ def _proxy_refused(method: str) -> None:
 
 proxy.on_refusal(_proxy_refused)
 
-# No pace through the proxy: YouTube flags this server's address, not the proxy's. Nor
-# while YouTube is paused: a URL then goes through the proxy, or fails at once.
-slots.exempt_from_cooldown(YOUTUBE_SLOT, lambda: proxy.routed() or youtube_gate.paused())
+def _through_a_proxy_now() -> bool:
+    """Whether a YouTube retrieval about to start skips the pace of this server's address
+    and goes through a proxy instead (see `_download_youtube()`): routed through one by
+    the engine already; YouTube paused for this server; or this server's lane busy or
+    cooling down while a proxy is idle."""
+    if proxy.routed() or youtube_gate.paused():
+        return True
+    gate = slots.gate(YOUTUBE_SLOT)
+    direct_busy = gate.in_use >= slots.limit_of(YOUTUBE_SLOT) or gate.next_start > time.time()
+    return direct_busy and proxy.idle(YOUTUBE)
+
+
+# No pace through a proxy: YouTube flags this server's address, not the proxies'. So
+# with proxies, YouTube runs one retrieval per usable proxy besides its own slots, and
+# a start that would wait for this server's pace goes through an idle proxy instead.
+slots.exempt_from_cooldown(YOUTUBE_SLOT, _through_a_proxy_now)
+slots.extra_slots(YOUTUBE_SLOT, lambda: proxy.usable_count(YOUTUBE))
 # ...and no waiting at all when it would fail anyway
 slots.fail_fast(YOUTUBE_SLOT, youtube_gate.fail_fast)
 
@@ -460,10 +474,14 @@ async def _download_youtube(url: str, temp_path: str, ydl_opts: dict[str, Any],
                     skip_unavailable_fragments=False, fragment_retries=2,
                     retries=1, extractor_retries=1, socket_timeout=15)
     route = proxy.route()
-    if (route is None and divert_when_paused and youtube_gate.paused()
-            and (route := proxy.divert(YOUTUBE))):
-        logger.info(f"🔀 YouTube is paused for this server's address; retrieving {url} "
-                    f"through the proxy {route.url}.")
+    if route is None and divert_when_paused:
+        if youtube_gate.paused() and (route := proxy.divert(YOUTUBE)):
+            logger.info(f"🔀 YouTube is paused for this server's address; retrieving {url} "
+                        f"through the proxy {route.url}.")
+        elif slots.started_unpaced(YOUTUBE_SLOT) and (route := proxy.divert(YOUTUBE)):
+            # Started beside this server's paced lane: in parallel, through a proxy
+            logger.debug(f"🔀 Retrieving {url} through the proxy {route.url}, in parallel "
+                         f"to this server's own YouTube pace.")
     if route is not None:
         # The proxy's address is not the one YouTube flagged: every client group, no
         # pacing, and a refusal pauses nothing

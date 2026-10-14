@@ -22,10 +22,14 @@ Which proxy (`pick()`): each endpoint keeps a record (`proxy_health.json` beside
 config) of its last test -- exit address, country, city, network, latency -- and, per
 method, how often it got through and how often it was refused, decaying over days: its
 reputation there. An endpoint whose test failed or that failed as a proxy recently is
-left out; one refused by a method rests from that method for a while (YouTube: as long
-as YouTube's pause, `youtube_pause`); of the rest, the best reputation for the method
-wins, the least recently used among equals, so that the load and the risk of flagging
-spread across the addresses. The endpoints are tested again every `proxy_test_interval`.
+left out; one refused by a platform rests from that platform's method for a while
+(YouTube: as long as YouTube's pause, `youtube_pause`), one refused by a website (the
+browser, plain requests) from that website only. Of the rest, the best reputation for the
+method wins, the least recently used among equals, so that the load and the risk of
+flagging spread across the addresses. A region block (HTTP 451, "not available in your
+country") mars no reputation: the next try comes from another region -- for a site that
+blocks Europe, from outside Europe. The endpoints are tested again every
+`proxy_test_interval`, and with them this server's own location.
 
 An attempt runs with the proxy set as its *route* (a context variable), and every
 transport consults it: yt-dlp (`proxy` option), aiohttp (`proxy=` per request; HTTP
@@ -80,6 +84,15 @@ _PROXY_FAILURE_MARKERS = ("err_proxy", "err_tunnel", "proxyerror", "proxy error"
 
 # Where a test asks for the exit address and its location
 ECHO_URL = "https://ipinfo.io/json"
+
+# The methods that fetch any website: a refusal there is the website's, not a platform's
+WEB_METHODS = {"browser", "Plain HTTP"}
+
+# Blocked as one region by many sites (e.g. US news sites' HTTP 451 for the GDPR): the
+# EU, the EEA and the UK and Switzerland
+EUROPE = {"AT", "BE", "BG", "CH", "CY", "CZ", "DE", "DK", "EE", "ES", "FI", "FR", "GB",
+          "GR", "HR", "HU", "IE", "IS", "IT", "LI", "LT", "LU", "LV", "MT", "NL", "NO",
+          "PL", "PT", "RO", "SE", "SI", "SK"}
 
 HEALTH_PATH = CONFIG_DIR / "proxy_health.json"
 DEFAULT_TRIES = 3  # Proxies tried for one method of one URL, at most
@@ -244,6 +257,8 @@ class Health:
     down_until: float = 0.0  # Left out until then: it failed as a proxy
     down_reason: str = ""
     methods: dict[str, Record] = field(default_factory=dict)
+    # Until when it rests from a website ("<method>@<host>"), refused or region-blocked there
+    site_rests: dict[str, float] = field(default_factory=dict)
     day: str = ""
     requests: int = 0  # Attempts through it on `day`
     last_used: float = 0.0
@@ -251,9 +266,15 @@ class Health:
     def record(self, method: str) -> Record:
         return self.methods.setdefault(method, Record())
 
-    def resting(self, method: str, now: float) -> bool:
+    def resting(self, method: str, now: float, site: Optional[str] = None) -> bool:
+        if site and self.site_rests.get(f"{method}@{site}", 0) > now:
+            return True
         record = self.methods.get(method)
         return bool(record and record.rest_until > now)
+
+    def rest_from_site(self, method: str, site: str, until: float, now: float) -> None:
+        self.site_rests = {k: t for k, t in self.site_rests.items() if t > now}
+        self.site_rests[f"{method}@{site}"] = until
 
     def reputation(self, method: Optional[str], now: float) -> float:
         """With `method`, with that one; else across all."""
@@ -279,6 +300,7 @@ class Health:
                             "rest_until": r.rest_until if r.rest_until > now else None,
                             "last_refusal": r.last_refusal}
                         for m, r in sorted(self.methods.items())},
+            "site_rests": {k: t for k, t in sorted(self.site_rests.items()) if t > now},
             "requests_today": self.requests if self.day == today else 0,
             "last_used": self.last_used or None,
         }
@@ -294,6 +316,7 @@ class _HealthStore:
         self._entries: Optional[dict[str, Health]] = None
         self._saved_at = 0.0
         self.last_full_test = 0.0
+        self.server_country: Optional[str] = None  # Where this server is, as tested
 
     @property
     def entries(self) -> dict[str, Health]:
@@ -310,6 +333,7 @@ class _HealthStore:
             logger.warning(f"Could not read the proxies' records at {self.path}.", exc_info=True)
             return {}
         self.last_full_test = float(data.get("last_full_test") or 0)
+        self.server_country = data.get("server_country")
         entries = {}
         for url, raw in (data.get("endpoints") or {}).items():
             try:
@@ -341,6 +365,7 @@ class _HealthStore:
             partial = self.path.with_suffix(".json.part")
             partial.write_text(json.dumps({
                 "last_full_test": self.last_full_test,
+                "server_country": self.server_country,
                 "endpoints": {url: asdict(h) for url, h in self.entries.items()},
             }, indent=1), encoding="utf-8")
             partial.replace(self.path)
@@ -349,6 +374,13 @@ class _HealthStore:
 
 
 _health = _HealthStore()
+
+# Attempts going through each endpoint right now, by URL
+_in_flight: dict[str, int] = {}
+
+
+def in_flight(proxy: Proxy) -> int:
+    return _in_flight.get(proxy.url, 0)
 
 # Told the method an endpoint was refused by, e.g. to wake the URLs waiting for its slot
 _refusal_listeners: list[Callable[[str], None]] = []
@@ -365,35 +397,69 @@ def _rest_for(method: str) -> float:
     return float(get_setting("proxy_rest", DEFAULT_REST))
 
 
-def usable(proxy: Proxy, method: Optional[str] = None, now: Optional[float] = None) -> bool:
+def region(country: Optional[str]) -> Optional[str]:
+    """The region a site blocks `country` as part of: Europe as one, else the country."""
+    if not country:
+        return None
+    return "Europe" if country.upper() in EUROPE else country.upper()
+
+
+def region_of(proxy: Optional[Proxy]) -> Optional[str]:
+    """Where `proxy` exits (as last tested), or with None, where this server is."""
+    if proxy is None:
+        _health.entries  # Loads the server's country
+        return region(_health.server_country)
+    return region((_health.peek(proxy.url).test or {}).get("country"))
+
+
+def usable(proxy: Proxy, method: Optional[str] = None, now: Optional[float] = None,
+           site: Optional[str] = None, avoid_regions: Iterable[str] = ()) -> bool:
     """Whether `proxy` may be routed through now: in use, its last test not failed, not
-    down, and not resting from `method`."""
+    down, not resting from `method` (on `site`), and not exiting in `avoid_regions`."""
     now = now or time.time()
     health = _health.peek(proxy.url)
     return (proxy.enabled and not (health.test and not health.test.get("ok"))
             and health.down_until <= now
-            and not (method and health.resting(method, now)))
+            and not (method and health.resting(method, now, site))
+            and not (avoid_regions and region_of(proxy) in set(avoid_regions)))
 
 
-def pick(method: Optional[str] = None, exclude: Iterable[str] = ()) -> Optional[Proxy]:
-    """The endpoint to go through for `method`, or None if none is usable (see the
-    module's description). `exclude`: the URLs of endpoints tried already."""
-    now, excluded = time.time(), set(exclude)
-    candidates = [p for p in configured() if p.url not in excluded and usable(p, method, now)]
+def pick(method: Optional[str] = None, exclude: Iterable[str] = (), site: Optional[str] = None,
+         avoid_regions: Iterable[str] = ()) -> Optional[Proxy]:
+    """The endpoint to go through for `method` (to `site`), or None if none is usable (see
+    the module's description). `exclude`: the URLs of endpoints tried already;
+    `avoid_regions`: where the site turned out to be blocked."""
+    now, excluded, avoid = time.time(), set(exclude), set(avoid_regions) - {None}
+    candidates = [p for p in configured()
+                  if p.url not in excluded and usable(p, method, now, site, avoid)]
     if not candidates:
         return None
 
     def rank(proxy: Proxy):
         health = _health.peek(proxy.url)
         latency = (health.test or {}).get("latency_ms") or 10 ** 6
-        # Reputation in steps of a tenth, so that endpoints about as good take turns
-        return -round(health.reputation(method, now), 1), health.last_used, latency
+        # An idle one first: parallel retrievals spread across the addresses. Then the
+        # reputation, in steps of a tenth, so that endpoints about as good take turns.
+        return (in_flight(proxy), -round(health.reputation(method, now), 1),
+                health.last_used, latency)
     return min(candidates, key=rank)
 
 
-def available(method: Optional[str] = None) -> bool:
-    """Whether a proxy would be picked for `method` now."""
-    return pick(method) is not None
+def usable_count(method: Optional[str] = None) -> int:
+    """How many endpoints `method` could go through now."""
+    now = time.time()
+    return sum(usable(p, method, now) for p in configured())
+
+
+def idle(method: Optional[str] = None) -> bool:
+    """Whether an endpoint usable for `method` has no attempt going through it."""
+    now = time.time()
+    return any(usable(p, method, now) and not in_flight(p) for p in configured())
+
+
+def available(method: Optional[str] = None, site: Optional[str] = None) -> bool:
+    """Whether a proxy would be picked for `method` (to `site`) now."""
+    return pick(method, site=site) is not None
 
 
 def proxy_failed(error: BaseException) -> bool:
@@ -403,8 +469,10 @@ def proxy_failed(error: BaseException) -> bool:
     return any(marker in text for marker in _PROXY_FAILURE_MARKERS)
 
 
-def learn(proxy: Proxy, method: str, error: Optional[BaseException]) -> None:
-    """Records how an attempt through `proxy` went: `error` None if it got the page."""
+def learn(proxy: Proxy, method: str, error: Optional[BaseException],
+          site: Optional[str] = None) -> None:
+    """Records how an attempt through `proxy` to `site` went: `error` None if it got the
+    page."""
     now = time.time()
     health = _health.get(proxy.url)
     if error is None:
@@ -420,6 +488,12 @@ def learn(proxy: Proxy, method: str, error: Optional[BaseException]) -> None:
                        f"out for {DOWN_FOR / 60:.0f} min.")
         _health.save(force=True)
         return
+    if isinstance(error, RegionBlockedError):
+        # Its location, not its reputation: other sites may well serve that region
+        if site:
+            health.rest_from_site(method, site, now + _rest_for(method), now)
+            _health.save(force=True)
+        return
     challenged = isinstance(error, CaptchaEncounteredError)
     if not (challenged or ip_blocked(error)):
         return  # The site's doing, whichever address asked: says nothing about the proxy
@@ -429,8 +503,13 @@ def learn(proxy: Proxy, method: str, error: Optional[BaseException]) -> None:
     record.last_refusal = str(error).splitlines()[0][:200]
     if not challenged:  # A CAPTCHA mars the reputation, but a human may still solve it
         rest = _rest_for(method)
-        record.rest_until = now + rest
-        logger.info(f"🔀 {method} refused the proxy {proxy.url}; it rests from {method} for "
+        if method in WEB_METHODS and site:  # One website's refusal: rest from it only
+            health.rest_from_site(method, site, now + rest, now)
+            what = site
+        else:
+            record.rest_until = now + rest
+            what = method
+        logger.info(f"🔀 {what} refused the proxy {proxy.url}; it rests from {what} for "
                     f"{rest / 60:.0f} min.")
         for listener in _refusal_listeners:
             try:
@@ -475,6 +554,7 @@ def attempt(proxy: Optional[Proxy]):
         _attempt.reset(token)
         if current.used and current.proxy is not None:
             note_use(current.proxy)
+            _in_flight[current.proxy.url] = max(0, in_flight(current.proxy) - 1)
 
 
 def route() -> Optional[Proxy]:
@@ -483,7 +563,9 @@ def route() -> Optional[Proxy]:
     current = _attempt.get()
     if current is None or current.proxy is None:
         return None
-    current.used = True
+    if not current.used:
+        current.used = True
+        _in_flight[current.proxy.url] = in_flight(current.proxy) + 1
     return current.proxy
 
 
@@ -570,6 +652,7 @@ def status() -> dict:
         "requests_today": sum(r["requests_today"] for r in records),
         "last_used": max((r["last_used"] or 0 for r in records), default=0) or None,
         "last_full_test": _health.last_full_test or None,
+        "server_country": _health.server_country,
     }
 
 
@@ -618,13 +701,25 @@ async def test_all() -> list[dict]:
     async def one(proxy: Proxy) -> dict:
         async with gate:
             return await test(proxy)
-    results = await asyncio.gather(*(one(p) for p in configured()))
+    results = await asyncio.gather(*(one(p) for p in configured()), _test_direct())
+    results = results[:-1]
     _health.last_full_test = time.time()
     _health.save(force=True)
     if results:
         working = sum(r["ok"] for r in results)
         logger.info(f"Tested the proxies: {working} of {len(results)} work.")
     return list(results)
+
+
+async def _test_direct() -> None:
+    """Where this server itself is: a site that blocks its region is tried from another."""
+    from scrapemm.server.download.requests import curl_get
+    try:
+        response = await curl_get(ECHO_URL, impersonate="chrome124", timeout=20)
+        if response.status_code == 200:
+            _health.server_country = response.json().get("country") or _health.server_country
+    except Exception:
+        logger.debug("Could not test this server's own location.", exc_info=True)
 
 
 async def test_regularly() -> None:

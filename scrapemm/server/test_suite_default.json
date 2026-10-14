@@ -767,9 +767,10 @@
  },
  {
   "url": "https://perma.cc/55YA-N88K",
-  "expected": {},
-  "category": "Perma.cc",
-  "expect": "unavailable"
+  "expected": {
+   "video": 1
+  },
+  "category": "Perma.cc"
  },
  {
   "url": "https://insse.ro/cms/sites/default/files/com_presa/anexa_date/pib_tr4r2025.xlsx",

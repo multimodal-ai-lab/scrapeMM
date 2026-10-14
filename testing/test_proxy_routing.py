@@ -5,7 +5,8 @@ import time
 
 import pytest
 
-from scrapemm.common.exceptions import AccessBlockedError, CaptchaEncounteredError, RetrievalFailed
+from scrapemm.common.exceptions import (AccessBlockedError, CaptchaEncounteredError,
+                                        RegionBlockedError, RetrievalFailed)
 from scrapemm.server import config, proxy
 
 pytestmark = pytest.mark.server
@@ -20,6 +21,7 @@ def setup(monkeypatch, tmp_path):
     monkeypatch.setattr(proxy, "_secret", lambda name: None)
     monkeypatch.setattr(proxy, "_health", proxy._HealthStore(tmp_path / "proxy_health.json"))
     monkeypatch.setattr(proxy, "_refusal_listeners", [])
+    monkeypatch.setattr(proxy, "_in_flight", {})
     return values
 
 
@@ -41,12 +43,52 @@ def test_they_take_turns_while_equally_good():
     assert sorted(picked) == [A, B, C]
 
 
-def test_a_refused_endpoint_rests_from_that_method_only():
-    proxy.learn(proxy.find(A), "browser", refusal())
-    proxy.learn(proxy.find(B), "browser", refusal())
-    assert proxy.pick("browser").url == C
-    assert proxy.pick("browser", exclude=[C]) is None
-    assert proxy.available("TikTok")  # Another method may still go through them
+def test_parallel_attempts_spread_across_idle_endpoints():
+    """YouTube in parallel: each retrieval through an endpoint of its own."""
+    for _ in range(5):
+        proxy.learn(proxy.find(A), "YouTube", None)  # The best, but busy
+    picked = []
+    with proxy.attempt(proxy.pick("YouTube")):
+        picked.append(proxy.route().url)
+        with proxy.attempt(proxy.pick("YouTube")):
+            picked.append(proxy.route().url)
+            assert proxy.idle("YouTube")
+            with proxy.attempt(proxy.pick("YouTube")):
+                picked.append(proxy.route().url)
+                assert not proxy.idle("YouTube")
+    assert picked[0] == A and sorted(picked) == [A, B, C]
+    assert proxy._in_flight == {A: 0, B: 0, C: 0}
+    assert proxy.usable_count("YouTube") == 3
+
+
+def test_a_refused_endpoint_rests_from_that_platform_only():
+    proxy.learn(proxy.find(A), "TikTok", refusal())
+    proxy.learn(proxy.find(B), "TikTok", refusal())
+    assert proxy.pick("TikTok").url == C
+    assert proxy.pick("TikTok", exclude=[C]) is None
+    assert proxy.available("Instagram")  # Another method may still go through them
+
+
+def test_a_website_refusal_rests_it_from_that_website_only():
+    proxy.learn(proxy.find(A), "browser", refusal(), site="example.com")
+    assert not proxy.usable(proxy.find(A), "browser", site="example.com")
+    assert proxy.usable(proxy.find(A), "browser", site="other.org")
+
+
+def _located(countries):
+    for url, country in zip((A, B, C), countries):
+        proxy._health.get(url).test = {"ok": True, "country": country}
+
+
+def test_a_region_block_moves_on_to_another_region_and_mars_nothing():
+    _located(["DE", "FR", "US"])
+    blocked = RegionBlockedError("https://news.example is blocked in this server's region (HTTP 451).")
+    proxy.learn(proxy.find(A), "browser", blocked, site="news.example")
+    assert proxy._health.peek(A).methods == {}  # No reputation lost
+    avoid = {proxy.region_of(proxy.find(A))}
+    assert avoid == {"Europe"}
+    assert proxy.pick("browser", site="news.example", avoid_regions=avoid).url == C
+    assert proxy.usable(proxy.find(A), "browser", site="elsewhere.example")
 
 
 def test_the_better_reputation_wins():

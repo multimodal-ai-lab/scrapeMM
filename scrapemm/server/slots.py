@@ -116,6 +116,28 @@ def limit_of(key: str) -> int:
     return max(1, int(configured)) if configured is not None else default_slots(key)
 
 
+# Slots a method has on top of its setting, by a function asked at every turn (see
+# `extra_slots()`)
+_extra: dict[str, Callable[[], int]] = {}
+
+
+def extra_slots(key: str, count: Callable[[], int]) -> None:
+    """Gives the method `count()` slots on top of its setting: YouTube one per usable
+    proxy, each of which is an address of its own, paced by nobody but YouTube."""
+    _extra[key] = count
+
+
+def capacity_of(key: str) -> int:
+    """The method's slots in all: its setting and its extra ones."""
+    extra = 0
+    if count := _extra.get(key):
+        try:
+            extra = max(0, int(count()))
+        except Exception:
+            extra = 0
+    return limit_of(key) + extra
+
+
 def cooldown_of(key: str) -> float:
     """The method's cooldown in seconds (0: none): the setting, else the default. A
     config from before still has YouTube's pace as `youtube_min_interval`."""
@@ -164,16 +186,16 @@ class Gate:
         exempt = _exemptions.get(self.key)
         return cooldown_of(self.key) > 0 and not (exempt is not None and exempt())
 
-    async def acquire(self) -> None:
+    async def acquire(self) -> bool:
         """Waits until a slot is free and, unless exempt, the cooldown is over; then takes
         the slot. Counts the wait as the URL's queue time if it is its first slot (see
-        `timing`)."""
+        `timing`). Returns whether the start was paced (not exempt from the cooldown)."""
         clock = timing.current()
         first = clock is not None and clock.admitted is None
         since = time.time()
         if check := _fail_fast.get(self.key):
             check()
-        if self.in_use >= limit_of(self.key) or (self._paced() and self.next_start > since):
+        if self.in_use >= capacity_of(self.key) or (self._paced() and self.next_start > since):
             self.waiting += 1
             if first:
                 clock.waiting_for_slot += 1
@@ -184,7 +206,8 @@ class Gate:
                 if first:
                     clock.waiting_for_slot -= 1
         self.in_use += 1
-        if self._paced():
+        paced = self._paced()
+        if paced:
             self.next_start = time.time() + cooldown_of(self.key) * random.uniform(
                 1.0, 1.0 + COOLDOWN_JITTER)
         if first and clock.admitted is None:  # Not admitted meanwhile by a hedged sibling
@@ -192,6 +215,7 @@ class Gate:
             # The host's reachability check may have started the clock already: the
             # wait for the first method is still queue time
             timing.wait_for_slot(time.time() - since)
+        return paced
 
     async def _wait(self) -> None:
         """Sleeps until woken (a slot freed, the settings changed) or the cooldown is
@@ -201,7 +225,7 @@ class Gate:
         loop = asyncio.get_running_loop()
         while True:
             now = time.time()
-            if self.in_use < limit_of(self.key):
+            if self.in_use < capacity_of(self.key):
                 delay = self.next_start - now if self._paced() else 0.0
                 if delay <= 0:
                     return
@@ -231,7 +255,7 @@ class Gate:
                 wakeup.set_result(None)
 
     def snapshot(self) -> dict:
-        return {"limit": limit_of(self.key), "in_use": self.in_use, "waiting": self.waiting,
+        return {"limit": capacity_of(self.key), "in_use": self.in_use, "waiting": self.waiting,
                 "cooldown": cooldown_of(self.key),
                 "next_start": self.next_start if self.next_start > time.time() else None}
 
@@ -240,6 +264,14 @@ _gates: dict[str, Gate] = {}
 
 # The keys whose slot the current task (and the tasks it spawned) holds
 _held: ContextVar[frozenset[str]] = ContextVar("held_slots", default=frozenset())
+# ...and of those, the keys whose slot it took exempt from the cooldown
+_unpaced: ContextVar[frozenset[str]] = ContextVar("unpaced_slots", default=frozenset())
+
+
+def started_unpaced(key: str) -> bool:
+    """Whether the current task took its slot of `key` exempt from the cooldown: YouTube
+    then goes through a proxy, not this server's paced address."""
+    return key in _unpaced.get()
 
 
 def gate(key: str) -> Gate:
@@ -258,12 +290,16 @@ async def hold(key: str):
         yield
         return
     g = gate(key)
-    await g.acquire()
+    paced = await g.acquire()
+    unpaced = _unpaced.get()
     _held.set(held | {key})
+    if not paced:
+        _unpaced.set(unpaced | {key})
     try:
         yield
     finally:
         _held.set(held)
+        _unpaced.set(unpaced)
         g.release()
 
 
@@ -302,6 +338,8 @@ def methods() -> list[dict]:
             name, kind = METHOD_INFO[key].name, "method"
         result.append({"key": key, "name": name, "kind": kind,
                        "slots": limit_of(key), "slots_default": default_slots(key),
+                       # On top, e.g. YouTube's one per usable proxy (see `extra_slots()`)
+                       "extra_slots": capacity_of(key) - limit_of(key),
                        "cooldown": cooldown_of(key), "cooldown_default": default_cooldown(key)})
     return result
 
