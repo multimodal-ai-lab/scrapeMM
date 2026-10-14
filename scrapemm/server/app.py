@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.routing import Match
 
 from scrapemm.common.paths import APP_NAME
-from . import interrupts, logbuffer, looplag, registry
+from . import interrupts, logbuffer, looplag, proxy, registry
 from .api import ROUTERS
 from .auth import log_api_key
 from .jobs import jobs
@@ -65,11 +65,13 @@ async def lifespan(app: FastAPI):
     warmup = asyncio.create_task(_warm_caches())
     lag_watch = asyncio.create_task(looplag.watch())
     pruning = asyncio.create_task(_prune_regularly())
+    proxy_tests = asyncio.create_task(proxy.test_regularly())
     yield
     interrupts.begin_shutdown()  # Jobs cancelled from here on are interrupted by the server
     warmup.cancel()
     lag_watch.cancel()
     pruning.cancel()
+    proxy_tests.cancel()
     await close_search_sessions()
     jobs.close()
     logger.info("scrapeMM server stopped.")

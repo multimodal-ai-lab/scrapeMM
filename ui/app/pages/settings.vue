@@ -53,7 +53,7 @@ const GROUPS: { label: string, entries: Entry[] }[] = [
     { id: 'secrets', label: 'Secrets', icon: 'i-fa7-solid-lock',
       blurb: 'The credentials the integrations need.' },
     { id: 'proxy', label: 'Proxy', icon: 'i-fa7-solid-shuffle',
-      blurb: 'A way around sites that refuse this server\'s address.' },
+      blurb: 'Ways around sites that refuse this server\'s address: as many endpoints as you have, picked by their record.' },
   ] },
 ]
 
@@ -316,7 +316,10 @@ onBeforeUnmount(() => clearInterval(statsTimer))
           </template>
 
           <SecretsSection v-else-if="e.id === 'secrets'" />
-          <ProxySection v-else-if="e.id === 'proxy'" />
+          <template v-else-if="e.id === 'proxy'">
+            <ProxySection />
+            <SettingsFields section="proxy" title="Proxy routing" />
+          </template>
 
           <template v-else>
             <p v-if="e.id === 'integrations'" class="text-xs text-muted">

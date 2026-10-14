@@ -116,6 +116,8 @@ export function useAttention() {
 }
 
 export function proxyTone(proxy: any): HealthTone {
-  const test = proxy.last_test
-  return test && !test.ok ? 'warning' : proxy.enabled ? 'success' : 'neutral'
+  if (!proxy.enabled) return 'neutral'
+  // None usable is as good as none; some down or failing deserve a look
+  if (!proxy.usable_count) return 'error'
+  return proxy.usable_count < proxy.enabled_count ? 'warning' : 'success'
 }

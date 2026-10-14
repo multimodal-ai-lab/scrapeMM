@@ -117,6 +117,7 @@ BGUTIL_SERVER_HOME = os.environ.get("BGUTIL_SERVER_HOME",
 YOUTUBE_CLIENT_GROUPS: tuple[tuple[str, ...], ...] = (("default",), ("mweb",))
 
 YOUTUBE_SLOT = "youtube"
+YOUTUBE = "YouTube"  # The method's name, as the proxies' records know it
 
 # Seconds YouTube is not asked again after it refused this server (bot check, stream);
 # the setting `youtube_pause`, formerly `youtube_cooldown`
@@ -137,20 +138,15 @@ class _YouTubeGate:
     def __init__(self):
         self.blocked_until = 0.0  # Until when YouTube is paused (0: not paused)
         self.reason = ""
-        # Until when the proxy is left alone too, after YouTube refused it as well
-        self.proxy_blocked_until = 0.0
 
     def paused(self) -> bool:
         return self.blocked_until > time.time()
 
-    def proxy_refused(self) -> bool:
-        return self.proxy_blocked_until > time.time()
-
     def hopeless(self) -> bool:
         """Whether a YouTube retrieval would fail now whatever it tried: YouTube is paused
-        for this server's address, and there is no proxy to go through, or YouTube refused
-        that too."""
-        return self.paused() and (proxy.active() is None or self.proxy_refused())
+        for this server's address, and there is no proxy to go through -- none configured,
+        or each resting after YouTube refused it too (see `proxy.learn()`)."""
+        return self.paused() and not proxy.available(YOUTUBE)
 
     def fail_fast(self) -> None:
         """Fails at once if a retrieval would be hopeless (see `hopeless()`): asked by the
@@ -164,29 +160,16 @@ class _YouTubeGate:
         """Fails at once while YouTube is being left alone."""
         if self.paused():
             until = datetime.fromtimestamp(self.blocked_until).strftime("%H:%M")
-            if self.proxy_refused():
-                meanwhile = "YouTube refused the proxy as well."
-            elif proxy.active():
-                meanwhile = "YouTube videos go through the proxy meanwhile."
+            if proxy.available(YOUTUBE):
+                meanwhile = "YouTube videos go through a proxy meanwhile."
+            elif any(p.enabled for p in proxy.configured()):
+                meanwhile = "YouTube refused every proxy in use as well, or none works."
             else:
                 meanwhile = "A proxy (Settings, Proxy) would retrieve YouTube videos meanwhile."
             raise RateLimitError(
                 f"YouTube refused this server ({self.reason}), so YouTube retrievals are "
                 f"paused until {until} to let the flag on this server's address expire. "
                 f"Asking again now would only extend it. {meanwhile}")
-
-    def trip_proxy(self, reason: str) -> None:
-        """Leaves the proxy alone too, for as long as a pause lasts, after YouTube refused
-        it with every client: each further YouTube URL through it would only fail the
-        same way, after seconds of trying."""
-        if self.proxy_refused():
-            return
-        pause = youtube_pause()
-        self.proxy_blocked_until = time.time() + pause
-        slots.wake(YOUTUBE_SLOT)  # The URLs waiting for a slot: they fail at once now
-        logger.warning(f"🤖 YouTube refused the proxy as well ({reason}). Not sending YouTube "
-                       f"retrievals through it for {pause / 60:.0f} min; while YouTube is "
-                       f"paused, they fail at once.")
 
     def trip(self, reason: str) -> None:
         """Pauses YouTube after it refused this server."""
@@ -199,10 +182,20 @@ class _YouTubeGate:
         slots.wake(YOUTUBE_SLOT)
         logger.warning(f"🤖 YouTube refused this server ({reason}). Pausing YouTube "
                        f"retrievals for {span} so the flag on this address can expire"
-                       f"{'; going through the proxy meanwhile' if proxy.active() else ''}.")
+                       f"{'; going through a proxy meanwhile' if proxy.available(YOUTUBE) else ''}.")
 
 
 youtube_gate = _YouTubeGate()
+
+
+def _proxy_refused(method: str) -> None:
+    """After YouTube refused a proxy too (it then rests from YouTube; see `proxy.learn()`):
+    if none is left, the URLs waiting for the slot fail at once."""
+    if method == YOUTUBE and youtube_gate.hopeless():
+        slots.wake(YOUTUBE_SLOT)
+
+
+proxy.on_refusal(_proxy_refused)
 
 # No pace through the proxy: YouTube flags this server's address, not the proxy's. Nor
 # while YouTube is paused: a URL then goes through the proxy, or fails at once.
@@ -468,9 +461,9 @@ async def _download_youtube(url: str, temp_path: str, ydl_opts: dict[str, Any],
                     retries=1, extractor_retries=1, socket_timeout=15)
     route = proxy.route()
     if (route is None and divert_when_paused and youtube_gate.paused()
-            and not youtube_gate.proxy_refused() and (route := proxy.divert())):
+            and (route := proxy.divert(YOUTUBE))):
         logger.info(f"🔀 YouTube is paused for this server's address; retrieving {url} "
-                    f"through the proxy.")
+                    f"through the proxy {route.url}.")
     if route is not None:
         # The proxy's address is not the one YouTube flagged: every client group, no
         # pacing, and a refusal pauses nothing
@@ -511,9 +504,8 @@ async def _download_youtube(url: str, temp_path: str, ydl_opts: dict[str, Any],
                                       else "it refused the video's stream")
                     raise classified from e
                 break  # Through the proxy: the next client group may get through
-    if route is not None and last_error is not None and _is_bot_wall(last_error):
-        # Every client group refused through the proxy too
-        youtube_gate.trip_proxy(str(last_error).split(":")[0])
+    # Through a proxy, every client group was refused too: the engine has that proxy
+    # rest from YouTube and tries the next (see `proxy.learn()`)
     raise last_error or RateLimitError("YouTube retrievals are paused.")
 
 

@@ -336,13 +336,13 @@ const tiles = computed(() => {
 })
 
 function proxyTile(proxy: any) {
-  const test = proxy.last_test
   const paused = proxy.youtube_paused_until
-  const parts = [`${proxy.requests_today} through it today`]
-  if (test) parts.push(test.ok ? `tested: ${test.ip}${test.country ? ` (${test.country})` : ''}` : 'last test failed')
+  const parts = [`${proxy.requests_today} through them today`]
+  if (proxy.countries?.length) parts.push(proxy.countries.join(', '))
+  if (proxy.failed_tests) parts.push(`${proxy.failed_tests} failed the last test`)
   if (paused) parts.push(`YouTube paused until ${new Date(paused * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`)
-  return { label: 'Proxy', icon: 'i-fa7-solid-shuffle',
-    value: proxy.enabled ? 'On' : 'Off',
+  return { label: proxy.count === 1 ? 'Proxy' : 'Proxies', icon: 'i-fa7-solid-shuffle',
+    value: proxy.enabled ? `${proxy.usable_count}/${proxy.count}` : 'Off',
     tone: proxyTone(proxy),
     detail: parts.join(' · '), to: '/settings?section=proxy' }
 }

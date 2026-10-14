@@ -450,10 +450,11 @@ async def _retrieve(
             # Only from this server, maybe (e.g. its IP is blocked): services that fetch
             # from elsewhere still get their chance, the local methods are skipped
             local = _local_methods()
-            if proxy.active():
-                # ...unless they can go through the proxy: from its address, the host
-                # may well answer
-                proxy_first = {m for m in methods if m in local and m in proxy.PROXY_METHODS}
+            if proxy.available():
+                # ...unless they can go through a proxy: from its address, the host may
+                # well answer
+                proxy_first = {m for m in methods if m in local and m in proxy.PROXY_METHODS
+                               and proxy.available(m)}
                 local = local - proxy_first
                 if proxy_first:
                     logger.info(f"🔀 {url} is unreachable from this server; trying "
@@ -535,52 +536,69 @@ async def _retrieve(
     proxied: set[str] = set()
     direct_errors: dict[str, Exception] = {}
 
-    async def run_attempt(method_name: str, via_proxy: bool) -> tuple[tuple[str, object], bool]:
-        """Runs the method once, through the proxy if so, and classifies its outcome.
-        Also returns whether the attempt went through the proxy."""
-        with proxy.attempt(proxy.active() if via_proxy else None) as current:
+    async def run_attempt(method_name: str, via: Optional[proxy.Proxy]
+                          ) -> tuple[tuple[str, object], proxy.Attempt]:
+        """Runs the method once, through `via` if given, and classifies its outcome. Also
+        returns the attempt: whether, and through which proxy, it went."""
+        with proxy.attempt(via) as current:
             content = await _execute(url, map_method_to_retrieval_routine, method_name, session)
         if isinstance(content, Exception):
-            return ("error", content), current.used
-        # In a thread: the checks parse the whole page (BeautifulSoup for the paywall
-        # check), which for a large page held the event loop -- every request -- for
-        # seconds. In a thread, the loop keeps getting its turns.
-        return await run_light(_classify, url, method_name, content, output_format), current.used
+            outcome = ("error", content)
+        else:
+            # In a thread: the checks parse the whole page (BeautifulSoup for the paywall
+            # check), which for a large page held the event loop -- every request -- for
+            # seconds. In a thread, the loop keeps getting its turns.
+            outcome = await run_light(_classify, url, method_name, content, output_format)
+        if current.used:  # Its record: how this proxy fares with this method
+            proxy.learn(current.proxy, method_name,
+                        outcome[1] if outcome[0] == "error" else None)
+        return outcome, current
 
     async def evaluate(method_name: str) -> tuple[str, object]:
         """Runs one method and classifies its outcome. A method that failed because of
-        this server's address is retried once through the proxy, if one is in use."""
+        this server's address is retried through a proxy, if one is usable for it -- and
+        refused there too, through the next, up to `proxy_tries` proxies."""
         local = method_name in _local_methods()
+        proxy_ok = method_name in proxy.PROXY_METHODS and proxy.available(method_name)
         via_proxy = method_name in proxy_first
         if region_blocked and local:
-            if not (method_name in proxy.PROXY_METHODS and proxy.active()):
+            if not proxy_ok:
                 return "error", RegionBlockedError(f"Skipped: {region_blocked[0]}")
             via_proxy = True  # From the proxy's region instead
         if refused_here and local and not via_proxy:
-            if not (method_name in proxy.PROXY_METHODS and proxy.active()):
+            if not proxy_ok:
                 return "error", AccessBlockedError(f"Skipped: {refused_here[0]}")
             via_proxy = True  # From the proxy's address instead
-        logger.debug(f"Now executing {method_name}{' through the proxy' if via_proxy else ''}...")
-        outcome, used = await run_attempt(method_name, via_proxy)
-        if (local and not used and isinstance(outcome[1], AccessBlockedError)
+        logger.debug(f"Now executing {method_name}{' through a proxy' if via_proxy else ''}...")
+        outcome, current = await run_attempt(method_name,
+                                             proxy.pick(method_name) if via_proxy else None)
+        if (local and not current.used and isinstance(outcome[1], AccessBlockedError)
                 and proxy.ip_blocked(outcome[1])):
             if not refused_here:
                 logger.info(f"⛔ {url} refuses this server; skipping the other methods that "
                             f"fetch from here"
-                            f"{' (or going through the proxy)' if proxy.active() else ''}.")
+                            f"{' (or going through a proxy)' if proxy_ok else ''}.")
             refused_here.append(outcome[1])
-        if outcome[0] == "error" and not used and proxy.retry_worthy(method_name, outcome[1]):
-            logger.info(f"🔀 Retrying {method_name} for {url} through the proxy: "
+        tried = [current.proxy.url] if current.used else []
+        while (outcome[0] == "error" and method_name in proxy.PROXY_METHODS
+               and proxy.ip_blocked(outcome[1]) and len(tried) < proxy.tries()
+               and (via := proxy.pick(method_name, exclude=tried))):
+            logger.info(f"🔀 Retrying {method_name} for {url} through the proxy {via.url}: "
                         f"{str(outcome[1]).splitlines()[0][:200]}")
-            direct_errors[method_name] = outcome[1]
-            outcome, used = await run_attempt(method_name, True)
-        if used:
+            if not current.used:
+                direct_errors[method_name] = outcome[1]
+            outcome, current = await run_attempt(method_name, via)
+            if current.used:
+                tried.append(current.proxy.url)
+            else:
+                break  # The method did not go through it after all: another would not either
+        if tried:
             proxied.add(method_name)
         elif isinstance(outcome[1], RegionBlockedError) and local:
             if not region_blocked:
                 logger.info(f"🌍 {url} is withheld from this server's region; skipping the "
                             f"other methods that fetch from here"
-                            f"{' (or going through the proxy)' if proxy.active() else ''}.")
+                            f"{' (or going through a proxy)' if proxy_ok else ''}.")
             region_blocked.append(outcome[1])
         return outcome
 

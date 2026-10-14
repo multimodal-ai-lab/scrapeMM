@@ -60,6 +60,11 @@ SETTINGS: dict[str, type] = {
     "min_post_media_side": int,  # The same for platform posts' own media (see `post_media`)
     "max_seconds_per_medium": float,
     "job_max_stored_kb": int,
+    # Proxies (see `proxy`): how many one method tries per URL, how long an endpoint
+    # rests from a method that refused it, how often all are tested
+    "proxy_tries": int,
+    "proxy_rest": float,
+    "proxy_test_interval": float,
     "test_runs_kept": int,
     "wayback_hit_ttl": float,
     "wayback_miss_ttl": float,
@@ -143,6 +148,7 @@ def schema() -> list[dict]:
     from .integrations.archive_today import DEFAULT_SOLVE_TIMEOUT
     from .integrations.headed_browser import DEFAULT_DEVTOOLS_LOCAL_PORT, DEFAULT_MAX_BROWSER_PAGES
     from .integrations.ytdlp import DEFAULT_YOUTUBE_PAUSE
+    from . import proxy
     from .jobs import DEFAULT_MAX_JOBS, DEFAULT_RETENTION_DAYS
     from .search.base import DEFAULT_MAX_SEARCH_CONCURRENCY
     from .cache import FAILED_MEDIA_MEMORY
@@ -243,6 +249,16 @@ def schema() -> list[dict]:
         entry("job_max_stored_kb", MAX_STORED_CONTENT // 1024, "Content stored per field",
               "A job's stored HTML, Markdown or multimodal text is cut beyond this; the UI "
               "says so.", "history", unit="KB", min=16, max=16384),
+        entry("proxy_tries", proxy.DEFAULT_TRIES, "Proxies tried per method",
+              "When a site refuses a proxy too, the next best one is tried, up to this many "
+              "for one method of one URL.", "proxy", min=1, max=20),
+        entry("proxy_rest", proxy.DEFAULT_REST, "Rest after a refusal",
+              "How long a proxy is not sent to a method that refused it. For YouTube, the "
+              "YouTube pause applies instead.", "proxy", unit="s", min=0),
+        entry("proxy_test_interval", proxy.DEFAULT_TEST_INTERVAL, "Test all proxies every",
+              "Keeps their location and health current: a dead proxy drops out of the "
+              "routing, a revived one comes back. 0 tests only on request.", "proxy",
+              unit="s", min=0),
         entry("test_runs_kept", MAX_RUNS_KEPT, "Test suite runs kept",
               "The oldest test suite reports go first.", "history", min=1, max=500),
         entry("min_media_side", MIN_MEDIA_SIDE, "Minimum size of page media",

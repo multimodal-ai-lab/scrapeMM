@@ -449,8 +449,8 @@ async def environment() -> dict:
 
 
 def proxy_status() -> dict:
-    """The proxy (see `scrapemm.server.proxy`), and until when YouTube is paused for this
-    server's address, during which YouTube retrievals go through it."""
+    """The proxies (see `scrapemm.server.proxy`), and until when YouTube is paused for
+    this server's address, during which YouTube retrievals go through them."""
     from scrapemm.server import proxy
     from scrapemm.server.integrations.ytdlp import youtube_gate
     paused = youtube_gate.blocked_until
