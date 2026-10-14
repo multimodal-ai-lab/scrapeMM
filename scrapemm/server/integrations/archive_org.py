@@ -6,6 +6,7 @@ import re
 from contextlib import suppress
 import logging
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 import aiohttp
@@ -14,7 +15,7 @@ from playwright.async_api import TimeoutError, Page, Frame, Error as PlaywrightE
 
 from scrapemm.common import RetrievalFailed
 from scrapemm.common.exceptions import TargetUnavailableError
-from scrapemm.common.scraping_response import ScrapedContent
+from scrapemm.common.scraping_response import Capture, ScrapedContent
 from scrapemm.server.download.common import HEADERS
 from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget, settle_dom
 from scrapemm.server.download.browser import (BLOB_ATTR, MAX_VIDEO_BYTES, install_stash,
@@ -286,6 +287,17 @@ async def _collected_video(frame: Frame) -> bool:
         return False
 
 
+def wayback_time(timestamp: str) -> Optional[str]:
+    """A Wayback timestamp (YYYYMMDDhhmmss, UTC) in ISO 8601; None if it is only a
+    partial one (a year, a day), which the Wayback Machine takes for the nearest capture."""
+    if len(timestamp) != 14:
+        return None
+    try:
+        return datetime.strptime(timestamp, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc).isoformat()
+    except ValueError:
+        return None
+
+
 class ArchiveOrg(HeadedBrowser):
     """Integration for retrieving content from archive.org (Internet Archive)."""
     name = "Internet Archive"
@@ -307,6 +319,14 @@ class ArchiveOrg(HeadedBrowser):
             return await super()._get(url, **kwargs)
         finally:
             _raw_capture_tried.reset(token)
+
+    async def _capture(self, url: str, **kwargs) -> Capture:
+        """The capture as its URL names it: web.archive.org/web/<timestamp>/<original>."""
+        archived = _WAYBACK_URL.match(url)
+        return Capture(archive="the Internet Archive (Wayback Machine)",
+                       original_url=archived.group(2) if archived else None,
+                       captured_at=wayback_time(archived.group(1)) if archived else None,
+                       archive_url=url)
 
     async def _from_raw_capture(self, url: str, **kwargs) -> Optional[ScrapedContent]:
         """The capture's text and its video, from the raw capture alone: the videos its

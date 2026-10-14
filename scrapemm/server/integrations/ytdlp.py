@@ -18,6 +18,7 @@ from yt_dlp.utils import (DownloadError, ExtractorError, GeoRestrictedError,
                           UnsupportedError, UserNotLive, YoutubeDLError)
 
 from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError, AccessBlockedError, RateLimitError
+from scrapemm.common.scraping_response import ScrapedContent, utc_iso
 from scrapemm.server import proxy, slots
 from scrapemm.server.config import get_config_var, get_setting
 from scrapemm.server.download import download_image
@@ -657,21 +658,14 @@ async def compose_data_to_sequence(metadata: dict, video: Video | None, thumbnai
     """Creates a MultimodalSequence from the yt-dlp metadata."""
     # title = metadata.get('title', '')
     uploader = metadata.get('uploader', 'Unknown')
-    upload_date = metadata.get('upload_date', '')
     duration = metadata.get('duration', 0)
     view_count = metadata.get('view_count', 0)
     like_count = metadata.get('like_count', 0)
     comment_count = metadata.get('comment_count', 0)
     description = metadata.get('description', '')
 
-    # Format upload date
-    formatted_date = upload_date
-    if upload_date and len(upload_date) == 8:
-        try:
-            date_obj = datetime.strptime(upload_date, '%Y%m%d')
-            formatted_date = date_obj.strftime('%Y-%m-%d')
-        except ValueError:
-            logger.debug(f"Could not parse yt-dlp upload_date: {upload_date!r}")
+    published = published_at(metadata)
+    formatted_date = posted_text(published) if published else "Unknown"
 
     omitted = f"\nVideo omitted: {reason}" if (reason := metadata.get(VIDEO_OMITTED)) else ""
 
@@ -798,10 +792,31 @@ async def get_content_with_ytdlp(
         session: aiohttp.ClientSession,
         platform: str,
         **kwargs
-) -> MultimodalSequence:
+) -> ScrapedContent:
     """Retrieves video, thumbnail, and metadata using the powerful yt-dlp package."""
     video, thumbnail, metadata = await download_video_with_ytdlp(url, session, **kwargs)
-    if metadata:
-        return await compose_data_to_sequence(metadata, video, thumbnail, platform)
-    else:
+    if not metadata:
         raise RetrievalFailed("Could not retrieve video metadata.")
+    return ScrapedContent(multimodal=await compose_data_to_sequence(metadata, video, thumbnail, platform),
+                          published_at=published_at(metadata))
+
+
+def published_at(metadata: dict) -> Optional[str]:
+    """When the video was uploaded: to the second where yt-dlp knows (`timestamp`), else
+    the day (`upload_date`), in ISO 8601, UTC."""
+    if isinstance(timestamp := metadata.get("timestamp"), (int, float)):
+        return utc_iso(timestamp)
+    upload_date = metadata.get("upload_date") or ""
+    try:
+        return datetime.strptime(upload_date, "%Y%m%d").strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def posted_text(published: str) -> str:
+    """A publication time (see `ScrapedContent.published_at`) as the text states it."""
+    try:
+        when = datetime.fromisoformat(published)
+    except ValueError:
+        return published
+    return when.strftime("%Y-%m-%d %H:%M UTC") if "T" in published else published

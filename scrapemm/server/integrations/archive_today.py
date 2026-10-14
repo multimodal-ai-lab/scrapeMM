@@ -55,7 +55,7 @@ from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError
 from scrapemm.server.config import get_config_var, update_config
 from scrapemm.server.paths import (SNAPSHOT_CACHE_PATH, PAGE_CACHE_DIR,
                                    BUFFER_PATH)
-from scrapemm.common.scraping_response import ScrapedContent
+from scrapemm.common.scraping_response import Capture, ScrapedContent
 from scrapemm.server.download.common import HEADERS as _DEFAULT_HEADERS
 from scrapemm.server.integrations.headed_browser import (HeadedBrowser, ContentTarget,
                                                         release_page, remote_view_hint)
@@ -910,6 +910,19 @@ class ArchiveToday(HeadedBrowser):
                 return await self._screenshot_content(snapshot, session, output_format)
 
         raise CaptchaEncounteredError(GATE_HINT)
+
+    async def _capture(self, url: str, **kwargs) -> Capture:
+        """The snapshot's original URL and time, from cse.js: one request per snapshot
+        ever, as `identify_snapshot()` keeps what it found for good."""
+        try:
+            snapshot = await identify_snapshot(url, kwargs.get("session"))
+        except Exception as e:
+            logger.debug(f"Could not identify the Archive.today snapshot {url}: {e}")
+            snapshot = None
+        if snapshot is None:
+            return Capture(archive="Archive.today", archive_url=url)
+        return Capture(archive="Archive.today", original_url=snapshot.original_url,
+                       captured_at=snapshot.captured_at, archive_url=snapshot.canonical_url)
 
     async def _get_via_browser(self, url: str, **kwargs) -> ScrapedContent:
         """Browser fetch path, used when plain HTTP is decoyed on this machine or cannot

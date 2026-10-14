@@ -27,6 +27,7 @@ from playwright.async_api import APIRequestContext, Page, Frame
 
 from scrapemm.server import budget
 from scrapemm.server.config import get_setting
+from scrapemm.server.domains import is_public_suffix
 from scrapemm.server.download import download_video, download_image
 from scrapemm.server.download.images import (min_media_side, _is_svg, image_from_binary,
                                              image_size, is_too_small)
@@ -68,8 +69,42 @@ def preprocess_url(url: str) -> str:
     # (an embed's `href=https%3A%2F%2F...%26id%3D...`): decoded, it names another address
     # and Megalodon has no capture of it (see `integrations.megalodon`)
     if not KEEP_ENCODED.match(url):
-        url = unquote(url).strip()
-    return _HOST_FIX_REGEX.sub(lambda m: m.group(1) + HOST_FIXES[m.group(2).lower()], url, count=1)
+        # In the query, characters with a meaning there stay encoded: decoded, a "%2B"
+        # would become a "+", which the server reads as a space (eci.gov.in's tokens)
+        path, mark, query = url.partition("?")
+        url = (unquote(path) + mark + unquote(_RESERVED_ESCAPE.sub(r"%25\1", query))).strip()
+    url = _HOST_FIX_REGEX.sub(lambda m: m.group(1) + HOST_FIXES[m.group(2).lower()], url, count=1)
+    return _site_rewrite(url)
+
+
+_RESERVED_ESCAPE = re.compile(r"%(2[Bb]|26|3[Dd]|23|3[Ff]|25|2[Ff])")  # + & = # ? % /
+# The Wayback Machine's address of a capture whose "https://" collapsed to "https:/"
+_WAYBACK_COLLAPSED = re.compile(r"^(https?://web\.archive\.org/web/[^/]+/)(https?:)/(?!/)", re.IGNORECASE)
+# A law on zakon.rada.gov.ua, not one of its sub-pages: its text is loaded by script, its
+# print view has it in the page
+_ZAKON_LAW = re.compile(r"^(https?://zakon\.rada\.gov\.ua/laws/show/)(?!.*/(?:card|print|conv|info|stru|"
+                        r"links|anot|ed\d{8})(?:[#?/]|$))([^#?]+?)/?(#.*)?$", re.IGNORECASE)
+# A judgment in HUDOC's app, named in its fragment ({"itemid":["001-224984"]}): the app
+# renders it by script, the document endpoint serves it as HTML
+_HUDOC_ITEM = re.compile(r'^https?://hudoc\.echr\.coe\.int/.*?(?:"itemid"\s*:\s*\[\s*"|[?&]i=)(\d{3}-\d+)',
+                         re.IGNORECASE)
+# A Telegram post as TGStat shows it (behind a login wall for this server): the same
+# post, from Telegram itself
+_TGSTAT_POST = re.compile(r"^https?://(?:www\.)?tgstat\.(?:ru|com)/(?:[a-z]{2}/)?channel/@([A-Za-z0-9_]{4,})/(\d+)/?(?:[?#].*)?$",
+                          re.IGNORECASE)
+
+
+def _site_rewrite(url: str) -> str:
+    """The address that serves the content of `url` better, for the few sites that have
+    one; `url` itself otherwise."""
+    url = _WAYBACK_COLLAPSED.sub(r"\1\2//", url)
+    if match := _ZAKON_LAW.match(url):
+        return f"{match.group(1)}{match.group(2)}/print{match.group(3) or ''}"
+    if match := _HUDOC_ITEM.match(url):
+        return f"https://hudoc.echr.coe.int/app/conversion/docx/html/body?library=ECHR&id={match.group(1)}"
+    if match := _TGSTAT_POST.match(url):
+        return f"https://t.me/{match.group(1)}/{match.group(2)}"
+    return url
 
 
 def get_domain(url: str, keep_subdomain: bool = False) -> Optional[str]:
@@ -80,9 +115,14 @@ def get_domain(url: str, keep_subdomain: bool = False) -> Optional[str]:
     if match:
         domain = match.group(1)
         if not keep_subdomain:
-            # Keep only second-level and top-level domain
-            domain = '.'.join(domain.split('.')[-2:])
+            # The registrable domain: the second-level and top-level domain, or three
+            # levels under a country's public second level (rada.gov.ua, bbc.co.uk), lest
+            # all of gov.ua share one CAPTCHA challenge, blacklisting and browser slot
+            labels = domain.split('.')
+            keep = 3 if len(labels) >= 3 and is_public_suffix('.'.join(labels[-2:])) else 2
+            domain = '.'.join(labels[-keep:])
         return domain
+
 
 
 async def run_with_semaphore(tasks: Iterable[Awaitable],

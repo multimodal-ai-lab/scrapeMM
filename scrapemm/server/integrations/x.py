@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlparse, parse_qs
 
@@ -12,7 +13,7 @@ from tweepy.asynchronous import AsyncClient
 from scrapemm.server import config
 from scrapemm.common import RetrievalFailed
 from scrapemm.common.exceptions import RateLimitError, TargetUnavailableError, QuotaExceededError
-from scrapemm.common.scraping_response import ScrapedContent
+from scrapemm.common.scraping_response import ScrapedContent, utc_iso
 from scrapemm.server.download import download_image, download_video
 from scrapemm.server.integrations.base import RetrievalIntegration
 from scrapemm.server.secrets import get_secret
@@ -88,7 +89,8 @@ class X(RetrievalIntegration):
         if sequence is None:
             raise RetrievalFailed(f"Could not retrieve content from X.")
 
-        return ScrapedContent(multimodal=sequence)
+        return ScrapedContent(multimodal=sequence,
+                              published_at=utc_iso(tweet_time(tweet_id)) if tweet_id else None)
 
     async def _normalize(self, url: str, session: aiohttp.ClientSession) -> str:
         """Turns URLs of the form https://publish.twitter.com/?query=...
@@ -178,12 +180,17 @@ class X(RetrievalIntegration):
         if failed:
             logger.warning(f"Tweet {tweet_id}: {len(failed)} of {len(media_raw)} media could "
                            f"not be downloaded ({', '.join(failed)}).")
+        posted = tweet.created_at.strftime("%Y-%m-%d %H:%M UTC")
         if media_number is not None:
-            return MultimodalSequence(media)
+            # The URL asks for this one medium; still, say whose post it is from, and when
+            return MultimodalSequence([f"**Medium {media_number} of a post on X** "
+                                       f"(https://x.com/{author.username}/status/{tweet_id})\n"
+                                       f"Author: {author.name}, @{author.username}\n"
+                                       f"Posted: {posted}\n", *media])
 
         tweet_str = f"""**Post on X**
 Author: {author.name}, @{author.username}
-Posted on: {tweet.created_at.strftime("%B %d, %Y at %H:%M")}
+Posted: {posted}
 Likes: {metrics['like_count']} - Retweets: {metrics['retweet_count']} - Replies: {metrics['reply_count']} - Views: {metrics['impression_count']}
 
 {text}"""  # TODO: Add edit history
@@ -279,7 +286,7 @@ def extract_tweet_id_from_url(url: str) -> tuple[Optional[int], Optional[int]]:
     try:
         parsed = urlparse(url)
         match = re.fullmatch(
-            r"/[^/]+/status/(\d+)(?:/(?:photo|video)/(\d+))?/?",
+            r"/(?:i/web|[^/]+)/status/(\d+)(?:/(?:photo|video)/(\d+))?/?",
             parsed.path,
         )
         if match:
@@ -316,3 +323,17 @@ if __name__ == "__main__":
         task = x.get(url)
         out = asyncio.run(task)
         print(out)
+
+
+# A post's ID is a "snowflake": its upper bits are the milliseconds since X's epoch
+TWITTER_EPOCH_MS = 1288834974657
+FIRST_SNOWFLAKE = 30_000_000_000  # Earlier IDs (before November 2010) were sequential
+
+
+def tweet_time(tweet_id: int) -> Optional[datetime]:
+    """When the post with this ID was made, without asking X; None for the early posts
+    whose IDs say nothing about it."""
+    if tweet_id < FIRST_SNOWFLAKE:
+        return None
+    return datetime.fromtimestamp(((tweet_id >> 22) + TWITTER_EPOCH_MS) / 1000,
+                                  tz=timezone.utc).replace(microsecond=0)

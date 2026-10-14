@@ -18,7 +18,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
 from .exceptions import exception_from_wire, exception_to_wire
-from .scraping_response import (OmittedMedium, OutputFormat, ScrapedContent, ScrapingResponse)
+from .scraping_response import (Capture, OmittedMedium, OutputFormat, ScrapedContent, ScrapingResponse)
 
 # Bumped whenever the shapes below change incompatibly. The client refuses a server
 # that speaks a different major protocol rather than failing in some subtler way later.
@@ -74,6 +74,8 @@ class ContentPayload:
     items: list[ItemDescriptor] = field(default_factory=list)
     stripped: bool = False
     omitted_media: list[OmittedMedium] = field(default_factory=list)
+    capture: Optional[Capture] = None
+    published_at: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -83,6 +85,8 @@ class ContentPayload:
             "items": [item.to_dict() for item in self.items],
             "stripped": self.stripped,
             "omitted_media": [medium.to_dict() for medium in self.omitted_media],
+            "capture": self.capture.to_dict() if self.capture else None,
+            "published_at": self.published_at,
         }
 
     @classmethod
@@ -94,6 +98,8 @@ class ContentPayload:
             items=[ItemDescriptor.from_dict(d) for d in data.get("items") or []],
             stripped=bool(data.get("stripped")),
             omitted_media=[OmittedMedium.from_dict(d) for d in data.get("omitted_media") or []],
+            capture=Capture.from_dict(data["capture"]) if data.get("capture") else None,
+            published_at=data.get("published_at"),
         )
 
 
@@ -152,6 +158,8 @@ class ResponsePayload:
                 multimodal=multimodal,
                 stripped=self.content.stripped,
                 omitted_media=self.content.omitted_media,
+                capture=self.content.capture,
+                published_at=self.content.published_at,
             )
             if not content:
                 content = None

@@ -824,5 +824,35 @@
    "video": 1
   },
   "category": "Open web"
+ },
+ {
+  "url": "https://zakon.rada.gov.ua/laws/show/2108-20#Text",
+  "expected": {},
+  "category": "Government"
+ },
+ {
+  "url": "https://hudoc.echr.coe.int/fre#%7B%22itemid%22:[%22001-224984%22]%7D",
+  "expected": {},
+  "category": "Government"
+ },
+ {
+  "url": "https://www.justice.gov/epstein/files/DataSet%209/EFTA00654215.pdf",
+  "expected": {},
+  "category": "Documents"
+ },
+ {
+  "url": "https://t.me/nab_ukraine/3875",
+  "expected": {},
+  "category": "Telegram"
+ },
+ {
+  "url": "https://tgstat.ru/channel/@tikandelaki/17334",
+  "expected": {},
+  "category": "Telegram"
+ },
+ {
+  "url": "https://x.com/GrandpaRoy2/status/1819424956826165467/photo/2",
+  "expected": {},
+  "category": "X"
  }
 ]

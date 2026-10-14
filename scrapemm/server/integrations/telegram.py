@@ -7,11 +7,12 @@ import sqlite3
 from ezmm import MultimodalSequence, Image, Item, Video
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
-from telethon.tl.types import Channel, User
+from telethon.tl.types import Channel, User, MessageMediaPhoto, MessageMediaDocument, Photo
 
 from scrapemm.common.exceptions import TargetUnavailableError, RateLimitError
-from scrapemm.common.scraping_response import ScrapedContent
+from scrapemm.common.scraping_response import ScrapedContent, utc_iso
 from scrapemm.server.download.images import decode_image
+from scrapemm.server.download.util import report_omitted
 from scrapemm.server.download.videos import is_too_small_video
 from scrapemm.server.secrets import get_secret
 from scrapemm.server.integrations.base import RetrievalIntegration
@@ -129,19 +130,19 @@ class Telegram(RetrievalIntegration):
         else:
             name = "Unknown"
 
-        edit_text = "\nEdit date: " + message.edit_date.strftime("%B %d, %Y at %H:%M") if message.edit_date else ""
+        edit_text = "\nEdit date: " + message.edit_date.strftime("%Y-%m-%d %H:%M UTC") if message.edit_date else ""
         reactions_text = "\nReactions: " + message.reactions.stringify() if message.reactions else ""
 
         text = f"""**Telegram Post**
 Author: {author_type} {name}
-Date: {message.date.strftime("%B %d, %Y at %H:%M")}{edit_text}
+Posted: {message.date.strftime("%Y-%m-%d %H:%M UTC")}{edit_text}
 Views: {message.views}
 Forwards: {message.forwards}{reactions_text}
 
 {' '.join(m.reference for m in media)}
 {message.text}"""
 
-        return ScrapedContent(multimodal=MultimodalSequence(text))
+        return ScrapedContent(multimodal=MultimodalSequence(text), published_at=utc_iso(message.date))
 
     async def _get_media_from_message(self, chat, original_post, max_amp=10, max_video_size=None) -> list[Item]:
         """
@@ -160,26 +161,36 @@ Forwards: {message.forwards}{reactions_text}
         # Download media of posts that belong to the same group
         media = []
         for post in posts:
-            if post is not None and post.grouped_id == original_post.grouped_id:
-                if medium := post.media:
-                    post_url = f"https://t.me/{chat.username}/{post.id}"
-                    medium_bytes = await self.client.download_media(post, file=bytes)
-                    if hasattr(medium, "photo"):
-                        # Held to the minimum size like any image (see `MIN_MEDIA_SIDE`)
-                        item = await decode_image(medium_bytes, source_url=post_url)
-                    elif hasattr(medium, "video"):
-                        item = Video(binary_data=medium_bytes, source_url=post_url)
-                        if max_video_size is not None and item.size > max_video_size:
-                            logger.info(f"Removing video {item.reference} because it exceeds the maximum size "
-                                        f"of {max_video_size / 1024 / 1024:.2f} MB.")
-                            item = None
-                        elif is_too_small_video(item):
-                            logger.info(f"Removing video {item.reference} because it is smaller "
-                                        f"than the minimum size.")
-                            item = None
-                    else:
-                        raise ValueError(f"Unsupported medium: {medium.__dict__}")
-                    if item is not None:  # Too small, or a video too large
-                        media.append(item)
+            if post is None or post.grouped_id != original_post.grouped_id or not post.media:
+                continue
+            medium = post.media
+            post_url = f"https://t.me/{chat.username}/{post.id}"
+            is_photo = isinstance(medium, MessageMediaPhoto) and isinstance(medium.photo, Photo)
+            # A document with video attributes: a video, a GIF, a round video
+            is_video = isinstance(medium, MessageMediaDocument) and post.video is not None
+            if not (is_photo or is_video):
+                # A link preview (also an empty or pending one), a poll, a location, a
+                # contact, audio, a file, ...: not the post's media; its text stands alone
+                logger.debug(f"Skipping the {type(medium).__name__} of {post_url}.")
+                continue
+            medium_bytes = await self.client.download_media(post, file=bytes)
+            if not medium_bytes:
+                continue
+            if is_photo:
+                # Held to the minimum size like any image (see `MIN_MEDIA_SIDE`)
+                item = await decode_image(medium_bytes, source_url=post_url)
+            else:
+                item = Video(binary_data=medium_bytes, source_url=post_url)
+                if max_video_size is not None and item.size > max_video_size:
+                    logger.info(f"Removing video {item.reference} because it exceeds the maximum size "
+                                f"of {max_video_size / 1024 / 1024:.2f} MB.")
+                    report_omitted(post_url, max_video_size, item.size)
+                    item = None
+                elif is_too_small_video(item):
+                    logger.info(f"Removing video {item.reference} because it is smaller "
+                                f"than the minimum size.")
+                    item = None
+            if item is not None:  # Too small, or a video too large
+                media.append(item)
 
         return media

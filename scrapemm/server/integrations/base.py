@@ -1,8 +1,9 @@
 import asyncio
 import logging
 from abc import ABC, abstractmethod
+from typing import Optional
 
-from scrapemm.common.scraping_response import ScrapedContent
+from scrapemm.common.scraping_response import Capture, ScrapedContent
 from scrapemm.server import timing
 from scrapemm.server.download.images import post_media
 from scrapemm.server.util import get_domain
@@ -82,9 +83,19 @@ class RetrievalIntegration(ABC):
         if not self.waits_for_browser_slot:
             timing.work_started()
         if not self.post_media:
-            return await self._get(url, **kwargs)
-        with post_media():
-            return await self._get(url, **kwargs)
+            content = await self._get(url, **kwargs)
+        else:
+            with post_media():
+                content = await self._get(url, **kwargs)
+        if content is not None and content.capture is None:
+            content.capture = await self._capture(url, **kwargs)
+        return content
+
+    async def _capture(self, url: str, **kwargs) -> Optional[Capture]:
+        """For an archive: what the capture at `url` is (service, original URL, time),
+        which the response then states before the content (see `Capture`). None for
+        everything that is no archive."""
+        return None
 
     async def probe(self) -> None:
         """Checks whether this integration could be used right now, for the dashboard.

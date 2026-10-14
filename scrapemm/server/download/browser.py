@@ -553,7 +553,7 @@ class BrowserMedia:
                 chunk = await asyncio.wait_for(
                     session.send("IO.read", {"handle": stream, "size": READ_CHUNK}), timeout=60)
                 data = chunk.get("data", "")
-                data = base64.b64decode(data) if chunk.get("base64Encoded") else data.encode("latin-1")
+                data = base64.b64decode(data) if chunk.get("base64Encoded") else data.encode("utf-8")  # Text chunks come decoded
                 chunks.append(data)
                 size += len(data)
                 if limit and size > limit:

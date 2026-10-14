@@ -32,6 +32,7 @@ from typing import Optional
 
 from scrapemm.common.paths import APP_NAME
 from .config import get_setting
+from .domains import is_public_suffix
 from .paths import CONFIG_DIR
 
 logger = logging.getLogger(APP_NAME)
@@ -166,6 +167,12 @@ class ChallengeStore:
             if entry.get("domain") in REPLAYING_ARCHIVES:
                 logger.info(f"Dropping the {entry['domain']} CAPTCHA challenge: its CAPTCHA "
                             f"is part of the archived copies, which nobody can solve.")
+                continue
+            if is_public_suffix(entry.get("domain") or ""):
+                # Recorded before challenges were held per registrable domain: it held all
+                # of gov.ua for one site's CAPTCHA. Its URLs are retried when asked again
+                logger.info(f"Dropping the {entry['domain']} CAPTCHA challenge: it stood for "
+                            f"every site under {entry['domain']}.")
                 continue
             try:
                 pending = [Pending(**p) for p in entry.pop("pending", [])]

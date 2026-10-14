@@ -14,7 +14,7 @@ from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTa
     renderer_crashed, evaluate_within
 from scrapemm.common import RetrievalFailed
 from scrapemm.common.exceptions import TargetUnavailableError
-from scrapemm.common.scraping_response import ScrapedContent
+from scrapemm.common.scraping_response import Capture, ScrapedContent, utc_iso
 
 logger = logging.getLogger("scrapeMM")
 
@@ -100,6 +100,13 @@ class PermaCC(HeadedBrowser):
 
     # TODO: Implement PDF support, e.g., https://perma.cc/83VA-LTH9
 
+    async def _capture(self, url: str, **kwargs) -> Capture:
+        """The record's capture time and original URL, as its page showed them (see
+        `_note_record()`)."""
+        captured_at, original = _records.get(_guid(url) or "", (None, None))
+        return Capture(archive="Perma.cc", original_url=original, captured_at=captured_at,
+                       archive_url=url)
+
     def _after_renderer_crash(self, url: str) -> str:
         """Replays of YouTube watch pages crash the tab's renderer within seconds on the
         production host, every time (SIGTRAP at ~800 MB, even alone in a fresh browser)
@@ -122,7 +129,9 @@ class PermaCC(HeadedBrowser):
         start = loop.time()
         retry_budget = float(get_setting("perma_cc_retry_budget", RETRY_BUDGET))
         shot = _screenshot_url(page.url)
-        if shot and _replays_poorly(await _captured_url(page)):
+        captured_url = await _captured_url(page)
+        await _note_record(page, captured_url)
+        if shot and _replays_poorly(captured_url):
             logger.info(f"{page.url} captures a YouTube player page; taking its screenshot "
                         f"({shot}).")
             with suppress(PlaywrightError):
@@ -429,6 +438,36 @@ _POOR_REPLAYS = re.compile(
 
 def _replays_poorly(url: Optional[str]) -> bool:
     return bool(url and _POOR_REPLAYS.match(url))
+
+
+# The record page states when it was made: "Captured" (or "Uploaded", for a file a user
+# uploaded) followed by insertLocalDateTime('date_...', <Unix seconds>, ...)
+_CREATION_JS = r"""() => {
+    const p = document.querySelector('p.creation');
+    const m = p && /insertLocalDateTime\([^,]+,\s*(\d+)/.exec(p.innerHTML);
+    return m ? Number(m[1]) : null;
+}"""
+# What the record pages said, by GUID: (captured_at, original URL). A record never changes.
+_records: dict[str, tuple[Optional[str], Optional[str]]] = {}
+MAX_RECORDS = 10_000
+
+
+def _guid(url: str) -> Optional[str]:
+    match = re.search(r"perma\.cc/([A-Z0-9]{4}-[A-Z0-9]{4})", url, re.IGNORECASE)
+    return match.group(1).upper() if match else None
+
+
+async def _note_record(page: Page, captured_url: Optional[str]) -> None:
+    """Keeps the record's capture time and original URL for its `Capture`. The replay runs
+    in a task of its own (see `HeadedBrowser._get()`), so they are kept by GUID."""
+    if not (guid := _guid(page.url)):
+        return
+    epoch = None
+    with suppress(Exception):
+        epoch = await page.evaluate(_CREATION_JS)
+    if len(_records) >= MAX_RECORDS:
+        _records.clear()
+    _records[guid] = (utc_iso(epoch) if epoch else None, captured_url)
 
 
 async def _captured_url(page: Page) -> Optional[str]:

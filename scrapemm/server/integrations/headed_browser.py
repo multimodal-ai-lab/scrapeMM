@@ -28,7 +28,9 @@ from seleniumbase import cdp_driver
 from seleniumbase.undetected.cdp_driver.browser import Browser
 
 from scrapemm.common import RetrievalFailed
-from scrapemm.common.exceptions import TargetUnavailableError, RegionBlockedError, ServiceUnavailableError
+from scrapemm.common.exceptions import (AccessBlockedError, TargetUnavailableError, RegionBlockedError,
+                                        ServiceUnavailableError)
+from scrapemm.server.wall_detect import LOGIN_PATH
 from scrapemm.server.download.documents import document_extension
 from scrapemm.server import screenshot, timing
 from scrapemm.server.config import get_config_var, get_setting
@@ -969,7 +971,7 @@ async def _fetch_in_browser(page: Page, url: str) -> tuple[Optional[bytes], Opti
                 session.send("IO.read", {"handle": stream, "size": 1 << 20}), timeout=60)
             piece = chunk.get("data", "")
             chunks.append(base64.b64decode(piece) if chunk.get("base64Encoded")
-                          else piece.encode("latin-1"))
+                          else piece.encode("utf-8"))  # Text chunks come decoded
             if chunk.get("eof"):
                 break
         return b"".join(chunks), headers.get("content-type"), "read"
@@ -1015,6 +1017,12 @@ async def _shows_bot_check(page: Page) -> bool:
 # code: 522" when the origin times out). A 503 may also be Cloudflare's challenge, which
 # is told apart (see `_failed_server()`).
 GATEWAY_ERRORS = (500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 530)
+# A refusal (unauthorized, forbidden, a firewall's "not acceptable"): its page is no
+# content -- unless it has some, as a few sites send their articles with a 403
+BLOCKING_STATUSES = (401, 403, 406)
+BLOCKED_MAX_WORDS = 150
+_MAIN_WORDS_JS = ("() => ((document.querySelector('main, article, [role=main]') || document.body || {})"
+                  ".innerText || '').split(/\\s+/).filter(Boolean).length")
 
 
 def _note_served_document(response, page: Page, served: list[str],
@@ -1279,7 +1287,10 @@ class HeadedBrowser(RetrievalIntegration):
         it either succeeds or raises an informative exception."""
         assert get_domain(url) in self.domains, f"Invalid domain {get_domain(url)} for integration {self.name}."
         logger.debug(f"Calling {self.name} service for {url}")
-        return await self._get(url, **kwargs)
+        content = await self._get(url, **kwargs)
+        if content is not None and content.capture is None:
+            content.capture = await self._capture(url, **kwargs)
+        return content
 
     async def _connect(self):
         """Establishes a connection to a persistent, shared UC browser. Playwright connects
@@ -1701,6 +1712,20 @@ class HeadedBrowser(RetrievalIntegration):
                     raise ServiceUnavailableError(
                         f"{self.name} is unavailable right now (HTTP {statuses[-1]}): it is "
                         f"down or overloaded, the capture is not gone. Try again later.")
+
+                if self.fails_on_not_found:
+                    # Sent to a login or age-check page instead (unless one was asked for)
+                    shown = urlparse(getattr(page, "url", "") or "").path
+                    if LOGIN_PATH.search(shown) and not LOGIN_PATH.search(urlparse(url).path):
+                        raise AccessBlockedError(f"{url} sent the browser to a login or age-check "
+                                                 f"page ({page.url}).")
+                    # A refusal's page, which only looks like content (an access-denied
+                    # page in the site's own frame, a firewall's block page)
+                    if (statuses and statuses[-1] in BLOCKING_STATUSES and not served
+                            and not await _shows_cloudflare_challenge(page)
+                            and (await evaluate_within(page, _MAIN_WORDS_JS) or 0) < BLOCKED_MAX_WORDS):
+                        raise AccessBlockedError(f"{url} answered HTTP {statuses[-1]} with next to "
+                                                 f"no content.")
 
                 phases.enter("read")
                 if target := await self._extract_content(page):
@@ -2244,6 +2269,13 @@ class Browser(HeadedBrowser):
     name = "Browser"
     domains = []
     fails_on_not_found = True
+
+    async def _prepare_context(self, context: BrowserContext) -> None:
+        """The cookies of sites' click-through notices (see `SITE_COOKIES`)."""
+        from scrapemm.server.download.common import SITE_COOKIES
+        await context.add_cookies([{"name": name, "value": value, "domain": host, "path": "/"}
+                                   for host, cookies in SITE_COOKIES.items()
+                                   for name, value in cookies.items()])
 
     async def _settle_after_goto(self, page: Page) -> None:
         """Waits until the page stops building itself. At `domcontentloaded` the markup is

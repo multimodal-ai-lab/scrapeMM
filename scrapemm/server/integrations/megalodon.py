@@ -21,6 +21,7 @@ import contextlib
 import html as html_lib
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import aiohttp
@@ -28,7 +29,7 @@ from ezmm import MultimodalSequence
 
 from scrapemm.common import RetrievalFailed
 from scrapemm.common.exceptions import TargetUnavailableError
-from scrapemm.common.scraping_response import ScrapedContent
+from scrapemm.common.scraping_response import Capture, ScrapedContent
 from scrapemm.server.download.common import HEADERS
 from scrapemm.server.download.images import decode_image
 from scrapemm.server.download.requests import curl_get
@@ -42,6 +43,7 @@ CAPTURE_URL = re.compile(r"^https?://(?:www\.)?megalodon\.jp/(?:ref/)?(\d{4}-\d{
                          re.IGNORECASE)
 OG_URL = re.compile(r'<meta[^>]+property="og:url"[^>]+content="([^"]+)"', re.IGNORECASE)
 # What Megalodon says for a capture it does not have ("no capture found")
+JST = timezone(timedelta(hours=9))  # Megalodon dates its captures in Japan time
 NOT_FOUND_MARKER = "魚拓が見つかりません"
 
 
@@ -60,6 +62,13 @@ class Megalodon(RetrievalIntegration):
                                   f"megalodon.jp/<YYYY-MMDD-HHMM-SS>/<URL>).")
         timestamp, original = match.groups()
         snapshot = f"https://megalodon.jp/ref/{timestamp}/{original}"
+        content = await self._snapshot(capture, snapshot, original, **kwargs)
+        content.capture = Capture(archive="Megalodon", original_url=original,
+                                  captured_at=_megalodon_time(timestamp), archive_url=capture)
+        return content
+
+    @staticmethod
+    async def _snapshot(capture: str, snapshot: str, original: str, **kwargs) -> ScrapedContent:
         response = await curl_get(snapshot, impersonate="chrome124", timeout=30)
         content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
         if response.status_code == 404 or (
@@ -102,3 +111,12 @@ class Megalodon(RetrievalIntegration):
         if CAPTURE_URL.match(str(response.url)):  # Redirected to the capture page
             return str(response.url)
         raise RetrievalFailed(f"The short link {url} leads to no Megalodon capture.")
+
+
+def _megalodon_time(timestamp: str) -> Optional[str]:
+    """A capture's timestamp (YYYY-MMDD-hhmm-ss, Japan time) in ISO 8601, UTC."""
+    try:
+        captured = datetime.strptime(timestamp, "%Y-%m%d-%H%M-%S").replace(tzinfo=JST)
+    except ValueError:
+        return None
+    return captured.astimezone(timezone.utc).isoformat()

@@ -19,7 +19,7 @@ from scrapemm.server.integrations.base import RetrievalIntegration
 from scrapemm.server.integrations import decodo
 from scrapemm.server.integrations.ytdlp import VIDEO_OMITTED, download_video_with_ytdlp
 from scrapemm.server.secrets import get_secret
-from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
+from scrapemm.common.scraping_response import ScrapedContent, OutputFormat, utc_iso
 from scrapemm.server.util import to_scraped_content, preprocess_html
 
 logger = logging.getLogger("scrapeMM")
@@ -122,7 +122,7 @@ class TikTok(RetrievalIntegration):
             sequence = await self._create_video_sequence_from_api(
                 video_data or metadata, video, thumbnail,
                 omitted=(metadata or {}).get(VIDEO_OMITTED))
-            return ScrapedContent(multimodal=sequence)
+            return ScrapedContent(multimodal=sequence, published_at=utc_iso(self._created_at(video_id)))
 
         except (RetrievalFailed, AccessBlockedError, TargetUnavailableError, RateLimitError):
             raise  # Already says what went wrong (yt-dlp's failures are classified)

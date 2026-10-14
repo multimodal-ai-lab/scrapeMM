@@ -176,8 +176,11 @@ def _pdf_text(data: bytes, name: str) -> Optional[tuple[str, str]]:
         logger.info(f"Could not read the PDF {name}: {type(e).__name__}: {e}")
         return None
     if not any(pages):
-        logger.info(f"The PDF {name} has no text layer (a scan?).")
-        return None
+        # A scan: its pages are images, with no text to read (and no OCR here). Said as
+        # such, not as a type scrapeMM does not read
+        from scrapemm.common.exceptions import UnsupportedDomainError
+        raise UnsupportedDomainError(f"{name} is a scanned PDF without a text layer; "
+                                     f"scrapeMM does not run OCR.")
     note = (f"(Only the first {max_pages} of {total} pages.)"
             if total > max_pages else "")
     paragraph, line = "\n\n", "\n"

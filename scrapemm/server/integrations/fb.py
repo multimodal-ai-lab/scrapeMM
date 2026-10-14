@@ -372,14 +372,13 @@ class Facebook(RetrievalIntegration):
             )
 
         try:
-            sequence = await get_content_with_ytdlp(
+            return await get_content_with_ytdlp(
                 url,
                 platform="Facebook",
                 # cookiefile=self.cookie_file.as_posix(),
                 impersonate=ImpersonateTarget("chrome", "146"),
                 **kwargs,
             )
-            return ScrapedContent(multimodal=sequence)
         except RetrievalFailed as e:
             message = str(e).lower()
             if "cannot parse data" not in message and "unable to parse" not in message:

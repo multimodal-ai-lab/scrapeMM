@@ -34,8 +34,10 @@ from scrapemm.server.captcha_detect import detect_captcha
 from scrapemm.server.paywall_detect import detect_paywall
 from scrapemm.server.config import get_config_var, get_setting
 from scrapemm.server.download import download_image, download_video
-from scrapemm.server.download.common import HEADERS
+from scrapemm.server.download.common import HEADERS, site_cookies
 from scrapemm.server.download.util import collecting_omitted
+from scrapemm.server.published import published_from_html
+from scrapemm.server.wall_detect import age_gate, login_wall, no_content_notice, raw_document
 from scrapemm.server.download.videos import downscale_requested
 from scrapemm.server.download.util import (looks_like_image_file_url, looks_like_video_file_url,
                                            looks_like_hls_url)
@@ -196,6 +198,7 @@ async def retrieve(
                                            progress_description="Retrieving URLs...")
         if strip:
             results = [await _strip(response) for response in results]
+        results = [_with_capture_note(response) for response in results]
         _release_media_memory()
 
         # Reconstruct output list, each result under the URL as requested, not as
@@ -268,6 +271,7 @@ async def retrieve_one(
         response = replace(response, from_cache=True)
     if strip:
         response = await _strip(response)
+    response = _with_capture_note(response)
     # Report under the URL as requested, not as preprocessed (e.g. percent-decoded):
     # the client maps results back onto its request by URL
     return replace(response, url=url)
@@ -279,6 +283,17 @@ async def _strip(response: ScrapingResponse) -> ScrapingResponse:
     if response.content is None:
         return response
     return replace(response, content=await strip_content(response.content, url=response.url))
+
+
+def _with_capture_note(response: ScrapingResponse) -> ScrapingResponse:
+    """An archive's capture with its facts stated before the text (see `Capture.note()`):
+    which archive, when, and of which page. Added as the response is handed out, after
+    stripping (which rebuilds the text from the HTML), to a copy: the cached content
+    stays as retrieved. The HTML stays as captured."""
+    content = response.content
+    if content is None or content.capture is None:
+        return response
+    return replace(response, content=content.prefixed(content.capture.note()))
 
 
 @dataclass
@@ -702,6 +717,13 @@ def _classify(url: str, method_name: str, content: Optional[ScrapedContent],
 
     _derive_markdown(content)
 
+    # ...nor a document's raw bytes passed off as its text (Decodo hands a PDF on as is):
+    # the methods that read documents come next
+    if raw_document(content):
+        logger.info(f"Method {method_name} returned the raw bytes of the document {url}.")
+        return "error", RetrievalFailed(f"Method {method_name} returned the document's raw "
+                                        f"bytes, not its text.")
+
     # ...nor a notice that the page is withheld from this region (a 451 page). It may
     # carry a CAPTCHA widget too, and is no CAPTCHA anybody could solve
     if notice := _region_block_notice(content):
@@ -731,6 +753,17 @@ def _classify(url: str, method_name: str, content: Optional[ScrapedContent],
         logger.warning(f"🤖 Method {method_name} encountered a {captcha} at {url}.")
         return "error", CaptchaEncounteredError(f"Method {method_name} encountered a {captcha}.")
 
+    # ...nor a login page or an age check in place of the content (worded without an IP
+    # marker: logging in from elsewhere would not help, see `proxy.ip_blocked()`)
+    if heading := login_wall(url, content):
+        logger.info(f"🔒 Method {method_name} got a login page for {url}: \"{heading}\".")
+        return "error", AccessBlockedError(f"Method {method_name} got a login page instead of "
+                                           f"the content (\"{heading}\").")
+    if phrase := age_gate(content):
+        logger.info(f"🔒 Method {method_name} got an age check for {url}: \"{phrase}\".")
+        return "error", AccessBlockedError(f"Method {method_name} got an age check instead of "
+                                           f"the content (\"{phrase}\").")
+
     # ...nor only the teaser of a paywalled article
     if reason := detect_paywall(content):
         logger.info(f"💰 Method {method_name} got only the paywalled teaser of {url}: {reason}.")
@@ -743,6 +776,13 @@ def _classify(url: str, method_name: str, content: Optional[ScrapedContent],
         logger.info(f"Method {method_name} returned an empty page for {url}.")
         return "error", RetrievalFailed(f"Method {method_name} returned an empty page "
                                         f"without any text or media.")
+
+    # ...nor a page that only says it needs JavaScript, or an app's error screen (as in
+    # archive captures of script-rendered pages)
+    if phrase := no_content_notice(content):
+        logger.info(f"Method {method_name} got a page without its content for {url}: \"{phrase}\".")
+        return "error", RetrievalFailed(f"Method {method_name} got a page without its content, "
+                                        f"only the notice \"{phrase}\".")
 
     # ...nor an archive's own "no such capture" page (Perma.cc's and the Wayback
     # Machine's replayers answer a miss with a page of their own, which scraped fine).
@@ -808,6 +848,10 @@ ACCESS_DENIED_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("CloudFront", ("the request could not be satisfied", "cloudfront")),
     ("Cloudflare", ("sorry, you have been blocked", "cloudflare")),
     ("the server", ("403 forbidden",)),
+    # eci.gov.in's firewall: "406 - Not Acceptable ... Request was blocked due to
+    # suspicious behavior."
+    ("the server", ("request was blocked due to suspicious behavior",)),
+    ("the server", ("406 - not acceptable",)),
 )
 ACCESS_DENIED_MAX_CHARS = 2000
 
@@ -853,7 +897,7 @@ def _replay_miss(content: ScrapedContent) -> Optional[str]:
 # A page title that says the page does not exist: "Page Not Found - First Check", "404",
 # "Error 404: ...", "Seite nicht gefunden", ...
 _NOT_FOUND_TITLE = re.compile(
-    r"^\W*(?:(?:error\s*)?404\b|(?:page|article|content|story)?\s*(?:could\s*not|couldn.t|cannot|can.t)"
+    r"^\W*(?:(?:error|fehler|erreur|errore|erro|b[łl][ąa]d)?\s*:?\s*404\b|(?:page|article|content|story)?\s*(?:could\s*not|couldn.t|cannot|can.t)"
     r"\s*be\s*found|(?:page|article|content|story)\s*(?:not\s*found|does(?:\s*not|n.t)\s*exist)|not\s*found\b"
     r"|p[aá]gina\s*(?:no\s*encontrada|n[aã]o\s*encontrada)|seite\s*nicht\s*gefunden|page\s*introuvable"
     r"|pagina\s*non\s*trovata)", re.IGNORECASE)
@@ -905,6 +949,10 @@ async def _success(url: str, key, method_name: str, content: ScrapedContent,
                    errors: dict, output_format: OutputFormat,
                    start_time: float) -> ScrapingResponse:
     logger.info(f"🎉 Successfully retrieved with method: {method_name}")
+    if content.published_at is None:
+        # The page's own declaration, where the source said nothing; in an archive's
+        # capture, the archived page's
+        content.published_at = published_from_html(content.html)
     if content.multimodal is not None:
         await postprocess_media(content.multimodal)
     # What the method captured of the page, if asked to (see `screenshot`)
@@ -1434,12 +1482,12 @@ async def _plain_get(url: str, session: aiohttp.ClientSession
     if proxy.wants_curl():
         from scrapemm.server.download.requests import curl_get
         response = await curl_get(url, headers=HEADERS, impersonate="chrome124", timeout=30,
-                                  allow_redirects=True)
+                                  allow_redirects=True, cookies=site_cookies(url))
         return (response.status_code, response.headers.get("content-type", "text/html"),
                 response.content if response.status_code == 200 else b"", str(response.url),
                 getattr(response, "encoding", None))
     async with session.get(url, headers=HEADERS, allow_redirects=True,
-                           timeout=aiohttp.ClientTimeout(total=30),
+                           timeout=aiohttp.ClientTimeout(total=30), cookies=site_cookies(url),
                            proxy=proxy.aiohttp_proxy()) as response:
         content_type = response.headers.get("content-type", "text/html")
         data = await response.read() if response.status == 200 else b""
@@ -1591,7 +1639,8 @@ async def _execute(
 
     except (TimeoutError, PlaywrightTimeoutError) as e:
         logger.warning(f"Timeout while retrieving with method {method_name}: {e}")
-        return e
+        # asyncio's timeouts say nothing: the response's error must say what timed out
+        return e if str(e) else TimeoutError(f"{method_name} got no answer from the site in time.")
 
     except OSError as e:
         if "Disk is full" in str(e):

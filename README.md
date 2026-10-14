@@ -132,6 +132,14 @@ requested format; `result.content` exposes every format produced along the way:
 | `result.content.markdown` | `str` | The page text in Markdown, media by hyperlink |
 | `result.content.multimodal` | `MultimodalSequence` | The page text with all media downloaded and embedded |
 
+Besides the content, a response says:
+
+| Attribute | Type | Content |
+|---|---|---|
+| `result.published_at` | `str` | When the post, upload or article was published, as the platform, the post's ID or the page's own metadata says: ISO 8601 in UTC, or just a day, month or year if the source is no more precise (`"2013"`) |
+| `result.capture` | `Capture` | For an archived copy (Wayback Machine, Archive.today, Perma.cc, …): the archive, the original URL, the capture time and the capture's URL. The text then begins with a note saying so |
+| `result.omitted_media` | `list[OmittedMedium]` | The media left out for their size (see `max_video_size`) |
+
 Choose with `output_format` (default `"multimodal"`):
 
 ```python

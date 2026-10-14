@@ -16,7 +16,7 @@ Configuration of the server itself -- API secrets, Firecrawl endpoints, the doma
 blacklist, the Archive.today CAPTCHA -- happens in the server's web UI, not from here.
 """
 
-from .common import (APP_NAME, AccessBlockedError, CaptchaEncounteredError, DiskFull,
+from .common import (APP_NAME, AccessBlockedError, Capture, CaptchaEncounteredError, DiskFull,
                      DomainBlacklistedError, OmittedMedium, PaywallError, QuotaExceededError,
                      RateLimitError, RetrievalFailed, ScrapedContent, ScrapingResponse, ServerError,
                      ServiceUnavailableError,
@@ -45,6 +45,7 @@ __all__ = [
     "ScrapingResponse",
     "ScrapedContent",
     "OmittedMedium",
+    "Capture",
     "AccessBlockedError",
     "CaptchaEncounteredError",
     "DiskFull",

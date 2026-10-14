@@ -240,8 +240,10 @@ class Firecrawl:
         # no content.
         status = getattr(document.metadata, "status_code", None) if document.metadata else None
         if status and status >= 400 and not detect_captcha(ScrapedContent(html=html)):
-            error = (TargetUnavailableError if status in (404, 410) or status >= 500
-                     else AccessBlockedError)
+            # A server error says nothing about the page: the other methods may get it,
+            # where "not found" would end the retrieval (ime.bg answered Firecrawl 500)
+            error = (TargetUnavailableError if status in (404, 410)
+                     else RetrievalFailed if status >= 500 else AccessBlockedError)
             raise error(f"Firecrawl got HTTP {status} from {url}.")
 
         content = await to_scraped_content(html, session=session, output_format=output_format,

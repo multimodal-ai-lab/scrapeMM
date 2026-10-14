@@ -27,5 +27,4 @@ class YouTube(RetrievalIntegration):
         """Downloads YouTube video or short using yt-dlp; lists a channel or playlist."""
         if is_youtube_listing(url):
             return ScrapedContent(multimodal=await get_youtube_listing(url, kwargs.get("session")))
-        sequence = await get_content_with_ytdlp(url, platform="YouTube", **kwargs)
-        return ScrapedContent(multimodal=sequence)
+        return await get_content_with_ytdlp(url, platform="YouTube", **kwargs)
