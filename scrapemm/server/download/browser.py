@@ -29,7 +29,7 @@ from yarl import URL
 from scrapemm.server.download.common import HEADERS
 from scrapemm.server import budget
 from scrapemm.server.download.requests import MEDIA_TIMEOUT
-from scrapemm.server.download.util import stream
+from scrapemm.server.download.util import media_kind, report_omitted, stream
 
 from scrapemm.server.download.images import decode_image
 from scrapemm.server.download.videos import video_from_binary, download_hls_video, is_hls
@@ -193,9 +193,14 @@ def _header(headers: dict, name: str) -> Optional[str]:
     return None
 
 
-def _too_large(headers: dict, limit: Optional[int]) -> bool:
+def _too_large(headers: dict, limit: Optional[int], url: str) -> bool:
+    """Whether the response announces more than `limit` bytes; if so, the medium is
+    reported as left out (see `report_omitted()`)."""
     length = _header(headers, "content-length")
-    return bool(limit and length and length.isdigit() and int(length) > limit)
+    if limit and length and length.isdigit() and int(length) > limit:
+        report_omitted(url, limit, int(length), kind=media_kind(_header(headers, "content-type")))
+        return True
+    return False
 
 
 class BrowserMedia:
@@ -431,7 +436,7 @@ class BrowserMedia:
         """The bytes of a response the page already received. If the browser is still
         receiving it, waits for that instead of starting a second download."""
         response = self._loaded.get(url)
-        if response is None or _too_large(response.headers, limit):
+        if response is None or _too_large(response.headers, limit, url):
             return None
         # One message: only for bodies known to be small (see MAX_BODY_MESSAGE). Images
         # of unknown size are small in practice; a video of unknown size is not.
@@ -447,7 +452,11 @@ class BrowserMedia:
         except Exception as e:
             logger.debug(f"The browser's copy of {url} is not available: {e}")
             return None
-        if not body or (limit and len(body) > limit):
+        if not body:
+            return None
+        if limit and len(body) > limit:
+            report_omitted(url, limit, len(body),
+                           kind=media_kind(response.headers.get("content-type")))
             return None
         return body, response.headers.get("content-type")
 
@@ -537,7 +546,7 @@ class BrowserMedia:
                 logger.debug(f"Browser network fetch of {url} failed: {reason}")
                 self._last_failure[url] = reason.strip()
                 return None
-            if _too_large(headers, limit):
+            if _too_large(headers, limit, url):
                 return None
             chunks, size = [], 0
             while True:
@@ -548,6 +557,7 @@ class BrowserMedia:
                 chunks.append(data)
                 size += len(data)
                 if limit and size > limit:
+                    report_omitted(url, limit, kind=media_kind(_header(headers, "content-type")))
                     return None
                 if chunk.get("eof"):
                     break
@@ -578,7 +588,7 @@ class BrowserMedia:
                     if response.status != 200:
                         self._last_failure[url] = f"HTTP {response.status}"
                         return None
-                    if _too_large(dict(response.headers), limit):
+                    if _too_large(dict(response.headers), limit, url):
                         return None
                     content = await asyncio.wait_for(stream(response, max_size=limit), timeout=timeout)
                     if not content:

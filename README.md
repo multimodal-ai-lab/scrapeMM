@@ -354,7 +354,9 @@ embedded players of the common video platforms (an `<iframe>` pointing at YouTub
 Dailymotion, …), which are downloaded with yt-dlp. `max_video_size` caps every one of those
 downloads; oversized videos are skipped without downloading a byte whenever the server
 announces a `Content-Length` (or yt-dlp knows the size), and stopped as soon as they outgrow
-the limit otherwise. A video left out for its size says so in the text (`Video omitted: …`).
+the limit otherwise. Media left out for their size are listed in the response's
+`omitted_media` (URL, size if known, and the limit); a video downloaded with yt-dlp also says
+so in the text (`Video omitted: …`).
 With `downscale_videos=True`, a video downloaded with yt-dlp (YouTube, TikTok, Instagram,
 Facebook, embedded players) that would exceed the limit comes in the highest lower
 resolution that fits instead.

@@ -35,6 +35,7 @@ from scrapemm.server.paywall_detect import detect_paywall
 from scrapemm.server.config import get_config_var, get_setting
 from scrapemm.server.download import download_image, download_video
 from scrapemm.server.download.common import HEADERS
+from scrapemm.server.download.util import collecting_omitted
 from scrapemm.server.download.videos import downscale_requested
 from scrapemm.server.download.util import (looks_like_image_file_url, looks_like_video_file_url,
                                            looks_like_hls_url)
@@ -1015,7 +1016,16 @@ async def _in_slot(key: str, routine: Callable[..., Coroutine], *args, **kwargs)
     the function rather than its coroutine: a coroutine whose task is cancelled while
     waiting for the slot would never be awaited."""
     async with slots.hold(key):
-        return await routine(*args, **kwargs)
+        with collecting_omitted() as omitted:
+            return _with_omitted(await routine(*args, **kwargs), omitted)
+
+
+def _with_omitted(content, omitted: list):
+    """The content, with the media its attempt left out (see `report_omitted()`)."""
+    if omitted and isinstance(content, ScrapedContent):
+        content.omitted_media = [*content.omitted_media,
+                                 *(m for m in omitted if m not in content.omitted_media)]
+    return content
 
 
 # Seconds the archive stage may take for a platform URL, all archives together. Its
@@ -1562,8 +1572,10 @@ async def _execute(
     try:
         async with slots.hold(slot_key(method_name)):
             # The factory is applied only now: its coroutine would never be awaited if
-            # the task were cancelled while waiting for the slot
-            return await method_to_routine(method_name)
+            # the task were cancelled while waiting for the slot. The media it leaves out
+            # are its own: a method running beside it reports into a list of its own.
+            with collecting_omitted() as omitted:
+                return _with_omitted(await method_to_routine(method_name), omitted)
 
     except NotImplementedError as e:
         logger.info("Reached a method that is not implemented.", exc_info=True)

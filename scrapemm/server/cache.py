@@ -440,9 +440,11 @@ class ImmutableCache:
             logger.info(f"📦 The permanent cache's result for {key[0]} is unusable ({e}); "
                         f"retrieving it afresh.")
             return None
-        from scrapemm.common.scraping_response import ScrapedContent
+        from scrapemm.common.scraping_response import OmittedMedium, ScrapedContent
         content = ScrapedContent(html=entry.get("html"), markdown=entry.get("markdown"),
-                                 multimodal=multimodal)
+                                 multimodal=multimodal,
+                                 omitted_media=[OmittedMedium.from_dict(d)
+                                                for d in entry.get("omitted_media") or []])
         logger.info(f"📦 Permanent cache hit for {key[0]}.")
         return ScrapingResponse(url=key[0], content=content, method=entry.get("method"),
                                 output_format=key[1], retrieval_time=0.0, from_cache=True)
@@ -456,7 +458,8 @@ class ImmutableCache:
         content = response.content
         entry = {"url": key[0], "method": response.method, "html": content.html,
                  "markdown": content.markdown, "stored_at": time.time(),
-                 "multimodal": None if content.multimodal is None else str(content.multimodal)}
+                 "multimodal": None if content.multimodal is None else str(content.multimodal),
+                 "omitted_media": [medium.to_dict() for medium in content.omitted_media]}
         self.put(RESULT, entry_key, json.dumps(entry).encode("utf-8"))
 
     # -- Media -----------------------------------------------------------------------

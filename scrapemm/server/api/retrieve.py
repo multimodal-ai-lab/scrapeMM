@@ -305,6 +305,7 @@ def _to_payload(response) -> ResponsePayload:
             multimodal=str(multimodal) if multimodal is not None else None,
             items=registry.describe_sequence(multimodal) if multimodal is not None else [],
             stripped=response.content.stripped,
+            omitted_media=response.content.omitted_media,
         )
     return ResponsePayload(
         url=response.url,

@@ -1,10 +1,30 @@
-from dataclasses import dataclass
-from typing import Literal, Optional
+from dataclasses import asdict, dataclass, field
+from typing import Any, Literal, Optional
 
 from ezmm import Image, MultimodalSequence
 
 OutputFormat = Literal["multimodal", "markdown", "html"]
 OUTPUT_FORMATS = ("multimodal", "markdown", "html")
+
+
+@dataclass
+class OmittedMedium:
+    """A medium that belongs to the content but was left out of it, and why."""
+
+    url: str  # Where the medium is: its own URL, or the page's if it has none of its own
+    kind: Literal["video", "image"] = "video"
+    reason: Literal["too_large"] = "too_large"  # Larger than the size limit (`max_video_size`)
+    # Its size in bytes if known, beforehand or by downloading it; None if its download
+    # was stopped at the limit, i.e., it is only known to be larger
+    size: Optional[int] = None
+    limit: Optional[int] = None  # The size limit it exceeded, in bytes
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "OmittedMedium":
+        return cls(**{k: data[k] for k in cls.__dataclass_fields__ if k in data})
 
 
 @dataclass
@@ -16,6 +36,8 @@ class ScrapedContent:
     markdown: Optional[str] = None  # The scraped text in Markdown format. Media is referenced by hyperlink.
     multimodal: Optional[MultimodalSequence] = None  # The scraped text with the media downloaded and embedded
     stripped: bool = False  # Whether UI elements (navigation, footers, banners, etc.) were removed from all formats
+    # The media left out of the content, e.g. videos over the size limit
+    omitted_media: list[OmittedMedium] = field(default_factory=list)
 
     def __bool__(self) -> bool:
         """True iff any content is available."""
@@ -57,6 +79,11 @@ class ScrapingResponse:
                 case _:
                     raise ValueError(f"Unknown output format '{self.output_format}'.")
         return False
+
+    @property
+    def omitted_media(self) -> list[OmittedMedium]:
+        """The media left out of the content, e.g. videos over `max_video_size`."""
+        return self.content.omitted_media if self.content else []
 
     def get(self) -> Optional[MultimodalSequence | str]:
         """Returns the retrieved content in the requested format (None if unavailable)."""

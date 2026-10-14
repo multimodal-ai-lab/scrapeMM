@@ -17,7 +17,7 @@ blacklist, the Archive.today CAPTCHA -- happens in the server's web UI, not from
 """
 
 from .common import (APP_NAME, AccessBlockedError, CaptchaEncounteredError, DiskFull,
-                     DomainBlacklistedError, PaywallError, QuotaExceededError,
+                     DomainBlacklistedError, OmittedMedium, PaywallError, QuotaExceededError,
                      RateLimitError, RetrievalFailed, ScrapedContent, ScrapingResponse, ServerError,
                      ServiceUnavailableError,
                      TargetUnavailableError, UnsupportedDomainError, logger)
@@ -44,6 +44,7 @@ __all__ = [
     "Settings",
     "ScrapingResponse",
     "ScrapedContent",
+    "OmittedMedium",
     "AccessBlockedError",
     "CaptchaEncounteredError",
     "DiskFull",

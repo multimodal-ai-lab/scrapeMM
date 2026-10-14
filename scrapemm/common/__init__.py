@@ -16,7 +16,7 @@ from .exceptions import (AccessBlockedError, CaptchaEncounteredError, DiskFull,
                          TargetUnavailableError, UnsupportedDomainError,
                          ServerError, exception_from_wire, exception_to_wire)
 from .paths import APP_NAME
-from .scraping_response import (ScrapingResponse, ScrapedContent,
+from .scraping_response import (ScrapingResponse, ScrapedContent, OmittedMedium,
                                 OutputFormat, OUTPUT_FORMATS)
 
 # Set up logger. The level is DEBUG unless SCRAPEMM_LOG_LEVEL says otherwise -- the

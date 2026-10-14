@@ -47,3 +47,26 @@ async def test_a_video_left_out_says_why():
     assert "Video omitted: 319 MB, more than the size limit of 100 MB" in str(sequence)
     assert "omitted" not in str(await compose_data_to_sequence({"uploader": "x"}, None, None,
                                                                "YouTube"))
+
+
+def test_omitted_media_are_collected_per_attempt():
+    from scrapemm.server.download.util import collecting_omitted, exceeds_max_size, report_omitted
+    report_omitted("https://x/outside.mp4", 10)  # Outside an attempt: goes nowhere
+    with collecting_omitted() as outer:
+        assert exceeds_max_size({"Content-Length": "500"}, 100, "https://x/a.mp4")
+        with collecting_omitted() as inner:  # E.g. a method running beside it
+            report_omitted("https://x/b.mp4", 100)
+        report_omitted("https://x/a.mp4", 100)  # Once per URL
+    assert [(m.url, m.size, m.limit, m.kind) for m in outer] == [("https://x/a.mp4", 500, 100, "video")]
+    assert [m.url for m in inner] == ["https://x/b.mp4"]
+
+
+def test_omitted_media_travel_to_the_client():
+    from scrapemm.common.scraping_response import OmittedMedium, ScrapedContent, ScrapingResponse
+    from scrapemm.common.wire import ContentPayload, ResponsePayload
+    omitted = [OmittedMedium(url="https://x/a.mp4", size=None, limit=100)]
+    payload = ResponsePayload(url="https://x", content=ContentPayload(markdown="m", omitted_media=omitted))
+    response = ResponsePayload.from_dict(payload.to_dict()).to_response()
+    assert response.omitted_media == omitted
+    assert ScrapingResponse(url="https://x", content=None).omitted_media == []
+    assert ScrapedContent(markdown="m").omitted_media == []

@@ -115,7 +115,8 @@ async def retrieve(
         - "html" (response.content.html: string containing the raw HTML code of the page)
     :param include_media: Deprecated, use output_format instead. If False, the
         "multimodal" output format is downgraded to "markdown".
-    :param max_video_size: Maximum size of videos to download, in bytes.
+    :param max_video_size: Maximum size of videos to download, in bytes. The videos left
+        out for it are listed in `ScrapingResponse.omitted_media`.
     :param prioritize: "completeness" (higher timeouts, more retries) or "speed".
     :param use_cache: Whether the server may serve a recent retrieval of the same URL
         instead of scraping it again.

@@ -14,7 +14,7 @@ import m3u8
 from ezmm import Video
 
 from scrapemm.server.download.util import (looks_like_hls_url, looks_like_video_file_url,
-                                    exceeds_max_size)
+                                    exceeds_max_size, report_omitted)
 
 if TYPE_CHECKING:
     from playwright.async_api import APIRequestContext
@@ -76,7 +76,7 @@ async def _download_video(
             content_type = headers.get('Content-Type') or headers.get('content-type') or ''
 
             # Skip oversized videos before downloading a single byte of them
-            if exceeds_max_size(headers, max_video_size):
+            if exceeds_max_size(headers, max_video_size, video_url):
                 logger.debug(f"Skipping {video_url}: larger than the limit of {max_video_size} bytes.")
                 return None
         except Exception as e:
@@ -295,6 +295,7 @@ async def download_hls_video(
             if total > max_video_size:
                 logger.debug(f"Skipping HLS video {playlist_url}: {total} bytes exceed "
                              f"the limit of {max_video_size}.")
+                report_omitted(playlist_url, max_video_size, total)
                 return None
 
         # Combine all segments

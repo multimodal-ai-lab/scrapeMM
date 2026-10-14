@@ -14,7 +14,7 @@ from scrapemm.common.exceptions import (AccessBlockedError, RateLimitError,
 from scrapemm.server.integrations.base import RetrievalIntegration
 from scrapemm.common.scraping_response import ScrapedContent
 from scrapemm.server.download import download_image, download_video
-from scrapemm.server.download.util import looks_like_image_file_url
+from scrapemm.server.download.util import looks_like_image_file_url, report_omitted
 from scrapemm.server.secrets import get_secret
 from scrapemm.server.util import unshorten
 
@@ -223,6 +223,7 @@ class Reddit(RetrievalIntegration):
                 if max_video_size and video.size > max_video_size:
                     logger.info(f"Removing video {video.reference} because it exceeds the maximum "
                                 f"size of {max_video_size / 1024 / 1024:.2f} MB.")
+                    report_omitted(url, max_video_size, video.size)
                     return None
                 return video
 

@@ -21,6 +21,7 @@ from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError, 
 from scrapemm.server import proxy, slots
 from scrapemm.server.config import get_config_var, get_setting
 from scrapemm.server.download import download_image
+from scrapemm.server.download.util import report_omitted
 from scrapemm.server.download.videos import downscaling, is_too_small_video
 
 logger = logging.getLogger("scrapeMM")
@@ -445,6 +446,7 @@ def _run_ytdlp_sync(
             if selector is None:
                 metadata[VIDEO_OMITTED] = (f"{_mb(size)}, more than the size limit of "
                                            f"{_mb(limit)}")
+                report_omitted(url, limit, size)
                 return None, metadata
             ydl_opts = dict(ydl_opts, format=selector)
         ydl_opts = dict(ydl_opts, progress_hooks=[_size_guard(limit)])
@@ -460,6 +462,7 @@ def _run_ytdlp_sync(
                 pass
         metadata[VIDEO_OMITTED] = (f"more than the size limit of {_mb(limit)} (stopped at "
                                    f"{_mb(e.args[0])})")
+        report_omitted(url, limit)
         return None, metadata
 
     video = None
@@ -543,6 +546,7 @@ async def download_video_with_ytdlp(
                         f"of {max_video_size / 1024 / 1024:.2f} MB.")
             metadata[VIDEO_OMITTED] = (f"{_mb(video.size)}, more than the size limit of "
                                        f"{_mb(max_video_size)}")
+            report_omitted(url, max_video_size, video.size)
             video = None  # Discard video
 
         thumbnail = None
