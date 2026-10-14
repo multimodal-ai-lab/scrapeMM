@@ -39,7 +39,7 @@ Next to most parts of the open web, the following platforms are supported too:
 - ✅️ Instagram: works for most content
 - ✅️ Facebook
 - ✅ Threads: posts only (profiles TBD)
-- ✅ Reddit: posts only
+- ✅ Reddit: posts with their top comments; links to a comment with its thread
 
 ### 📦 Archiving Services
 - ✅ Perma.cc

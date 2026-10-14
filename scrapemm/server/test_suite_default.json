@@ -372,6 +372,11 @@
   "category": "Reddit"
  },
  {
+  "url": "https://www.reddit.com/r/interestingasfuck/comments/1r11zgt/comment/o4np9xw/",
+  "expected": {},
+  "category": "Reddit"
+ },
+ {
   "url": "https://archive.is/uTVE4",
   "expected": {
    "image": 1
