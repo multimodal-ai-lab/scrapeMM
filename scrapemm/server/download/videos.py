@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 import tempfile
+from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
 
@@ -27,6 +28,20 @@ logger = logging.getLogger("scrapeMM")
 # HLS playlists routinely contain hundreds of segments. Fetch them in parallel, but
 # keep the fan-out per video modest so one video cannot monopolise the connection pool.
 MAX_CONCURRENT_SEGMENTS = 10
+
+# Set per retrieval, like the screenshot (see `screenshot.requested()`): whether a video
+# larger than the size limit is downloaded in a lower resolution that fits, instead of
+# being left out. Only yt-dlp's downloads have resolutions to choose from.
+_downscale: ContextVar[bool] = ContextVar("scrapemm_downscale_videos", default=False)
+
+
+def downscale_requested(wanted: bool) -> None:
+    """Whether the retrieval running in this task wants oversized videos downscaled."""
+    _downscale.set(wanted)
+
+
+def downscaling() -> bool:
+    return _downscale.get()
 
 
 async def download_video(

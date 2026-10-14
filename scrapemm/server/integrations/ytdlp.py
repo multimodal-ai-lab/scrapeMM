@@ -1,4 +1,6 @@
 import asyncio
+import copy
+import glob
 import logging
 import os
 import re
@@ -19,7 +21,7 @@ from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError, 
 from scrapemm.server import proxy, slots
 from scrapemm.server.config import get_config_var, get_setting
 from scrapemm.server.download import download_image
-from scrapemm.server.download.videos import is_too_small_video
+from scrapemm.server.download.videos import downscaling, is_too_small_video
 
 logger = logging.getLogger("scrapeMM")
 
@@ -335,18 +337,130 @@ def _classify(error: Exception) -> Exception:
     return YtDlpFailed(f"Could not download video with yt-dlp: {message}")
 
 
+# The metadata key under which a download says why it left the video out, for the
+# response to say so (see `compose_data_to_sequence()`)
+VIDEO_OMITTED = "scrapemm_video_omitted"
+
+
+class _TooLarge(Exception):
+    """Raised by the progress hook: the download outgrew the size limit."""
+
+
+def _codec(fmt: dict) -> str:
+    return (fmt.get("vcodec") or "none").split(".")[0].replace("vp09", "vp9")
+
+
+def _format_size(fmt: dict, formats: list[dict], duration: Optional[float] = None
+                 ) -> Optional[int]:
+    """A format's size in bytes, as far as known. HLS formats state none, but a direct
+    format of the same resolution and codec does: YouTube's are the same stream, only
+    delivered otherwise. With a `duration`, the bitrate estimates the rest, which
+    rather overstates it (an HLS bitrate is the peak)."""
+    if size := fmt.get("filesize") or fmt.get("filesize_approx"):
+        return size
+    if fmt.get("height") and _codec(fmt) != "none":
+        twins = [f.get("filesize") or f.get("filesize_approx") for f in formats
+                 if f.get("height") == fmt["height"] and _codec(f) == _codec(fmt)]
+        if twins := [size for size in twins if size]:
+            return max(twins)
+    if duration and (tbr := fmt.get("tbr")):
+        return int(tbr * 125 * duration)  # kbit/s to bytes
+    return None
+
+
+def _selection_size(info: dict, estimate: bool = False) -> Optional[int]:
+    """The size of the format(s) yt-dlp selected, video and audio together; None if
+    any part's is unknown. `estimate` lets the bitrate fill in (see `_format_size()`)."""
+    formats = info.get("formats") or []
+    duration = info.get("duration") if estimate else None
+    sizes = [_format_size(f, formats, duration) for f in info.get("requested_formats") or [info]]
+    return None if None in sizes else sum(sizes)
+
+
+def _mb(size: float) -> str:
+    return f"{size / 1024 / 1024:.0f} MB"
+
+
+# The share of the size limit a downscaled video may be estimated at. An HLS stream comes
+# larger than its direct twin, by which it is estimated: YouTube's 360p by more than 8%
+# (plzE2jioaNU: estimated 95 MB, stopped at 102 MB), its 720p hardly at all.
+FIT_MARGIN = 0.85
+
+
+def _fitting_selector(info: dict, ydl_opts: dict[str, Any], limit: int) -> Optional[str]:
+    """The format selector for the highest resolution below the selected one whose
+    download fits into `limit` bytes, with a margin (see `FIT_MARGIN`); None if none does."""
+    formats = info.get("formats") or []
+    heights = sorted({f["height"] for f in formats if f.get("height") and _codec(f) != "none"
+                      and f["height"] < (info.get("height") or MAX_VIDEO_HEIGHT + 1)},
+                     reverse=True)
+    for height in heights:
+        selector = ydl_opts["format"].replace(f"height<={MAX_VIDEO_HEIGHT}", f"height<={height}")
+        with YoutubeDL(dict(ydl_opts, format=selector)) as ydl:
+            picked = ydl.process_ie_result(copy.deepcopy(info), download=False)
+        if (size := _selection_size(picked, estimate=True)) and size <= limit * FIT_MARGIN:
+            logger.info(f"Downscaling {info.get('webpage_url', 'the video')} to {height}p "
+                        f"(about {_mb(size)}) to fit into the size limit of {_mb(limit)}.")
+            return selector
+    return None
+
+
+def _size_guard(limit: int):
+    """A progress hook that stops the download once it has outgrown `limit` bytes, all
+    its parts (video, audio) together. yt-dlp's own `max_filesize` only acts on sizes
+    known in advance, which HLS formats lack."""
+    downloaded: dict[str, int] = {}
+
+    def hook(progress: dict) -> None:
+        if progress.get("status") == "downloading":
+            downloaded[progress.get("filename") or ""] = progress.get("downloaded_bytes") or 0
+            if (total := sum(downloaded.values())) > limit:
+                raise _TooLarge(total)
+    return hook
+
+
 def _run_ytdlp_sync(
         url: str,
         temp_path: str,
         ydl_opts: dict[str, Any],
 ) -> tuple[Optional[Video], Optional[dict[str, Any]]]:
     """Synchronous yt-dlp extraction. Runs blocking I/O and must be called
-    via asyncio.to_thread so it does not stall the event loop."""
+    via asyncio.to_thread so it does not stall the event loop.
+
+    A video larger than the size limit (`max_filesize`) is not downloaded at all if its
+    size is known beforehand, and stopped once it outgrows the limit otherwise. If the
+    retrieval asked for it (see `downscaling()`), a lower resolution that fits is
+    downloaded instead. (`asyncio.to_thread` carries the retrieval's context over.) The metadata then
+    says why the video is missing (`VIDEO_OMITTED`)."""
     with YoutubeDL(ydl_opts) as ydl:
-        metadata = ydl.extract_info(url, download=True)
+        metadata = ydl.extract_info(url, download=False)  # Selects the formats, nothing more
 
     if metadata and metadata.get("_type") in ("playlist", "multi_video"):
         raise NotASingleVideo(f"{url} is a channel or playlist, not a single video.")
+
+    if limit := ydl_opts.get("max_filesize"):
+        size = _selection_size(metadata)
+        if size and size > limit:
+            selector = _fitting_selector(metadata, ydl_opts, limit) if downscaling() else None
+            if selector is None:
+                metadata[VIDEO_OMITTED] = (f"{_mb(size)}, more than the size limit of "
+                                           f"{_mb(limit)}")
+                return None, metadata
+            ydl_opts = dict(ydl_opts, format=selector)
+        ydl_opts = dict(ydl_opts, progress_hooks=[_size_guard(limit)])
+
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            metadata = ydl.process_ie_result(metadata, download=True)
+    except _TooLarge as e:
+        for leftover in glob.glob(glob.escape(temp_path) + ".*"):
+            try:
+                os.remove(leftover)
+            except OSError:
+                pass
+        metadata[VIDEO_OMITTED] = (f"more than the size limit of {_mb(limit)} (stopped at "
+                                   f"{_mb(e.args[0])})")
+        return None, metadata
 
     video = None
     if ext := metadata.get("ext"):
@@ -427,6 +541,8 @@ async def download_video_with_ytdlp(
         if video and max_video_size and video.size > max_video_size:
             logger.info(f"Removing video {video.reference} because it exceeds the maximum size "
                         f"of {max_video_size / 1024 / 1024:.2f} MB.")
+            metadata[VIDEO_OMITTED] = (f"{_mb(video.size)}, more than the size limit of "
+                                       f"{_mb(max_video_size)}")
             video = None  # Discard video
 
         thumbnail = None
@@ -553,11 +669,13 @@ async def compose_data_to_sequence(metadata: dict, video: Video | None, thumbnai
         except ValueError:
             logger.debug(f"Could not parse yt-dlp upload_date: {upload_date!r}")
 
+    omitted = f"\nVideo omitted: {reason}" if (reason := metadata.get(VIDEO_OMITTED)) else ""
+
     text = f"""**{platform} Video**
 Author: @{uploader}
 Posted: {formatted_date}
 Duration: {duration}s
-Views: {fmt_count(view_count)} - Likes: {fmt_count(like_count)} - Comments: {fmt_count(comment_count)}
+Views: {fmt_count(view_count)} - Likes: {fmt_count(like_count)} - Comments: {fmt_count(comment_count)}{omitted}
 
 {description}"""
 

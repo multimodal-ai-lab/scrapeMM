@@ -65,6 +65,7 @@ class RetrieveRequest(BaseModel):
     strip: bool = False
     screenshot: bool = False
     enable_archives_fallback: Optional[bool] = None
+    downscale_videos: bool = False
 
 
 @router.post("/retrieve")
@@ -145,6 +146,7 @@ async def _stream(request: RetrieveRequest, principal: Principal,
                     strip=request.strip,
                     screenshot=request.screenshot,
                     enable_archives_fallback=request.enable_archives_fallback,
+                    downscale_videos=request.downscale_videos,
                 )): url for url in urls
             }
             if interrupted_by_user:
@@ -249,7 +251,7 @@ async def start_in_background(request: RetrieveRequest, principal: Principal) ->
 # What a retried URL is retrieved with, of the original job's parameters. The cache is no
 # part of it: a retry is a new scrape.
 _RETRY_FIELDS = ("actions", "output_format", "max_video_size", "prioritize", "hedging_delay",
-                 "strip", "screenshot", "enable_archives_fallback")
+                 "strip", "screenshot", "enable_archives_fallback", "downscale_videos")
 
 
 class RetryRequest(BaseModel):

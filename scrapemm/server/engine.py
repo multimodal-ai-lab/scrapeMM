@@ -35,6 +35,7 @@ from scrapemm.server.paywall_detect import detect_paywall
 from scrapemm.server.config import get_config_var, get_setting
 from scrapemm.server.download import download_image, download_video
 from scrapemm.server.download.common import HEADERS
+from scrapemm.server.download.videos import downscale_requested
 from scrapemm.server.download.util import (looks_like_image_file_url, looks_like_video_file_url,
                                            looks_like_hls_url)
 from scrapemm.server.integrations import (retrieve_via_integration, fire, decodo, browser,
@@ -74,7 +75,8 @@ async def retrieve(
         hedging_delay: float | None = None,
         strip: bool = False,
         screenshot: bool = False,
-        enable_archives_fallback: bool | None = None
+        enable_archives_fallback: bool | None = None,
+        downscale_videos: bool = False,
 ) -> ScrapingResponse | list[ScrapingResponse]:
     """Main function of this repository. Downloads the contents present at the given URL(s).
     For each URL, returns a ScrapingResponse containing the retrieved content, error, and method.
@@ -134,6 +136,9 @@ async def retrieve(
         when the live page cannot be retrieved. None (the default) decides by `prioritize`: on for
         "completeness", off for "speed". Archives named in an explicit `methods` list are tried
         regardless. The result is then a copy of the page as it was captured, which may be old.
+    :param downscale_videos: If True, a video larger than `max_video_size` is downloaded in
+        the highest lower resolution that fits, instead of being left out. Only for videos
+        downloaded with yt-dlp (YouTube, TikTok, Instagram, Facebook, embedded players).
     """
     # Ensure URLs are string or list
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
@@ -183,7 +188,8 @@ async def retrieve(
         # Retrieve URLs concurrently
         tasks = [_retrieve_single(url, session, url_to_methods[url], actions,
                                   output_format, max_video_size, prioritize, use_cache,
-                                  hedging_delay, screenshot, enable_archives_fallback) for url in
+                                  hedging_delay, screenshot, enable_archives_fallback,
+                                  downscale_videos) for url in
                  urls_unique]
         results = await run_with_semaphore(tasks, limit=40, show_progress=show_progress and len(urls_unique) > 1,
                                            progress_description="Retrieving URLs...")
@@ -213,6 +219,7 @@ async def retrieve_one(
         strip: bool = False,
         screenshot: bool = False,
         enable_archives_fallback: bool | None = None,
+        downscale_videos: bool = False,
 ) -> ScrapingResponse:
     """Retrieves a single URL. This is what the API streams over: it needs results one
     at a time, as they finish, rather than the whole batch at once. How many run at once
@@ -231,13 +238,13 @@ async def retrieve_one(
     # per caller, on the shared result. A screenshot is: it is taken during the retrieval.
     key = (preprocess_url(url), output_format, json.dumps(methods, default=str),
            json.dumps(actions, sort_keys=True, default=str), max_video_size, prioritize,
-           use_cache, hedging_delay, screenshot, enable_archives_fallback)
+           use_cache, hedging_delay, screenshot, enable_archives_fallback, downscale_videos)
     shared = _in_flight.get(key)
     joined = shared is not None
     if shared is None:
         shared = _InFlight(asyncio.create_task(_shared_retrieve(
             url, session, methods, actions, output_format, max_video_size, prioritize,
-            use_cache, hedging_delay, screenshot, enable_archives_fallback)))
+            use_cache, hedging_delay, screenshot, enable_archives_fallback, downscale_videos)))
         _in_flight[key] = shared
         shared.task.add_done_callback(lambda _, k=key, s=shared: _forget(k, s))
     else:
@@ -290,7 +297,7 @@ def _forget(key: tuple, shared: _InFlight) -> None:
 
 async def _shared_retrieve(url, session, methods, actions, output_format, max_video_size,
                            prioritize, use_cache, hedging_delay, screenshot,
-                           enable_archives_fallback) -> ScrapingResponse:
+                           enable_archives_fallback, downscale_videos) -> ScrapingResponse:
     # Its own HTTP session rather than the first caller's: that one closes when its job
     # ends or its client disconnects, while others may still be waiting on this result
     clock = timing.start_clock()  # Queue time starts here, see `timing`
@@ -300,7 +307,7 @@ async def _shared_retrieve(url, session, methods, actions, output_format, max_vi
                                          trace_configs=[timing.request_trace()]) as own:
             return await _retrieve_single(url, own, methods, actions, output_format,
                                           max_video_size, prioritize, use_cache, hedging_delay,
-                                          screenshot, enable_archives_fallback)
+                                          screenshot, enable_archives_fallback, downscale_videos)
     finally:
         _retrievals.discard(clock)
         _release_media_memory()
@@ -353,12 +360,14 @@ async def _retrieve(
         use_cache: bool = True,
         hedging_delay: float | None = None,
         screenshot: bool = False,
-        enable_archives_fallback: bool | None = None
+        enable_archives_fallback: bool | None = None,
+        downscale_videos: bool = False,
 ) -> ScrapingResponse:
     logger.debug(f"Retrieving {url}")
     start_time = time.time()
     # The methods that render the page capture it while they have it open
     screenshot_module.requested(screenshot)
+    downscale_requested(downscale_videos)
 
     if get_domain(url) in UNSUPPORTED_DOMAINS:
         return _failure(url, output_format, dict(scrapemm=UnsupportedDomainError("Unsupported domain.")),
@@ -400,7 +409,7 @@ async def _retrieve(
 
     # Re-use a recent, successful retrieval of the same URL, if there is any
     key = cache_key(url, output_format, [chain.label(m) for m in plan.order],
-                    max_video_size)
+                    max_video_size, downscale_videos)
     if use_cache:
         cached = cache.get(key)
         # Without a screenshot, it cannot answer for one: retrieved again, with one, the

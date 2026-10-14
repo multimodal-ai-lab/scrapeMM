@@ -46,6 +46,7 @@ async def retrieve(  # type: ignore[overload-overlap]  # str is a Collection[str
         strip: bool = False,
         screenshot: bool = False,
         enable_archives_fallback: bool | None = None,
+        downscale_videos: bool = False,
         config: Optional[Settings] = None,
 ) -> ScrapingResponse: ...
 
@@ -65,6 +66,7 @@ async def retrieve(
         strip: bool = False,
         screenshot: bool = False,
         enable_archives_fallback: bool | None = None,
+        downscale_videos: bool = False,
         config: Optional[Settings] = None,
 ) -> list[ScrapingResponse]: ...
 
@@ -83,6 +85,7 @@ async def retrieve(
         strip: bool = False,
         screenshot: bool = False,
         enable_archives_fallback: bool | None = None,
+        downscale_videos: bool = False,
         config: Optional[Settings] = None,
 ) -> ScrapingResponse | list[ScrapingResponse]:
     """Retrieves the contents present at the given URL(s) through a scrapeMM server.
@@ -128,6 +131,10 @@ async def retrieve(
         when the live page cannot be retrieved. None (the default) decides by `prioritize`: on for
         "completeness", off for "speed". Archives named in an explicit `methods` list are tried
         regardless. The result is then a copy of the page as it was captured, which may be old.
+    :param downscale_videos: Whether a video larger than `max_video_size` is downloaded in the
+        highest lower resolution that fits, instead of being left out. Only for videos the
+        server downloads with yt-dlp (YouTube, TikTok, Instagram, Facebook, embedded players).
+        A video left out says so in the text ("Video omitted: ...").
     :param config: Connection settings to use instead of the global ones.
     """
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
@@ -159,6 +166,7 @@ async def retrieve(
         "strip": strip,
         "screenshot": screenshot,
         "enable_archives_fallback": enable_archives_fallback,
+        "downscale_videos": downscale_videos,
     }
 
     by_url: dict[str, ScrapingResponse] = {}

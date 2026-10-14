@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+from typing import Optional
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
@@ -16,7 +17,7 @@ from scrapemm.common.exceptions import (AccessBlockedError, RateLimitError, Retr
 from scrapemm.server.download import download_image
 from scrapemm.server.integrations.base import RetrievalIntegration
 from scrapemm.server.integrations import decodo
-from scrapemm.server.integrations.ytdlp import download_video_with_ytdlp
+from scrapemm.server.integrations.ytdlp import VIDEO_OMITTED, download_video_with_ytdlp
 from scrapemm.server.secrets import get_secret
 from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
 from scrapemm.server.util import to_scraped_content, preprocess_html
@@ -118,7 +119,9 @@ class TikTok(RetrievalIntegration):
                 download_video_with_ytdlp(url, session, max_video_size=max_video_size),
             )
 
-            sequence = await self._create_video_sequence_from_api(video_data or metadata, video, thumbnail)
+            sequence = await self._create_video_sequence_from_api(
+                video_data or metadata, video, thumbnail,
+                omitted=(metadata or {}).get(VIDEO_OMITTED))
             return ScrapedContent(multimodal=sequence)
 
         except (RetrievalFailed, AccessBlockedError, TargetUnavailableError, RateLimitError):
@@ -313,8 +316,10 @@ class TikTok(RetrievalIntegration):
         return ScrapedContent(multimodal=sequence)
 
     async def _create_video_sequence_from_api(self, metadata: dict, video: Video | None,
-                                              thumbnail: Image | None) -> MultimodalSequence:
-        """Creates MultimodalSequence from API data."""
+                                              thumbnail: Image | None,
+                                              omitted: Optional[str] = None) -> MultimodalSequence:
+        """Creates MultimodalSequence from API data. `omitted` says why the video is
+        missing, if it was left out (see `ytdlp.VIDEO_OMITTED`)."""
         # Extract relevant metadata (coming from either TikTok Research API or yt-dlp)
         username = metadata.get('username') or metadata.get('uploader', 'Unknown')
         description = metadata.get('video_description') or metadata.get('description', '')
@@ -330,13 +335,14 @@ class TikTok(RetrievalIntegration):
 
         hashtags_text = f"Hashtags: {', '.join(['#' + tag for tag in hashtags])}" if hashtags else ""
         voice_text = f"Voice transcription: {voice_to_text}" if voice_to_text else ""
+        omitted_text = f"\nVideo omitted: {omitted}" if omitted else ""
 
         text = f"""**TikTok Video** (API data)
 Author: @{username}
 Posted: {create_time}
 Duration: {duration}s
 Region: {region_code}
-Views: {view_count:,} - Likes: {like_count:,} - Comments: {comment_count:,} - Shares: {share_count:,}
+Views: {view_count:,} - Likes: {like_count:,} - Comments: {comment_count:,} - Shares: {share_count:,}{omitted_text}
 {hashtags_text}
 
 {description}

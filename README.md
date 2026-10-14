@@ -353,7 +353,11 @@ Media is collected from `<img>` and `<video>` tags, from CSS background images, 
 embedded players of the common video platforms (an `<iframe>` pointing at YouTube, Vimeo,
 Dailymotion, …), which are downloaded with yt-dlp. `max_video_size` caps every one of those
 downloads; oversized videos are skipped without downloading a byte whenever the server
-announces a `Content-Length`.
+announces a `Content-Length` (or yt-dlp knows the size), and stopped as soon as they outgrow
+the limit otherwise. A video left out for its size says so in the text (`Video omitted: …`).
+With `downscale_videos=True`, a video downloaded with yt-dlp (YouTube, TikTok, Instagram,
+Facebook, embedded players) that would exceed the limit comes in the highest lower
+resolution that fits instead.
 
 Images are taken at their highest available resolution: `srcset` candidates are compared and
 lazy-loading attributes (`data-src`, `data-lazy-src`, `data-original`, …) are honoured, so

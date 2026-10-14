@@ -39,14 +39,17 @@ DEFAULT_MAX_MB = 512  # The text the entries hold, see `_size()`; media stay on 
 MAX_ENTRIES = DEFAULT_MAX_ENTRIES  # Kept for callers of the former constant
 
 # A cache entry is identified by all the parameters that influence the retrieved content:
-# the URL, the requested output format, the methods used, and the video size limit
-CacheKey = tuple[str, str, tuple[str, ...], Optional[int]]
+# the URL, the requested output format, the methods used, the video size limit, and
+# whether videos over it are downscaled
+CacheKey = tuple[str, str, tuple[str, ...], Optional[int], bool]
 
 
 def cache_key(url: str, output_format: OutputFormat, methods: list[str],
-              max_video_size: Optional[int] = None) -> CacheKey:
-    """Constructs the cache key identifying a particular retrieval request."""
-    return url, output_format, tuple(methods), max_video_size
+              max_video_size: Optional[int] = None, downscale_videos: bool = False) -> CacheKey:
+    """Constructs the cache key identifying a particular retrieval request. Downscaling
+    makes no difference without a size limit."""
+    return (url, output_format, tuple(methods), max_video_size,
+            downscale_videos and max_video_size is not None)
 
 
 def _size(response: ScrapingResponse) -> int:
@@ -412,10 +415,11 @@ class ImmutableCache:
 
     @staticmethod
     def _result_key(key) -> Optional[str]:
-        url, output_format, _methods, max_video_size = key
+        url, output_format, _methods, max_video_size, downscale = key
         if (capture := capture_key(url)) is None:
             return None
-        return f"{capture}|{output_format}|{max_video_size}|{_result_version()}"
+        downscaled = "|downscaled" if downscale else ""  # Earlier entries' keys unchanged
+        return f"{capture}|{output_format}|{max_video_size}{downscaled}|{_result_version()}"
 
     def result(self, key) -> Optional[ScrapingResponse]:
         """The kept result for the cache key of an archive capture, if there is one and
