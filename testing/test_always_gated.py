@@ -1,5 +1,6 @@
 """Sites behind a CAPTCHA for every visitor (`challenges.ALWAYS_GATED`) are never
-scraped: their URLs go straight into the queue for a human."""
+scraped: their URLs go straight into the queue for a human -- unless an integration
+serves the site (researchgate.net: OpenAlex), which does not go where the CAPTCHA is."""
 
 import aiohttp
 import pytest
@@ -11,12 +12,13 @@ from scrapemm.server.challenges import ChallengeStore
 
 pytestmark = pytest.mark.server
 
-URL = "https://www.researchgate.net/publication/123_Some_paper"
+URL = "https://www.gated.test/article/123"
 
 
-async def test_researchgate_is_queued_without_scraping(monkeypatch, tmp_path):
+async def test_an_always_gated_site_is_queued_without_scraping(monkeypatch, tmp_path):
     store = ChallengeStore(path=tmp_path / "challenges.json")
     monkeypatch.setattr(challenges, "store", store)
+    monkeypatch.setattr(challenges, "ALWAYS_GATED", {"gated.test": "DataDome"})
     monkeypatch.setattr(engine.blacklist, "reason", lambda domain: None)
     clear_cache()
 
@@ -31,6 +33,12 @@ async def test_researchgate_is_queued_without_scraping(monkeypatch, tmp_path):
 
     assert not response.success
     assert isinstance(response.errors["scrapemm"], CaptchaEncounteredError)
-    challenge = store.get("researchgate.net")
+    challenge = store.get("gated.test")
     assert challenge.captcha == "DataDome"
     assert [p.url for p in challenge.pending] == [URL]
+
+
+def test_a_site_an_integration_serves_is_not_held(tmp_path):
+    store = ChallengeStore(path=tmp_path / "challenges.json")
+    assert "researchgate.net" in challenges.ALWAYS_GATED
+    assert not store.holds("researchgate.net")

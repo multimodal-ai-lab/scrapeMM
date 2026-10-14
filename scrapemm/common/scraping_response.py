@@ -47,6 +47,10 @@ class Capture:
     original_url: Optional[str] = None  # The page that was archived
     captured_at: Optional[str] = None  # When it was captured, ISO 8601 (UTC)
     archive_url: Optional[str] = None  # The capture itself
+    remark: Optional[str] = None  # Anything else the reader should know about it
+    # Set if the archive's capture held no usable content and the platform's live post
+    # stands in: "post" for all of it, "video" for the video only (the capture had none)
+    live: Optional[Literal["post", "video"]] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -63,11 +67,17 @@ class Capture:
                 when = f" on {datetime.fromisoformat(self.captured_at).strftime('%Y-%m-%d %H:%M UTC')}"
             except ValueError:
                 when = f" on {self.captured_at}"
-        lines = [f"> **Archived copy**: not the live page, but its capture by {self.archive}{when}."]
+        if self.live == "post":
+            lines = [f"> **The live post, not an archived copy**: the capture by {self.archive} "
+                     f"could not be used; this is the post as its platform serves it now."]
+        else:
+            lines = [f"> **Archived copy**: not the live page, but its capture by {self.archive}{when}."]
         if self.original_url:
             lines.append(f"> Original URL: {self.original_url}")
         if self.archive_url and self.archive_url != self.original_url:
             lines.append(f"> Capture: {self.archive_url}")
+        if self.remark:
+            lines.append(f"> Note: {self.remark}")
         return "\n".join(lines) + "\n\n"
 
 

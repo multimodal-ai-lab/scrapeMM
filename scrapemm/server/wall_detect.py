@@ -41,8 +41,10 @@ NO_CONTENT_PHRASES = (
     "включите поддержку javascript", "включите javascript", "javascript aktivieren",
     "activez javascript", "activer javascript", "habilita javascript", "activa javascript",
     "something went wrong, but don't fret", "something went wrong. try reloading",
+    # Instagram's player in an archive's capture of a reel
+    "sorry, we're having trouble playing this video",
 )
-NO_CONTENT_MAX_WORDS = 80
+NO_CONTENT_MAX_WORDS = 150  # X's page without JavaScript, its footer links included: 88
 
 
 def _visible_text(soup) -> str:

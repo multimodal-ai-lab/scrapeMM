@@ -53,6 +53,9 @@ SETTINGS: dict[str, type] = {
     "max_jobs": int,  # Job history: how many jobs keep their content at most (0: no limit)
     # Known consent platforms' dialogs removed in the browser before reading (default on)
     "remove_consent_dialogs": bool,
+    # A platform's live post where an archive's capture of it holds nothing usable (and
+    # its live video where the capture has none); said so in the response (default on)
+    "archive_live_fallback": bool,
     # Limits and lifetimes otherwise fixed in code, each read when used (see `get_setting`)
     "browser_retrieval_timeout": float,
     "archive_retrieval_timeout": float,
@@ -219,6 +222,10 @@ def schema() -> list[dict]:
         entry("youtube_channel_videos", DEFAULT_CHANNEL_VIDEOS, "YouTube: videos per channel",
               "A channel's or playlist's page lists its latest videos this many, each with "
               "its thumbnail instead of its stream.", "integrations", min=1, max=500),
+        entry("archive_live_fallback", True, "Live post where a capture holds none",
+              "Where an archive's capture of a platform's post (X, Instagram, YouTube, ...) "
+              "holds nothing usable, the live post stands in; where a capture of a video page "
+              "lacks the video, the live video is added. The response says so.", "archives"),
         entry("archive_today_interactive_solve", False,
               "Archive.today: ask for a CAPTCHA at the moment of a gated request",
               "Sensible only for one-off, attended retrievals.", "archives"),

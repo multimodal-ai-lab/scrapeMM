@@ -46,7 +46,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("scrapeMM")
 
-DOMAIN_REGEX = r"(?:https?:\/\/)?(?:www\.)?([-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6})/?"
+DOMAIN_REGEX = r"(?:https?:\/\/)?(?:www\.)?([-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,63})/?"
 
 
 # Hosts whose URLs only work in another form, by host. www.malayalam.factcrescendo.com

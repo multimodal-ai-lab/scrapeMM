@@ -4,6 +4,7 @@ for the test suite's TikTok and Kwai captures, against a few seconds this way.""
 
 import pytest
 
+from scrapemm.common.scraping_response import ScrapedContent
 from scrapemm.server.integrations import archive_org
 from scrapemm.server.integrations.archive_org import ArchiveOrg, _raw_capture_tried
 
@@ -12,6 +13,8 @@ pytestmark = pytest.mark.server
 CAPTURE = "https://web.archive.org/web/20231020082452/https://www.tiktok.com/@a/video/7291677940834766113"
 MARKUP = '<html><title>A video</title><body><p>Caption</p>' \
          '<script>{"playAddr":"https:\\/\\/v16.tiktok.com\\/video\\/abc.mp4"}</script></body></html>'
+
+REPLAYED = ScrapedContent(markdown="The replayed page, with all its text.")
 
 
 @pytest.fixture
@@ -22,7 +25,7 @@ def replay(monkeypatch):
 
     async def browser_get(self, url, **kwargs):
         calls.append(_raw_capture_tried.get())
-        return "replayed"
+        return REPLAYED
     monkeypatch.setattr(archive_org.HeadedBrowser, "_get", browser_get)
     return calls
 
@@ -51,7 +54,7 @@ async def test_without_a_video_the_capture_is_replayed_without_reading_the_marku
     async def raw(timestamp, original):
         return timestamp, "<html><body>No video named here</body></html>"
     monkeypatch.setattr(archive_org, "_raw_capture", raw)
-    assert await ArchiveOrg()._get(CAPTURE) == "replayed"
+    assert await ArchiveOrg()._get(CAPTURE) is REPLAYED
     assert replay == [True]  # The replay knows the markup was looked at
     assert _raw_capture_tried.get() is False  # ...and only for this retrieval
 
@@ -62,5 +65,5 @@ async def test_pages_without_video_are_replayed_straight_away(monkeypatch, repla
         raise AssertionError("A page without a video is not read raw")
     monkeypatch.setattr(archive_org, "_raw_capture", raw)
     page = "https://web.archive.org/web/20260602042101/https://www.threads.com/@a/post/DZCPCucmsFy"
-    assert await ArchiveOrg()._get(page) == "replayed"
+    assert await ArchiveOrg()._get(page) is REPLAYED
     assert replay == [False]

@@ -8,6 +8,7 @@ import logging
 import time
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import urlsplit
 
 import aiohttp
 from ezmm import MultimodalSequence
@@ -17,7 +18,8 @@ from scrapemm.common import RetrievalFailed
 from scrapemm.common.exceptions import TargetUnavailableError
 from scrapemm.common.scraping_response import Capture, ScrapedContent
 from scrapemm.server.download.common import HEADERS
-from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget, settle_dom
+from scrapemm.server.wall_detect import no_content_notice
+from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget, settle_dom, DOM_THIN_TEXT
 from scrapemm.server.download.browser import (BLOB_ATTR, MAX_VIDEO_BYTES, install_stash,
                                               _WAYBACK_URL)
 from scrapemm.server.integrations.perma_cc import _stash_media_in_frame
@@ -160,6 +162,27 @@ async def _nearest_page_capture(timestamp: str, original: str) -> Optional[tuple
     if not pages:
         return None
     return min(pages, key=lambda p: abs(int(p[0].ljust(14, "0")) - int(timestamp.ljust(14, "0"))))
+
+
+async def _nearby_page_captures(timestamp: str, original: str, count: int = 2) -> list[tuple[str, str]]:
+    """The (timestamp, address) of the HTML captures of `original`'s page nearest to
+    `timestamp`, other than that one, nearest first."""
+    from urllib.parse import urlencode
+    from scrapemm.server.download.requests import curl_get
+    # Sorted by closeness by the index itself: a page has thousands of captures
+    query = urlencode([("url", original.split("?", 1)[0]), ("output", "json"),
+                       ("fl", "timestamp,statuscode,mimetype,original"), ("sort", "closest"),
+                       ("closest", timestamp), ("filter", "statuscode:200"),
+                       ("filter", "mimetype:text/html"), ("limit", str(count + 5))])
+    try:
+        response = await curl_get(f"https://web.archive.org/cdx/search/cdx?{query}",
+                                  impersonate="chrome124", timeout=45)
+        rows = response.json()[1:] if response.status_code == 200 else []
+    except Exception as e:
+        logger.debug(f"Wayback capture lookup failed for {original}: {type(e).__name__}: {e}")
+        return []
+    return [(ts, address) for ts, status, mime, address in rows  # Nearest first, as listed
+            if status == "200" and "html" in mime and ts != timestamp][:count]
 
 
 def _raw_video_candidates(markup: str) -> list[str]:
@@ -305,6 +328,72 @@ class ArchiveOrg(HeadedBrowser):
     retrieval_timeout_setting = "archive_retrieval_timeout"
 
     async def _get(self, url: str, **kwargs) -> ScrapedContent:
+        """The capture, from what the archive recorded of the page's data where that holds
+        more than the page's replay would (X posts, Bloomberg articles); else replayed. A
+        capture that shows only a notice in place of its content (a page built by script
+        whose scripts were not captured) is replaced by the nearest one that does not."""
+        archived = _WAYBACK_URL.match(url)
+        if archived and (content := await self._from_records(*archived.groups(), url=url, **kwargs)):
+            return content
+        content = await self._replay(url, **kwargs)
+        if not archived or not (notice := no_content_notice(content)):
+            return content
+        timestamp, original = archived.groups()
+        for other_timestamp, address in await _nearby_page_captures(timestamp, original):
+            other = f"https://web.archive.org/web/{other_timestamp}/{address}"
+            logger.info(f"The capture {url} shows only \"{notice}\"; trying the capture {other}.")
+            try:
+                candidate = await self._replay(other, **kwargs)
+            except Exception as e:
+                logger.info(f"The capture {other} failed too: {type(e).__name__}: {e}")
+                continue
+            if not no_content_notice(candidate):
+                requested = wayback_time(timestamp)
+                candidate.capture = Capture(
+                    archive="the Internet Archive (Wayback Machine)", original_url=address,
+                    captured_at=wayback_time(other_timestamp), archive_url=other,
+                    remark=f"the requested capture{f' of {requested[:10]}' if requested else ''} "
+                           f"({url}) shows only \"{notice}\"; this is the nearest one that shows the page.")
+                return candidate
+        return content
+
+    async def _from_records(self, timestamp: str, original: str, url: str, **kwargs
+                            ) -> Optional[ScrapedContent]:
+        """The capture from the data the archive recorded for the page, where the replay
+        shows less: an X post from its record of the X API's answer (see `wayback_x`), a
+        Bloomberg article from the page data in its raw markup (behind the replayed
+        paywall, see `bloomberg`). None where there is no such record."""
+        from scrapemm.server.integrations.wayback_x import X_POST, x_post_from_wayback
+        if X_POST.match(original):
+            try:
+                found = await x_post_from_wayback(original, kwargs.get("max_video_size"))
+            except Exception as e:
+                logger.info(f"No X API record for {original}: {type(e).__name__}: {e}")
+                found = None
+            if found:
+                content, record_timestamp, address = found
+                logger.info(f"Took the X post {original} from the archive's record of the X API's answer.")
+                content.capture = Capture(
+                    archive="the Internet Archive (Wayback Machine)", original_url=original,
+                    captured_at=wayback_time(record_timestamp),
+                    archive_url=f"https://web.archive.org/web/{record_timestamp}/{address}",
+                    remark="the post as the X API answered for it, recorded by the archive (its "
+                           "captures of the post's page show X's page without JavaScript only).")
+                return content
+        if (urlsplit(original).hostname or "").endswith("bloomberg.com"):
+            from scrapemm.server.integrations.bloomberg import bloomberg_article_html
+            from scrapemm.server.util import to_scraped_content
+            raw = await _raw_capture(timestamp, original)
+            if raw and (article := bloomberg_article_html(raw[1])):
+                logger.info(f"Took the Bloomberg article {original} from its capture's page data.")
+                async with aiohttp.ClientSession(headers=HEADERS) as session:
+                    return await to_scraped_content(
+                        article, session=kwargs.get("session") or session,
+                        output_format=kwargs.get("output_format", "multimodal"), url=url,
+                        max_video_size=kwargs.get("max_video_size"))
+        return None
+
+    async def _replay(self, url: str, **kwargs) -> ScrapedContent:
         """A video capture is read from its raw markup first (see `_from_raw_capture()`),
         and replayed in the browser only if that yields no video. In the test suite, the
         replays of TikTok captures took 90-130 s -- half a minute to load, half a minute
@@ -588,6 +677,8 @@ class ArchiveOrg(HeadedBrowser):
             if wants_video:
                 await self._wait_playback_frame_ready(target)
                 return await self._collect_video(page, target)
+            # A page built by script builds itself only now (kremlin.ru's: 4 s)
+            await settle_dom(target, min_text=DOM_THIN_TEXT)
             return page
 
         except PlaywrightError:

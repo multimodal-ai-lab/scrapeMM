@@ -73,14 +73,20 @@ def detect_paywall(content: ScrapedContent) -> Optional[str]:
     if not selectors:
         return _gated_reason(soup)
 
-    words = 0
+    words = matched = 0
     for selector in selectors:
         try:
             elements = soup.select(selector)
         except Exception:
             continue  # A selector BeautifulSoup cannot parse; judge by the others
+        matched += len(elements)
         words += sum(len(el.get_text(" ", strip=True).split()) for el in elements)
 
+    if not matched:
+        # A selector that names nothing in the page judges nothing: CNN's live blogs (4,800
+        # words) and Le Point's section pages declare parts they do not have. Judged like a
+        # page that names none
+        return _gated_reason(soup)
     if words >= MIN_UNLOCKED_WORDS:
         return None
     return (f"the page declares its content paywalled ({', '.join(selectors)}), and that "

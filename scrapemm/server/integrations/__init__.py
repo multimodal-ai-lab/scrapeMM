@@ -19,6 +19,7 @@ from .ghostarchive import Ghostarchive
 from .megalodon import Megalodon
 from .awesomescreenshot import AwesomeScreenshot
 from .ncbi import NCBI
+from .researchgate import ResearchGate
 
 RETRIEVAL_INTEGRATIONS = [
     X(),
@@ -37,6 +38,7 @@ RETRIEVAL_INTEGRATIONS = [
     Megalodon(),
     AwesomeScreenshot(),
     NCBI(),
+    ResearchGate(),
 ]
 
 # The Browser method: the shared headed browser on any page of the open web. A method

@@ -854,5 +854,37 @@
   "url": "https://x.com/GrandpaRoy2/status/1819424956826165467/photo/2",
   "expected": {},
   "category": "X"
+ },
+ {
+  "url": "https://web.archive.org/web/20260123144919/https://x.com/vpopulimedia/status/2013656465060302945",
+  "expected": {
+   "video": 1
+  },
+  "category": "Internet Archive"
+ },
+ {
+  "url": "https://web.archive.org/web/20250825215446/https:/www.bloomberg.com/news/articles/2025-05-06/german-conservative-merz-wants-a-fast-start-as-new-chancellor",
+  "expected": {},
+  "category": "Internet Archive"
+ },
+ {
+  "url": "https://web.archive.org/web/20260128141421/http://en.putin.kremlin.ru/bio/page-0",
+  "expected": {},
+  "category": "Internet Archive"
+ },
+ {
+  "url": "https://archive.ph/wip/y5HcY",
+  "expected": {},
+  "category": "Archive.today"
+ },
+ {
+  "url": "https://www.researchgate.net/publication/378392776_Biomedical_Applications_of_Black_Pepper_the_King_of_Spices_A_Review",
+  "expected": {},
+  "category": "ResearchGate"
+ },
+ {
+  "url": "https://edition.cnn.com/world/live-news/venezuela-explosions-caracas-intl-hnk-01-03-26",
+  "expected": {},
+  "category": "News"
  }
 ]

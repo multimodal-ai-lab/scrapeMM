@@ -40,6 +40,7 @@ Next to most parts of the open web, the following platforms are supported too:
 - ✅️ Facebook
 - ✅ Threads: posts only (profiles TBD)
 - ✅ Reddit: posts with their top comments; links to a comment with its thread
+- ✅ ResearchGate: publications, as OpenAlex records them (ResearchGate turns servers away)
 
 ### 📦 Archiving Services
 - ✅ Perma.cc
@@ -48,6 +49,15 @@ Next to most parts of the open web, the following platforms are supported too:
 - ✅ Internet Archive (web.archive.org)
 - ✅ AwesomeScreenshot.com
 - ✅ Ghostarchive (ghostarchive.org)
+
+An archived copy is marked as one: its text begins with a note (which archive, when, of
+which page), and `result.capture` says the same. Where the replay holds less than the
+archive recorded, the record is used: X posts from the archive's record of the X API's
+answer (text and video), Bloomberg articles from the capture's page data. A capture that
+shows only "please enable JavaScript" gives way to the nearest capture that shows the page.
+Where an archive's capture of a platform's post holds nothing usable, the live post stands in,
+and a capture of a video page without its video gets the live video; both say so
+(`result.capture.live`). Switch this off with the setting `archive_live_fallback`.
 
 
 ## 🏗️ Architecture

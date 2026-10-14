@@ -643,7 +643,7 @@ async def identify_snapshot(url: str,
     """Resolves any Archive.today snapshot URL -- short (/uTVE4) or long
     (/2022.05.05-091515/https://...) on any mirror -- to its Snapshot. Returns None if
     the URL does not point to a snapshot or the snapshot does not exist."""
-    path = urlparse(url).path
+    path = urlparse(canonicalize_url(url)).path  # Also /wip/<id>, the capture in the making
     if match := SHORT_ID_REGEX.match(path):
         return await resolve_snapshot(match.group(1), session)
     if match := LONG_FORM_REGEX.match(path):

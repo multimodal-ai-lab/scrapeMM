@@ -120,9 +120,9 @@ class ChallengeStore:
     def holds(self, domain: str) -> bool:
         """Whether new URLs of this domain should wait instead of being scraped."""
         from .integrations import DOMAIN_TO_INTEGRATION
-        if domain in ALWAYS_GATED:
-            return True
-        return domain in self._challenges and domain not in DOMAIN_TO_INTEGRATION
+        if domain in DOMAIN_TO_INTEGRATION:
+            return False  # Its integration does not care (researchgate.net: OpenAlex)
+        return domain in ALWAYS_GATED or domain in self._challenges
 
     def get(self, domain: str) -> Optional[Challenge]:
         return self._challenges.get(domain)

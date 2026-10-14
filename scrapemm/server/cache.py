@@ -317,6 +317,8 @@ def complete_capture(url: str, response: ScrapingResponse) -> bool:
         return False
     if getattr(content, "stand_in", False):
         return False
+    if content.capture is not None and content.capture.live:
+        return False  # The live post stands in (in part): it is no capture to keep
     if _lacks_media(url, content.html):
         return False
     multimodal = content.multimodal

@@ -48,6 +48,16 @@ def test_a_consent_or_pay_wall_is_a_paywall():
     assert detect_paywall(ScrapedContent(html=RP_ONLINE + ARTICLE)) is None  # The article stands below
 
 
+def test_a_declared_paywall_that_names_nothing_judges_nothing():
+    # CNN's live blogs declare `.layout-live-story__wrapper` paywalled, which they lack
+    ld = ('<script type="application/ld+json">{"@type": "NewsArticle", "isAccessibleForFree": false, '
+          '"hasPart": {"@type": "WebPageElement", "isAccessibleForFree": false, '
+          '"cssSelector": ".layout-live-story__wrapper"}}</script>')
+    assert detect_paywall(ScrapedContent(html=ld + ARTICLE)) is None
+    teaser = ld.replace(".layout-live-story__wrapper", ".paid") + '<div class="paid"></div><p>Teaser.</p>'
+    assert detect_paywall(ScrapedContent(html=teaser))
+
+
 def test_a_javascript_notice_is_no_content():
     markdown = ("Владимир Путин – личный сайт\nThe Wayback Machine - https://web.archive.org/web/"
                 "20260128141421/http://en.putin.kremlin.ru/bio/page-0\n"

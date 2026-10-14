@@ -394,7 +394,9 @@ async def _retrieve(
 
     # Refuse blacklisted domains, e.g., domains that are protected by a CAPTCHA
     domain = get_domain(url)
-    if reason := blacklist.reason(domain):
+    # Not for a domain an integration serves: the integration does not go where the
+    # blacklisted CAPTCHA was (researchgate.net's DataDome; its integration asks OpenAlex)
+    if (reason := blacklist.reason(domain)) and domain not in DOMAIN_TO_INTEGRATION:
         e = DomainBlacklistedError(
             f"Domain '{domain}' is blacklisted: {reason}\nRemove it under Settings in "
             f"the server's web UI to allow it again.")
@@ -695,6 +697,10 @@ async def _retrieve(
     if winner is not None:
         return await _success(url, key, *winner, errors, output_format, start_time)
 
+    # An archive's capture of a platform's post that holds nothing usable: the live post
+    if live := await _live_instead(url, session, errors, output_format, max_video_size):
+        return await _success(url, key, *live, errors, output_format, start_time)
+
     # All methods failed
     logger.warning(f"All retrieval methods failed for URL: {url}")
 
@@ -945,10 +951,86 @@ def _derive_markdown(content: ScrapedContent) -> None:
     content.markdown = " ".join(parts)
 
 
+async def _live_instead(url: str, session: aiohttp.ClientSession, errors: dict,
+                        output_format: OutputFormat, max_video_size: Optional[int]
+                        ) -> Optional[tuple[str, ScrapedContent]]:
+    """For an archive's URL whose capture of a platform's post held nothing usable: the
+    live post, by the platform's integration, marked as such (`Capture.live`). None if
+    the capture is of no platform's post, the live post cannot be had either, or the
+    setting `archive_live_fallback` is off."""
+    if not get_setting("archive_live_fallback", True):
+        return None
+    archive = DOMAIN_TO_INTEGRATION.get(get_domain(url))
+    if archive is None or archive.name.lower() not in chain.ARCHIVE_INTEGRATIONS:
+        return None
+    try:
+        capture = await archive._capture(url, session=session)
+    except Exception as e:
+        logger.debug(f"Could not tell what {url} captures: {type(e).__name__}: {e}")
+        return None
+    original = capture.original_url if capture else None
+    platform = chain.platform_of(original) if original else None
+    if not platform:
+        return None
+    logger.info(f"🔁 {archive.name} holds nothing usable at {url}; retrieving the live post "
+                f"{original} with {platform} instead.")
+    label = f"{platform} (live post, not the capture)"
+    try:
+        content = await retrieve_via_integration(preprocess_url(original), platform, session=session,
+                                                 output_format=output_format,
+                                                 max_video_size=max_video_size)
+    except Exception as e:
+        errors[label] = e
+        return None
+    status, result = await run_light(_classify, original, platform, content, output_format)
+    if status != "success":
+        errors[label] = result if status == "error" else RetrievalFailed(
+            f"The live post did not provide the content as {output_format}.")
+        return None
+    reason = next((str(e).splitlines()[0][:200] for e in errors.values() if e and str(e)), None)
+    result.capture = replace(capture, live="post",
+                             remark=f"the capture failed: {reason}" if reason else None)
+    return label, result
+
+
+def _max_video_size_of(key) -> Optional[int]:
+    """The video size limit of a retrieval, from its cache key (see `cache.cache_key`)."""
+    return key[3] if key else None
+
+
+async def _with_live_video(content: ScrapedContent, max_video_size: Optional[int]) -> None:
+    """Adds the live video to an archive's capture of a video page that holds none
+    (Archive.today never keeps videos; YouTube's streams expire), marked as such
+    (`Capture.live`). Nothing if the setting `archive_live_fallback` is off."""
+    capture, sequence = content.capture, content.multimodal
+    if (capture is None or capture.live or sequence is None or sequence.videos
+            or not capture.original_url or not chain.is_video_url(capture.original_url)
+            or not get_setting("archive_live_fallback", True)):
+        return
+    from scrapemm.server.integrations.ytdlp import download_video_with_ytdlp
+    try:
+        async with aiohttp.ClientSession(headers=HEADERS) as own:
+            video, _, _ = await download_video_with_ytdlp(capture.original_url, own,
+                                                          max_video_size=max_video_size)
+    except Exception as e:
+        logger.info(f"No live video for the capture of {capture.original_url}: {type(e).__name__}: {e}")
+        return
+    if video is None:
+        return
+    logger.info(f"🔁 Added the live video of {capture.original_url} to its capture, which holds none.")
+    content.multimodal = MultimodalSequence([*sequence, "\n\nThe video, from the live page now "
+                                                        "(the capture holds none):", video])
+    content.capture = replace(capture, live="video",
+                              remark="the capture holds no video; the video is the live one, "
+                                     "retrieved now from its platform.")
+
+
 async def _success(url: str, key, method_name: str, content: ScrapedContent,
                    errors: dict, output_format: OutputFormat,
                    start_time: float) -> ScrapingResponse:
     logger.info(f"🎉 Successfully retrieved with method: {method_name}")
+    if output_format == "multimodal":
+        await _with_live_video(content, _max_video_size_of(key))
     if content.published_at is None:
         # The page's own declaration, where the source said nothing; in an archive's
         # capture, the archived page's

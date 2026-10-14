@@ -98,7 +98,12 @@ class TikTok(RetrievalIntegration):
                 return await self._get_user_profile(url, session)
         except Exception as e:
             if "Your IP address is blocked from accessing this post" in str(e):
-                raise AccessBlockedError(f"TikTok prevents your IP address from accessing the post {url}")
+                # TikTok says so also for posts it withholds from everybody (restricted or
+                # taken down): one refused from proxies in three countries and from a
+                # residential address alike (October 2026). The proxies are tried all the same
+                raise AccessBlockedError(f"TikTok refuses the post {url} to this IP address. If it "
+                                         f"does so through the proxies too, the post is most likely "
+                                         f"restricted or taken down.")
             elif "This post may not be comfortable for some audiences" in str(e):
                 raise AccessBlockedError("Video is blocked by TikTok for being 'uncomfortable for some audiences'.")
             else:
