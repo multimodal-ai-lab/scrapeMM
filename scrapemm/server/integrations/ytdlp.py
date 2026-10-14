@@ -7,6 +7,7 @@ import tempfile
 import time
 from datetime import datetime
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 import aiohttp
 from ezmm import MultimodalSequence, Video, Image
@@ -16,7 +17,7 @@ from yt_dlp.utils import (DownloadError, ExtractorError, GeoRestrictedError,
 
 from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError, AccessBlockedError, RateLimitError
 from scrapemm.server import proxy, slots
-from scrapemm.server.config import get_config_var
+from scrapemm.server.config import get_config_var, get_setting
 from scrapemm.server.download import download_image
 from scrapemm.server.download.videos import is_too_small_video
 
@@ -566,6 +567,107 @@ Views: {fmt_count(view_count)} - Likes: {fmt_count(like_count)} - Comments: {fmt
     elif thumbnail:  # Only add thumbnail if video could not be downloaded
         items.append(thumbnail)
 
+    return MultimodalSequence(items)
+
+
+# A channel's page, with or without a tab (/videos, /shorts, ...), or a playlist: listed,
+# its videos' thumbnails instead of their streams (see `get_youtube_listing()`)
+_CHANNEL_PATH = re.compile(r"^/(@[^/]+|channel/[^/]+|c/[^/]+|user/[^/]+)"
+                           r"(/(videos|shorts|streams|featured|playlists|search))?/?$")
+_CHANNEL_TABS = ("videos", "shorts", "streams")
+DEFAULT_CHANNEL_VIDEOS = 30
+
+
+def is_youtube_listing(url: str) -> bool:
+    """Whether `url` is a YouTube channel or playlist page rather than a video."""
+    parts = urlsplit(url)
+    if not parts.netloc.lower().removeprefix("www.").removeprefix("m.").endswith("youtube.com"):
+        return False
+    return bool(_CHANNEL_PATH.match(parts.path)) or (
+        parts.path.rstrip("/") == "/playlist" and "list=" in parts.query)
+
+
+def _listing_url(url: str) -> str:
+    """A channel's videos tab for a channel's home (or another tab without videos)."""
+    parts = urlsplit(url)
+    m = _CHANNEL_PATH.match(parts.path)
+    if m and m.group(3) not in _CHANNEL_TABS:
+        return f"https://www.youtube.com/{m.group(1)}/videos"
+    return url
+
+
+def _thumbnail_url(entry: dict) -> Optional[str]:
+    """A video's thumbnail of at most 720 px width, the largest such."""
+    thumbnails = [t for t in entry.get("thumbnails") or [] if t.get("url")]
+    fitting = [t for t in thumbnails if (t.get("width") or 0) <= 720]
+    if fitting or thumbnails:
+        return max(fitting or thumbnails, key=lambda t: t.get("width") or 0)["url"]
+    return f"https://i.ytimg.com/vi/{entry['id']}/hqdefault.jpg" if entry.get("id") else None
+
+
+def _clock(seconds) -> str:
+    if not isinstance(seconds, (int, float)) or seconds <= 0:
+        return ""
+    seconds = int(seconds)
+    h, m, s = seconds // 3600, seconds // 60 % 60, seconds % 60
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+async def get_youtube_listing(url: str, session: Optional[aiohttp.ClientSession] = None
+                              ) -> MultimodalSequence:
+    """A channel's or playlist's page: its name, subscribers and description, then its
+    latest videos (`youtube_channel_videos`), each with its title, link, duration and
+    views, and its thumbnail -- not its stream. The listing is one request of YouTube's
+    own web API (half a second), which YouTube's bot check does not guard."""
+    limit = max(1, int(get_setting("youtube_channel_videos", DEFAULT_CHANNEL_VIDEOS)))
+    opts: dict[str, Any] = dict(quiet=True, logger=logger_yt_dlp, extract_flat=True,
+                                playlistend=limit, skip_download=True,
+                                source_address="0.0.0.0", socket_timeout=15)
+    if route := proxy.route():
+        opts["proxy"] = route.with_auth
+
+    def extract() -> dict:
+        with YoutubeDL(opts) as ydl:
+            return ydl.extract_info(_listing_url(url), download=False)
+    try:
+        info = await asyncio.to_thread(extract)
+    except YoutubeDLError as e:
+        raise _classify(e) from e
+    if not info:
+        raise RetrievalFailed(f"YouTube listed nothing for {url}.")
+    entries = [e for e in (info.get("entries") or []) if isinstance(e, dict)][:limit]
+
+    async def thumbnail(entry: dict) -> Optional[Image]:
+        if not (source := _thumbnail_url(entry)):
+            return None
+        try:
+            return await download_image(source, session=session, ignore_small_images=False)
+        except Exception:
+            logger.debug(f"Could not download the thumbnail {source}.", exc_info=True)
+            return None
+    images = await asyncio.gather(*(thumbnail(e) for e in entries))
+
+    is_playlist = "list=" in urlsplit(url).query
+    name = info.get("channel") or info.get("uploader") or info.get("title") or ""
+    lines = [f"**YouTube {'Playlist' if is_playlist else 'Channel'}**"]
+    if is_playlist and info.get("title"):
+        lines.append(f"Title: {info['title']}")
+    lines.append(f"Channel: {name}" + (f" ({info['uploader_id']})" if info.get("uploader_id") else ""))
+    if isinstance(info.get("channel_follower_count"), int):
+        lines.append(f"Subscribers: {fmt_count(info['channel_follower_count'])}")
+    if info.get("description"):
+        lines += ["", info["description"]]
+    lines += ["", f"Latest {len(entries)} videos:" if not is_playlist else f"{len(entries)} videos:"]
+    items: list = ["\n".join(lines)]
+    for i, (entry, image) in enumerate(zip(entries, images), 1):
+        details = [d for d in (_clock(entry.get("duration")),
+                               f"{fmt_count(entry['view_count'])} views"
+                               if isinstance(entry.get("view_count"), int) else "") if d]
+        link = entry.get("url") or f"https://www.youtube.com/watch?v={entry.get('id')}"
+        items.append(f"\n{i}. {entry.get('title') or 'Untitled'} -- {link}"
+                     + (f" ({', '.join(details)})" if details else ""))
+        if image is not None:
+            items.append(image)
     return MultimodalSequence(items)
 
 

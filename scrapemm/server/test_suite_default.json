@@ -1,5 +1,12 @@
 [
  {
+  "url": "https://www.youtube.com/@UnderstandingWarOrg/videos",
+  "expected": {
+   "image": 20
+  },
+  "category": "YouTube"
+ },
+ {
   "url": "https://www.youtube.com/watch?v=RxJtYsCQ0jo",
   "expected": {
    "video": 1

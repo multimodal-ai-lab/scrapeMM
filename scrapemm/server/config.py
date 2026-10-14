@@ -48,6 +48,7 @@ SETTINGS: dict[str, type] = {
     # if unset: `youtube_cooldown`, its former name. And `youtube_min_interval`, the
     # former YouTube pace, stands in for the "youtube" entry of `method_cooldowns`.
     "youtube_pause": float,
+    "youtube_channel_videos": int,  # Videos listed for a YouTube channel or playlist
     "job_retention_days": float,  # Job history: how long jobs keep their content (0: for ever)
     "max_jobs": int,  # Job history: how many jobs keep their content at most (0: no limit)
     # Known consent platforms' dialogs removed in the browser before reading (default on)
@@ -147,7 +148,7 @@ def schema() -> list[dict]:
     from .engine import DEFAULT_HEDGING_DELAY
     from .integrations.archive_today import DEFAULT_SOLVE_TIMEOUT
     from .integrations.headed_browser import DEFAULT_DEVTOOLS_LOCAL_PORT, DEFAULT_MAX_BROWSER_PAGES
-    from .integrations.ytdlp import DEFAULT_YOUTUBE_PAUSE
+    from .integrations.ytdlp import DEFAULT_YOUTUBE_PAUSE, DEFAULT_CHANNEL_VIDEOS
     from . import proxy
     from .jobs import DEFAULT_MAX_JOBS, DEFAULT_RETENTION_DAYS
     from .search.base import DEFAULT_MAX_SEARCH_CONCURRENCY
@@ -215,6 +216,9 @@ def schema() -> list[dict]:
         entry("youtube_pause", DEFAULT_YOUTUBE_PAUSE, "YouTube pause after a refusal",
               "How long YouTube is left alone once it refused this server; with a proxy in "
               "use, YouTube goes through it meanwhile.", "integrations", unit="s", min=0),
+        entry("youtube_channel_videos", DEFAULT_CHANNEL_VIDEOS, "YouTube: videos per channel",
+              "A channel's or playlist's page lists its latest videos this many, each with "
+              "its thumbnail instead of its stream.", "integrations", min=1, max=500),
         entry("archive_today_interactive_solve", False,
               "Archive.today: ask for a CAPTCHA at the moment of a gated request",
               "Sensible only for one-off, attended retrievals.", "archives"),
