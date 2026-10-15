@@ -29,9 +29,10 @@ async def test_a_wait_is_capped_by_what_is_left(clock):
         assert budget.cap(30) == 30            # Plenty left: the wait as asked
         clock[0] += 100                        # 20 seconds are left
         assert budget.cap(300) == 10
-        assert budget.cap(300, reserve=30) == 5  # Not less than the floor
+        assert budget.cap(300, reserve=30) == 0  # No time left: given up at once
+        assert budget.cap(300, reserve=30, floor=5) == 5  # Unless a floor is asked for
         clock[0] += 100                        # Past the end
-        assert budget.cap(300) == 5
+        assert budget.cap(300) == 0
         assert budget.remaining() < 0
 
     await asyncio.create_task(retrieval())
@@ -58,3 +59,24 @@ async def test_media_given_up_on_are_remembered_for_the_retrieval(clock):
 
     assert await asyncio.create_task(retrieval()) == {"https://example.org/slow.mp4"}
     assert budget.abandoned() == set()
+
+
+async def test_media_left_when_the_time_is_up_are_not_waited_for(clock, monkeypatch):
+    """Once the budget is spent, the media still queued are left out at once, instead of
+    each waiting a few seconds more, two at a time per host, past the budget's end."""
+    from scrapemm.server import util
+
+    started = []
+
+    async def download(uri):
+        started.append(uri)
+        return None
+
+    async def retrieval():
+        budget.start(120)
+        clock[0] += 115  # Only the reserve is left
+        bounded = await util._wait_for_medium("https://e.example/a.jpg", download("a"), set(), [])
+        return bounded
+
+    assert await asyncio.create_task(retrieval()) is None
+    assert started == []  # The download never ran

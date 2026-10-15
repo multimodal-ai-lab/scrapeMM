@@ -73,7 +73,7 @@ onMounted(load)
         :description="isAdmin
           ? `Set ${current.missing_secrets.join(', ')} under Secrets in the Settings to search with ${current.label}.`
           : `An admin of this server has to set ${current.missing_secrets.join(', ')} before you can search with ${current.label}.`"
-        :actions="isAdmin ? [{ label: 'Open Secrets', to: '/settings#secrets', color: 'warning', variant: 'outline' }] : []"
+        :actions="isAdmin ? [{ label: 'Open Secrets', to: '/settings?section=secrets', color: 'warning', variant: 'outline' }] : []"
       />
       <component :is="PROVIDERS[current.name]" v-if="PROVIDERS[current.name]" :provider="current" />
       <UCard v-else>

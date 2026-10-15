@@ -17,7 +17,13 @@ import type { DropdownMenuItem } from '@nuxt/ui'
  * Every action lives in the hover menu, including Configure: seventeen cards with their
  * own buttons is a wall, and the colour already says which ones want attention.
  */
-const props = defineProps<{ item: any, busy?: boolean, checking?: boolean }>()
+const props = defineProps<{
+  item: any
+  busy?: boolean
+  checking?: boolean
+  /** The method's slots, live (see the server's `slots.py`): none for search providers */
+  slots?: { limit: number, in_use: number, waiting: number, cooldown: number } | null
+}>()
 const emit = defineEmits<{
   recheck: [name: string]
   toggle: [name: string, enabled: boolean]
@@ -47,7 +53,7 @@ const menuItems = computed(() => {
   // Credentials and switching methods on and off are for Admins: they apply to everybody
   if (!isAdmin.value) return [actions]
   if (props.item.configurable) {
-    actions.push({ label: 'Configure', icon: 'i-fa7-solid-sliders', to: '/settings#secrets' })
+    actions.push({ label: 'Configure', icon: 'i-fa7-solid-sliders', to: '/settings?section=secrets' })
   }
   actions.push({
     label: props.item.enabled ? 'Disable' : 'Enable',
@@ -57,18 +63,32 @@ const menuItems = computed(() => {
   return [actions]
 })
 
-const retrievals = computed(() => {
-  const n = props.item.retrievals || 0
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n)
+const retrievals = computed(() => compact(props.item.retrievals || 0))
+
+/** How busy the method is: its slots in use, and whether URLs queue for one */
+const slotLook = computed(() => {
+  const s = props.slots
+  if (!s) return null
+  const share = s.limit ? Math.min(1, s.in_use / s.limit) : 0
+  const cooldown = s.cooldown ? ` · at least ${seconds(s.cooldown)} between two starts` : ''
+  return {
+    share,
+    // Full with URLs waiting: the method is the bottleneck, worth a glance
+    color: s.waiting ? 'var(--ui-warning)' : 'var(--ui-primary)',
+    title: `${s.in_use} of ${s.limit} slots in use`
+      + (s.waiting ? `, ${s.waiting} URL${s.waiting === 1 ? '' : 's'} waiting for one` : '')
+      + cooldown,
+  }
 })
 
 /** What the chip's tooltip says. Falls back to the state's own label. */
 const explanation = computed(() => props.item.detail || tone.value.label)
 
 // Retrieval methods are recorded in the history under their lower-case name; search
-// providers retrieve nothing, so they have no jobs to show
-const historyLink = computed(() => props.item.kind === 'search' ? undefined
-  : `/jobs?method=${encodeURIComponent(props.item.name.toLowerCase())}`)
+// providers have their searches
+const historyLink = computed(() => props.item.kind === 'search'
+  ? `/history?view=searches&provider=${encodeURIComponent(props.item.key)}`
+  : `/history?view=retrievals&method=${encodeURIComponent(props.item.name.toLowerCase())}`)
 
 function open() {
   if (historyLink.value) navigateTo(historyLink.value)
@@ -79,7 +99,7 @@ function open() {
   <div
     class="group relative surface-card rounded-xl p-3.5 flex flex-col h-full"
     :class="[tone.surface, historyLink ? 'cursor-pointer' : '']"
-    :title="historyLink ? 'Show the jobs that used this method' : undefined"
+    :title="item.kind === 'search' ? 'Show the searches made with this provider' : 'Show the retrievals of this method'"
     @click="open"
   >
     <div class="flex items-start gap-3.5">
@@ -132,6 +152,22 @@ function open() {
     <!-- The verdict, pinned to the bottom right. `mt-auto` keeps it there whatever the
          card above it contains, so a row of cards lines its chips up. -->
     <div class="mt-auto pt-2.5 flex items-center justify-end gap-2">
+      <!-- Slot usage, bottom left: quiet while idle, a filling bar while it works -->
+      <span
+        v-if="slotLook && !checking" class="mr-auto inline-flex items-center gap-1.5 text-xs
+                                            text-dimmed tabular-nums cursor-help"
+        :title="slotLook.title"
+      >
+        <span class="w-10 h-1.5 rounded-full overflow-hidden" style="background: var(--viz-track)">
+          <span
+            class="block h-full rounded-full transition-[width] duration-500"
+            :style="{ width: `${slotLook.share * 100}%`, background: slotLook.color }"
+          />
+        </span>
+        {{ slots!.in_use }}/{{ slots!.limit }}
+        <span v-if="slots!.waiting" class="text-warning">+{{ compact(slots!.waiting) }}</span>
+        <UIcon v-if="slots!.cooldown" name="i-fa7-solid-hourglass-half" class="size-2.5" />
+      </span>
       <span
         v-if="item.retrievals && !checking"
         class="inline-flex items-center gap-1 text-xs text-dimmed tabular-nums"

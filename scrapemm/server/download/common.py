@@ -38,3 +38,15 @@ BROWSER_TLS_DOMAINS = {
     "archive.fo",
     "archive.md",
 }
+
+
+# Cookies a site sets itself once a visitor clicks through a notice, set beforehand:
+# justice.gov's "Are you 18 years of age or older?" before its Epstein files (its page
+# script sets this cookie on "Yes")
+SITE_COOKIES = {"www.justice.gov": {"justiceGovAgeVerified": "true"}}
+
+
+def site_cookies(url: str) -> dict[str, str]:
+    """The cookies to send along to `url` (see `SITE_COOKIES`)."""
+    from urllib.parse import urlsplit
+    return SITE_COOKIES.get((urlsplit(url).hostname or "").lower(), {})

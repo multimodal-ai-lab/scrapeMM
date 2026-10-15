@@ -3,7 +3,9 @@
 const api = useApi()
 
 const integrations = ref<any[]>([])
-const environment = ref<any>(null)
+// Shared with the sidebar, whose logo and indicators follow it on every page
+const environment = useEnvironment()
+const { blacklistNew } = useAttention()
 const loading = ref(false)
 const error = ref('')
 const busy = ref<string | null>(null)
@@ -231,40 +233,15 @@ function duration(seconds: number) {
   return `kept ${Math.round(seconds / 60)} min`
 }
 
-/** Media as a share of the room available to it: what it uses, over that plus free. */
-function mediaShare(media: any): number | null {
-  if (media.disk_free == null || media.bytes == null) return null
-  const available = media.bytes + media.disk_free
-  return available > 0 ? media.bytes / available : null
-}
-
-/** Media crowding out its own headroom is worth saying before it stops the server. */
-function diskTone(media: any) {
-  const share = mediaShare(media)
-  if (share == null) return 'neutral' as const
-  if (share >= 0.95) return 'error' as const
-  if (share >= 0.85) return 'warning' as const
-  return 'neutral' as const
-}
-
-/** >95% green, 80–95% amber, below that red. */
-function rateTone(rate: number | null) {
-  if (rate == null) return { tone: 'neutral' as const, value: '—' }
-  const percent = rate * 100
-  const tone = percent > 95 ? 'success' as const
-    : percent >= 80 ? 'warning' as const
-      : 'error' as const
-  return { tone, value: `${percent.toFixed(1)}%` }
-}
-
 const tiles = computed(() => {
   const env = environment.value
   if (!env) return []
-  const rate = rateTone(env.throughput.success_rate.rate)
+  const rate = env.throughput.success_rate.rate
   const times = env.throughput.scrape_times
   return [
     { label: 'Success rate', icon: 'i-fa7-solid-check',
-      value: rate.value, tone: rate.tone,
+      // The thresholds are the sidebar logo's too (see useHealth.ts)
+      value: rate == null ? '—' : `${(rate * 100).toFixed(1)}%`, tone: rateTone(rate),
       ring: env.throughput.success_rate.rate,
       // scrapeMM's success: a target that was unavailable counts, since scrapeMM did its
       // part (see useOutcome.ts); the breakdown says how many that were
@@ -273,33 +250,31 @@ const tiles = computed(() => {
           ? `${env.throughput.success_rate.outcomes.error} failed · `
             + `${env.throughput.success_rate.outcomes.unavailable} unavailable · `
             + `${env.throughput.success_rate.outcomes.ok} retrieved, `
-            + `of the last ${env.throughput.success_rate.total}`
-          : `of the last ${env.throughput.success_rate.total} retrievals`)
+            + `of the last ${compact(env.throughput.success_rate.total)}`
+          : `of the last ${compact(env.throughput.success_rate.total)} retrievals`)
         : 'nothing retrieved yet',
-      to: env.throughput.success_rate.outcomes?.error ? '/jobs?outcome=error' : '/jobs' },
+      to: env.throughput.success_rate.outcomes?.error
+        ? '/history?view=retrievals&outcome=error' : '/history?view=retrievals' },
     { label: 'Scraping time', icon: 'i-fa7-solid-stopwatch',
       value: times?.median == null ? '—' : `${times.median.toFixed(1)} s`,
-      // Judged by the median, the headline figure: slow above 5 s, bad above 20 s
-      tone: times?.median == null ? 'neutral' as const
-        : times.median > 20 ? 'error' as const
-          : times.median > 5 ? 'warning' as const
-            : 'neutral' as const,
+      // Judged by the median, the headline figure, as in the Test view
+      tone: timeTone(times?.median),
       detail: times?.total
-        ? `median · 95th percentile ${times.p95.toFixed(1)} s, of the last ${times.total} scrapes`
+        ? `median · 95th percentile ${times.p95.toFixed(1)} s, of the last ${compact(times.total)} scrapes`
         : 'nothing scraped yet' },
     { label: 'Retrieved today', icon: 'i-fa7-solid-gauge-high',
       value: `${retrievedToday.value}`, tone: 'neutral' as const,
       // Today, hour by hour: where it came from and how it went
       detail: 'URLs since midnight', to: '/statistics?bucket=hour&periods=24' },
     { label: 'Search requests today', icon: 'i-fa7-solid-magnifying-glass',
-      value: `${searchesToday.value.total}`,
+      value: compact(searchesToday.value.total),
       tone: searchesToday.value.failed ? 'warning' as const : 'neutral' as const,
       detail: searchesToday.value.total
         ? searchesToday.value.providers
-          .map((p) => `${p.name} ${p.ok + p.failed}${p.failed ? ` (${p.failed} failed)` : ''}`)
+          .map((p) => `${p.name} ${compact(p.ok + p.failed)}${p.failed ? ` (${compact(p.failed)} failed)` : ''}`)
           .join(' · ')
-        : `none since midnight · ${env.searches?.total ?? 0} all time`,
-      to: '/playground/search' },
+        : `none since midnight · ${compact(env.searches?.total ?? 0)} all time`,
+      to: '/history?view=searches&since=today' },
     { label: 'Awaiting CAPTCHA', icon: 'i-fa7-solid-lock',
       value: `${env.captcha.waiting}`,
       tone: env.captcha.waiting ? 'warning' as const : 'neutral' as const,
@@ -311,16 +286,17 @@ const tiles = computed(() => {
       to: env.captcha.waiting ? '/captcha' : undefined },
     { label: 'Blacklisted', icon: 'i-fa7-solid-ban',
       value: `${env.blacklist.domains}`,
-      tone: env.blacklist.domains ? 'warning' as const : 'neutral' as const,
-      detail: env.blacklist.domains ? 'domains excluded from retrieval'
-        : 'no domains excluded',
+      // Only what this browser has not seen on the Blacklist page yet wants attention
+      tone: blacklistNew.value ? 'warning' as const : 'neutral' as const,
+      detail: blacklistNew.value ? 'domains excluded · new ones since your last look'
+        : env.blacklist.domains ? 'domains excluded from retrieval' : 'no domains excluded',
       to: '/blacklist' },
     // All time: counted as they run, so pruning the history does not lower them
     { label: 'Jobs run', icon: 'i-fa7-solid-clock-rotate-left',
-      value: `${(env.jobs.all_time?.jobs ?? env.jobs.jobs).toLocaleString()}`, tone: 'neutral' as const,
-      detail: `${(env.jobs.all_time?.urls ?? env.jobs.urls).toLocaleString()} URLs all time · `
-        + `${env.jobs.jobs.toLocaleString()} jobs kept`,
-      to: '/jobs' },
+      value: compact(env.jobs.all_time?.jobs ?? env.jobs.jobs), tone: 'neutral' as const,
+      detail: `${compact(env.jobs.all_time?.urls ?? env.jobs.urls)} URLs all time · `
+        + `${compact(env.jobs.jobs)} jobs kept`,
+      to: '/history' },
     { label: 'Media stored', icon: 'i-fa7-solid-photo-film',
       // Null until the server's first background measurement is done
       value: env.media.bytes == null ? '…' : bytes(env.media.bytes),
@@ -332,9 +308,9 @@ const tiles = computed(() => {
       detail: env.media.files == null
         ? 'measuring…'
         : env.media.disk_free
-          ? `${env.media.files} files · ${bytes(env.media.disk_free)} free`
-          : `${env.media.files} files downloaded`,
-      to: '/settings' },
+          ? `${compact(env.media.files)} files · ${bytes(env.media.disk_free)} free`
+          : `${compact(env.media.files)} files downloaded`,
+      to: '/settings?section=cache' },
     // How often a retrieval was answered from the cache instead of being scraped again:
     // relative as the value, absolute below it, alongside what the cache holds now
     { label: 'Cache hits', icon: 'i-fa7-solid-bolt',
@@ -342,32 +318,33 @@ const tiles = computed(() => {
         : `${(env.jobs.cache_hit_rate * 100).toFixed(1)}%`,
       tone: 'neutral' as const, ring: env.jobs.cache_hit_rate,
       detail: env.jobs.urls
-        ? `${env.jobs.from_cache} of ${env.jobs.urls} URLs · ${env.cache.entries} cached, ${duration(env.cache.ttl)}`
-        : `${env.cache.entries} cached · ${duration(env.cache.ttl)}`,
-      to: '/settings' },
-    // URLs accepted by a job but not started yet, because every slot is taken
+        ? `${compact(env.jobs.from_cache)} of ${compact(env.jobs.urls)} URLs · ${compact(env.cache.entries)} cached, ${duration(env.cache.ttl)}`
+        : `${compact(env.cache.entries)} cached · ${duration(env.cache.ttl)}`,
+      to: '/settings?section=cache' },
+    // URLs accepted but not started yet: every slot of their methods is taken (the
+    // thresholds are the sidebar logo's too, see useHealth.ts)
     { label: 'Waiting in line', icon: 'i-fa7-solid-hourglass-half',
-      value: `${env.queue.waiting}`, tone: 'neutral' as const,
+      value: compact(env.queue.waiting), tone: queueTone(env.queue.waiting),
       detail: env.queue.waiting || env.queue.active || env.jobs.running
-        ? `URLs queued · ${env.queue.active}/${env.queue.limit} scraping · `
+        ? `URLs waiting for a slot · ${compact(env.queue.active)} scraping · `
           + `${env.jobs.running} job${env.jobs.running === 1 ? '' : 's'} running`
         : 'no URLs queued',
-      to: '/jobs' },
+      to: '/history' },
     // The proxy for when this server's address is blocked: only once one is configured
     ...(env.proxy?.configured ? [proxyTile(env.proxy)] : []),
   ]
 })
 
 function proxyTile(proxy: any) {
-  const test = proxy.last_test
   const paused = proxy.youtube_paused_until
-  const parts = [`${proxy.requests_today} through it today`]
-  if (test) parts.push(test.ok ? `tested: ${test.ip}${test.country ? ` (${test.country})` : ''}` : 'last test failed')
+  const parts = [`${proxy.requests_today} through them today`]
+  if (proxy.countries?.length) parts.push(proxy.countries.join(', '))
+  if (proxy.failed_tests) parts.push(`${proxy.failed_tests} failed the last test`)
   if (paused) parts.push(`YouTube paused until ${new Date(paused * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`)
-  return { label: 'Proxy', icon: 'i-fa7-solid-shuffle',
-    value: proxy.enabled ? 'On' : 'Off',
-    tone: test && !test.ok ? 'warning' as const : proxy.enabled ? 'success' as const : 'neutral' as const,
-    detail: parts.join(' · '), to: '/settings' }
+  return { label: proxy.count === 1 ? 'Proxy' : 'Proxies', icon: 'i-fa7-solid-shuffle',
+    value: proxy.enabled ? `${proxy.usable_count}/${proxy.count}` : 'Off',
+    tone: proxyTone(proxy),
+    detail: parts.join(' · '), to: '/settings?section=proxy' }
 }
 
 onMounted(() => {
@@ -488,6 +465,7 @@ onUnmounted(() => {
         <IntegrationCard
           v-for="item in group.items" :key="item.key" :item="item"
           :busy="busy === item.key" :checking="pending.has(item.key)"
+          :slots="environment?.slots?.[item.key]"
           @recheck="recheck" @toggle="toggle"
         />
       </div>

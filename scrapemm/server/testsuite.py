@@ -37,6 +37,7 @@ from scrapemm.common.outcome import UNAVAILABLE, classify
 from scrapemm.common.paths import APP_NAME
 from scrapemm.common.wire import errors_to_wire
 from . import interrupts
+from .config import get_setting
 from .paths import CONFIG_DIR
 
 logger = logging.getLogger(APP_NAME)
@@ -472,7 +473,7 @@ def _save_run(report: dict) -> None:
     runs = [r for r in _read_json(RUNS_PATH, []) if r.get("id") != report["id"]]
     runs.append(report)
     try:
-        _write_json(RUNS_PATH, runs[-MAX_RUNS_KEPT:])
+        _write_json(RUNS_PATH, runs[-max(1, int(get_setting("test_runs_kept", MAX_RUNS_KEPT))):])
     except OSError:
         logger.warning(f"Could not save the test report to {RUNS_PATH}.", exc_info=True)
 
@@ -501,3 +502,35 @@ def _is_captcha(result: dict) -> bool:
 
 
 run = TestRun()
+
+
+# The latest kept run's headline, read again only when the reports file changed
+_headline: tuple[Optional[float], Optional[dict]] = (None, None)
+
+
+def headline() -> Optional[dict]:
+    """For the live view (the sidebar's indicator): the run under way, or the latest
+    kept run's coverage, median time and share of expected media found."""
+    global _headline
+    if run.running:
+        return {"id": run.id, "running": True, "done": len(run.results),
+                "total": len(run.entries)}
+    try:
+        mtime = RUNS_PATH.stat().st_mtime
+    except OSError:
+        return None
+    if _headline[0] != mtime:
+        latest = _latest_report()
+        figures = None
+        if latest and (s := latest.get("summary")) and s.get("done"):
+            media = s.get("media") or {}
+            expected = sum(m["expected"] for m in media.values())
+            found = sum(m["found"] for m in media.values())
+            # The key changes with every save: a rerun of the CAPTCHA URLs keeps the id
+            figures = {"id": latest["id"], "key": f"{latest['id']}@{mtime}",
+                       "running": False, "state": latest.get("state"),
+                       "finished": latest.get("finished"), "coverage": s.get("coverage"),
+                       "median": (s.get("time") or {}).get("median"),
+                       "media": found / expected if expected else None}
+        _headline = (mtime, figures)
+    return _headline[1]

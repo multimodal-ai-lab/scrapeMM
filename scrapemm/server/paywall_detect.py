@@ -29,11 +29,43 @@ MAX_GATED_WORDS = 150
 GATE_REGEX = re.compile(r"paywall|gated", re.IGNORECASE)
 
 
+# A consent-or-pay wall in place of the article ("Pur" model: accept tracking, or
+# subscribe): each entry's phrases together mark one, e.g. rp-online.de's
+CONSENT_OR_PAY = (("weiter mit werbung", "werbefrei"), ("mit werbung weiterlesen", "werbefrei"),
+                  ("akzeptieren und weiter", "pur-abo"), ("contentpass",),
+                  ("continuer avec publicité", "sans publicité"))
+CONSENT_OR_PAY_MAX_ARTICLE_WORDS = 150  # An article this long below the layer is there
+
+
+def _consent_or_pay(html: str) -> Optional[str]:
+    """Why the page is a consent-or-pay wall instead of the article; None if it is none,
+    or the article stands below the wall's layer all the same."""
+    lowered = html.lower()
+    hit = next((marker for marker in CONSENT_OR_PAY if all(p in lowered for p in marker)), None)
+    if not hit:
+        return None
+    soup = BeautifulSoup(html, "html.parser")
+    for element in soup(["script", "style", "noscript", "template"]):
+        element.decompose()
+    article_words = max((len(e.get_text(" ", strip=True).split()) for e in soup.find_all(["article", "main"])),
+                        default=0)
+    if article_words >= CONSENT_OR_PAY_MAX_ARTICLE_WORDS:
+        return None
+    paragraph_words = sum(n for p in soup.find_all("p") if (n := len(p.get_text(" ", strip=True).split())) >= 25)
+    if paragraph_words >= 400:
+        return None
+    return f"the page asks to accept tracking or to pay first ({' + '.join(hit)})"
+
+
 def detect_paywall(content: ScrapedContent) -> Optional[str]:
     """Returns why the content is a paywall teaser rather than the article, or None if
     the article is there (or the page declares no paywall that could be checked)."""
     html = content.html if content else None
-    if not html or "isaccessibleforfree" not in html.lower():
+    if not html:
+        return None
+    if reason := _consent_or_pay(html):
+        return reason
+    if "isaccessibleforfree" not in html.lower():
         return None  # Cheap check first: most pages declare no paywall at all
 
     soup = BeautifulSoup(html, "html.parser")
@@ -41,14 +73,20 @@ def detect_paywall(content: ScrapedContent) -> Optional[str]:
     if not selectors:
         return _gated_reason(soup)
 
-    words = 0
+    words = matched = 0
     for selector in selectors:
         try:
             elements = soup.select(selector)
         except Exception:
             continue  # A selector BeautifulSoup cannot parse; judge by the others
+        matched += len(elements)
         words += sum(len(el.get_text(" ", strip=True).split()) for el in elements)
 
+    if not matched:
+        # A selector that names nothing in the page judges nothing: CNN's live blogs (4,800
+        # words) and Le Point's section pages declare parts they do not have. Judged like a
+        # page that names none
+        return _gated_reason(soup)
     if words >= MIN_UNLOCKED_WORDS:
         return None
     return (f"the page declares its content paywalled ({', '.join(selectors)}), and that "

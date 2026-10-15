@@ -18,32 +18,23 @@ const draftForPreview = useChainDraft()
 
 const server = ref<any>(null)
 const draft = ref<Step[]>([])
-const hedging = ref<string>('')
 const loading = ref(true)
 const error = ref('')
 
 const info = computed<Record<string, any>>(() =>
   Object.fromEntries((server.value?.methods || []).map((m: any) => [m.key, m])))
 
-function serverHedging(): string {
-  const value = server.value?.hedging_delay
-  return value === null || value === undefined || value === 0 ? '' : String(value)
-}
-
-const dirty = computed(() => !!server.value && (
-  JSON.stringify(draft.value) !== JSON.stringify(server.value.chain)
-  || hedging.value.trim() !== serverHedging()))
+const dirty = computed(() => !!server.value
+  && JSON.stringify(draft.value) !== JSON.stringify(server.value.chain))
 
 const isDefaultDraft = computed(() => !!server.value
-  && JSON.stringify(draft.value) === JSON.stringify(server.value.defaults)
-  && hedging.value.trim() === '')
+  && JSON.stringify(draft.value) === JSON.stringify(server.value.defaults))
 
 watch(draft, (value) => { draftForPreview.value = value.map((s) => ({ ...s })) }, { deep: true })
 
 function adopt(data: any) {
   server.value = data
   draft.value = data.chain.map((s: Step) => ({ ...s }))
-  hedging.value = serverHedging()
 }
 
 async function load() {
@@ -58,16 +49,10 @@ async function load() {
   }
 }
 
+// The order and the switches only. The hedging delay is a plain setting, edited with the
+// section's other fields below the chain; left out here, the PUT leaves it as it is.
 async function save() {
-  const delay = hedging.value.trim()
-  if (delay && (Number.isNaN(Number(delay)) || Number(delay) < 0)) {
-    throw new Error('The hedging delay must be a number of seconds, or empty to turn it off.')
-  }
-  adopt(await api.put<any>('/v1/chain', {
-    chain: draft.value,
-    hedging_delay: delay ? Number(delay) : null,
-    set_hedging_delay: true,
-  }))
+  adopt(await api.put<any>('/v1/chain', { chain: draft.value }))
 }
 
 function discard() {
@@ -76,7 +61,6 @@ function discard() {
 
 function resetToDefaults() {
   draft.value = server.value.defaults.map((s: Step) => ({ ...s }))
-  hedging.value = ''
 }
 
 useSettingsSection({ id: 'chain', title: 'Retrieval chain', dirty, save, discard })
@@ -246,34 +230,25 @@ function detail(step: Step) {
 </script>
 
 <template>
+  <!-- No title of its own: the Settings page heads the section -->
   <UCard>
-    <template #header>
-      <div class="flex flex-col sm:flex-row sm:items-start gap-x-3 gap-y-2">
-        <div class="min-w-0 flex-1">
-          <h2 class="font-medium flex items-center gap-2">
-            <UIcon name="i-fa7-solid-list-ol" class="size-4 text-primary" />
-            Retrieval chain
-            <UBadge v-if="dirty" color="warning" variant="subtle" size="sm" label="Unsaved" />
-          </h2>
-          <p class="text-sm text-muted mt-0.5">
-            The methods scrapeMM tries for every URL, top to bottom, until one gets the page.
-            Drag a card to reorder it.
-          </p>
-        </div>
-        <UButton
-          size="xs" variant="ghost" color="neutral" icon="i-fa7-solid-arrow-rotate-left" class="self-start"
-          label="Reset to defaults" :disabled="loading || isDefaultDraft" @click="resetToDefaults"
-        />
-      </div>
-    </template>
-
     <div v-if="loading && !server" class="py-6 text-center text-sm text-muted">
       <UIcon name="i-fa7-solid-spinner" class="size-4 animate-spin" /> Loading the chain…
     </div>
+    <UAlert v-else-if="error && !server" color="error" variant="subtle" :description="error" />
 
     <div v-else-if="server" class="space-y-4">
       <UAlert v-if="error" color="error" variant="subtle" :description="error" />
       <p class="sr-only" aria-live="assertive">{{ announcement }}</p>
+      <div class="flex items-center gap-3">
+        <p class="text-xs text-muted flex-1">
+          Drag a card to reorder it; its switch takes the method out of the chain.
+        </p>
+        <UButton
+          size="xs" variant="ghost" color="neutral" icon="i-fa7-solid-arrow-rotate-left" class="shrink-0"
+          label="Reset to defaults" :disabled="loading || isDefaultDraft" @click="resetToDefaults"
+        />
+      </div>
 
       <ol
         ref="listEl" class="space-y-2" aria-label="Retrieval chain, in order"
@@ -336,20 +311,13 @@ function detail(step: Step) {
         </li>
       </ol>
 
-      <div class="grid sm:grid-cols-[1fr_auto] gap-3 items-start">
-        <p class="text-xs text-muted">
-          <UIcon name="i-fa7-solid-circle-info" class="size-3" />
-          A site's own integration always comes first for its domains, and the exceptions
-          below fix the live methods of some domains. A missing page (404) or a dead host
-          skips the remaining live methods; archive methods still run.
-        </p>
-        <UFormField
-          label="Hedging (s)" class="sm:w-64"
-          description="Start the next live method after this head start, alongside the running one. Faster, but duplicates work."
-        >
-          <UInput v-model="hedging" type="number" min="0" step="0.5" placeholder="Off" class="w-full" />
-        </UFormField>
-      </div>
+      <p class="text-xs text-muted">
+        <UIcon name="i-fa7-solid-circle-info" class="size-3" />
+        A site's own integration always comes first for its domains, and the
+        <NuxtLink to="/settings?section=site-rules" class="text-primary hover:underline">site rules</NuxtLink>
+        fix the live methods of some domains. A missing page (404) or a dead host skips the
+        remaining live methods; archive methods still run.
+      </p>
     </div>
   </UCard>
 </template>

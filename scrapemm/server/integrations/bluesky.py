@@ -15,6 +15,7 @@ logger = logging.getLogger("scrapeMM")
 
 class Bluesky(RetrievalIntegration):
     name = "Bluesky"
+    post_media = True
     domains = ["bsky.app"]
 
     client = None

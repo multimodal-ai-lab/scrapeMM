@@ -8,12 +8,13 @@ from typing import Optional
 from playwright.async_api import TimeoutError, Page, Frame, Error as PlaywrightError
 
 from scrapemm.server import budget
+from scrapemm.server.config import get_setting
 from scrapemm.server.download.browser import MAX_IMAGE_BYTES, MAX_VIDEO_BYTES, BLOB_ATTR, install_stash
 from scrapemm.server.integrations.headed_browser import HeadedBrowser, ContentTarget, settle_dom, \
     renderer_crashed, evaluate_within
 from scrapemm.common import RetrievalFailed
 from scrapemm.common.exceptions import TargetUnavailableError
-from scrapemm.common.scraping_response import ScrapedContent
+from scrapemm.common.scraping_response import Capture, ScrapedContent, utc_iso
 
 logger = logging.getLogger("scrapeMM")
 
@@ -28,6 +29,11 @@ STASH_IMAGE_TIMEOUT = 30
 STASH_VIDEO_TIMEOUT = 75
 # Large WARCs (e.g. 80MB+ Telegram videos) need a long wait for the innermost iframe.
 INNERMOST_FRAME_TIMEOUT_MS = 120_000
+# ...a record's screenshot view (`?type=image`) does not: it is one image, shown in 5 s.
+# Under load it sometimes stayed empty, and the full wait above went by before it was
+# loaded again -- which then took seconds (perma.cc/FD9Q-4S9Y: 130 s in a test run, 5 s
+# alone)
+SCREENSHOT_FRAME_TIMEOUT_MS = 20_000
 # How long Perma.cc's page gets to show its archive iframe, a reload included (see
 # `_archive_iframe()`). 20 s without a reload was not enough with dozens of other pages
 # loading at once: the whole retrieval then failed.
@@ -51,7 +57,7 @@ _MEDIA_STATE_JS = """() => {
     const imgs = [...document.images];
     return {imgs: imgs.length,
             loaded: imgs.filter(i => i.complete && i.naturalWidth > 0).length,
-            large: imgs.filter(i => i.naturalWidth >= 256 && i.naturalHeight >= 256).length,
+            large: imgs.filter(i => i.naturalWidth >= 128 && i.naturalHeight >= 128).length,
             pending: imgs.filter(i => !i.complete).length,
             videos: document.querySelectorAll('video').length,
             text: document.body ? document.body.innerText.length : 0};
@@ -78,6 +84,9 @@ REPLAY_MISS_WAIT = 10
 # only under load (production suite, 2026-10-06), twice in a row
 SCREENSHOT_MISS_WAIT = 30
 SCREENSHOT_ATTEMPTS = 3
+# How long a record whose replay showed nothing gets to be sent back from its screenshot
+# view to the replay -- which is how Perma.cc says it has no screenshot
+SCREENSHOT_REDIRECT_WAIT_MS = 8_000
 
 # A retrieval is not tried again after this many seconds, so that the attempts (see
 # `PermaCC._extract_content()`) stay well within the browser's 10-minute limit
@@ -87,8 +96,16 @@ RETRY_BUDGET = 240
 class PermaCC(HeadedBrowser):
     name = "Perma.cc"
     domains = ["perma.cc"]
+    retrieval_timeout_setting = "archive_retrieval_timeout"
 
     # TODO: Implement PDF support, e.g., https://perma.cc/83VA-LTH9
+
+    async def _capture(self, url: str, **kwargs) -> Capture:
+        """The record's capture time and original URL, as its page showed them (see
+        `_note_record()`)."""
+        captured_at, original = _records.get(_guid(url) or "", (None, None))
+        return Capture(archive="Perma.cc", original_url=original, captured_at=captured_at,
+                       archive_url=url)
 
     def _after_renderer_crash(self, url: str) -> str:
         """Replays of YouTube watch pages crash the tab's renderer within seconds on the
@@ -110,12 +127,16 @@ class PermaCC(HeadedBrowser):
         videos of other archive replays running at the same time."""
         loop = asyncio.get_running_loop()
         start = loop.time()
+        retry_budget = float(get_setting("perma_cc_retry_budget", RETRY_BUDGET))
         shot = _screenshot_url(page.url)
-        if shot and _replays_poorly(await _captured_url(page)):
+        captured_url = await _captured_url(page)
+        await _note_record(page, captured_url)
+        if shot and _replays_poorly(captured_url):
             logger.info(f"{page.url} captures a YouTube player page; taking its screenshot "
                         f"({shot}).")
             with suppress(PlaywrightError):
                 await page.goto(shot, wait_until="domcontentloaded", timeout=60_000)
+                await self._pass_cloudflare(page)  # Asks again for the new address
         missing = False
         screenshot_view = "type=image" in page.url
         attempts = SCREENSHOT_ATTEMPTS if screenshot_view else 2
@@ -135,7 +156,7 @@ class PermaCC(HeadedBrowser):
                 target, SCREENSHOT_MISS_WAIT if screenshot_view else REPLAY_MISS_WAIT)
             if target is not None and not missing and await _shows_content(target):
                 return target
-            if attempt < attempts - 1 and loop.time() - start < RETRY_BUDGET:
+            if attempt < attempts - 1 and loop.time() - start < retry_budget:
                 if missing:
                     logger.info(f"The replay at {page.url} says its page is not in the "
                                 f"archive; loading the record again.")
@@ -159,13 +180,26 @@ class PermaCC(HeadedBrowser):
             raise TargetUnavailableError(
                 f"The replay of the Perma.cc record at {page.url} says the page is not in "
                 f"its archive, twice.")
-        if shot is None or loop.time() - start >= RETRY_BUDGET:
+        if shot is None or loop.time() - start >= retry_budget:
             return None
         logger.info(f"The replay at {page.url} "
                     f"{'still says its page is not in the archive' if missing else 'shows nothing'}"
                     f"; taking the capture's screenshot ({shot}).")
         try:
             await page.goto(shot, wait_until="domcontentloaded", timeout=60_000)
+            # First: on the challenge page, the address is still the one asked for, and a
+            # record without a screenshot -- which Perma.cc redirects back to its replay
+            # (`?type=standard`) -- looked as if it had one (perma.cc/55YA-N88K: an error
+            # after 87 s, instead of "empty" in 9)
+            await self._pass_cloudflare(page)
+            if replayed_empty:
+                # ...and behind the challenge, it does so only once the challenge passed:
+                # asked straight away, the address still read `type=image`, the record
+                # was taken for one with a screenshot, and failed after 44-138 s of
+                # looking for it (the same record: "empty" in 7-11 s otherwise)
+                with suppress(PlaywrightError):
+                    await page.wait_for_url(lambda address: "type=image" not in address,
+                                            timeout=SCREENSHOT_REDIRECT_WAIT_MS)
             if replayed_empty and "type=image" not in page.url:
                 # Perma.cc sends a record without a screenshot back to the replay
                 raise TargetUnavailableError(
@@ -179,28 +213,9 @@ class PermaCC(HeadedBrowser):
         return target if target is not None and await _shows_content(target) else None
 
     async def _extract_capture(self, page: Page) -> Optional[ContentTarget]:
-        # Check for Cloudflare challenge (passive check)
-        body_text = await page.content()
-        if "Just a moment" in body_text or "Performing security verification" in body_text:
-            logger.info("\rCloudflare challenge detected. Waiting for UC mode to handle it...")
-            try:
-                # Move mouse slightly to simulate interaction if stuck
-                await page.mouse.move(500, 500)
-                # document.body can be null while the challenge page navigates/replaces the DOM.
-                await page.wait_for_function(
-                    """() => {
-                        const body = document.body;
-                        if (!body) return false;
-                        const text = body.innerText || '';
-                        return !text.includes('Just a moment')
-                            && !text.includes('Performing security verification');
-                    }""",
-                    timeout=45000
-                )
-                logger.info("\rCloudflare challenge resolved.")
-                await page.wait_for_timeout(2000)  # Wait for page to settle
-            except TimeoutError:
-                logger.warning("\rCloudflare challenge did not resolve in time.")
+        # A Cloudflare challenge is solved, not waited out: waiting for it to clear by
+        # itself took the full 45 s whenever it asked for the click (perma.cc, since 10-10)
+        await self._pass_cloudflare(page)
 
         # Prefer the content of the Perma.cc archive iframe specifically
         outer_iframe_el = await self._archive_iframe(page)
@@ -243,7 +258,13 @@ class PermaCC(HeadedBrowser):
 
         # Critical: wait until the third (innermost) iframe under replay-app-main
         # has loaded usable archived content — do not fall back early on large WARCs.
-        inner_frame = await self._wait_for_innermost_frame(middle_frame)
+        started = time.monotonic()
+        inner_frame = await self._wait_for_innermost_frame(
+            middle_frame, SCREENSHOT_FRAME_TIMEOUT_MS if "type=image" in page.url
+            else INNERMOST_FRAME_TIMEOUT_MS)
+        if inner_frame is None or not await self._frame_has_usable_content(inner_frame):
+            logger.info(f"Perma.cc's replay at {page.url} showed no content after "
+                        f"{time.monotonic() - started:.0f} s.")
         if inner_frame is None:
             logger.debug("Perma.cc inner iframe not ready; falling back to middle iframe.")
             await _stash_media_in_frame(middle_frame)
@@ -419,6 +440,36 @@ def _replays_poorly(url: Optional[str]) -> bool:
     return bool(url and _POOR_REPLAYS.match(url))
 
 
+# The record page states when it was made: "Captured" (or "Uploaded", for a file a user
+# uploaded) followed by insertLocalDateTime('date_...', <Unix seconds>, ...)
+_CREATION_JS = r"""() => {
+    const p = document.querySelector('p.creation');
+    const m = p && /insertLocalDateTime\([^,]+,\s*(\d+)/.exec(p.innerHTML);
+    return m ? Number(m[1]) : null;
+}"""
+# What the record pages said, by GUID: (captured_at, original URL). A record never changes.
+_records: dict[str, tuple[Optional[str], Optional[str]]] = {}
+MAX_RECORDS = 10_000
+
+
+def _guid(url: str) -> Optional[str]:
+    match = re.search(r"perma\.cc/([A-Z0-9]{4}-[A-Z0-9]{4})", url, re.IGNORECASE)
+    return match.group(1).upper() if match else None
+
+
+async def _note_record(page: Page, captured_url: Optional[str]) -> None:
+    """Keeps the record's capture time and original URL for its `Capture`. The replay runs
+    in a task of its own (see `HeadedBrowser._get()`), so they are kept by GUID."""
+    if not (guid := _guid(page.url)):
+        return
+    epoch = None
+    with suppress(Exception):
+        epoch = await page.evaluate(_CREATION_JS)
+    if len(_records) >= MAX_RECORDS:
+        _records.clear()
+    _records[guid] = (utc_iso(epoch) if epoch else None, captured_url)
+
+
 async def _captured_url(page: Page) -> Optional[str]:
     """The URL a Perma.cc record captured, as its page's playback script names it."""
     with suppress(Exception):
@@ -463,6 +514,30 @@ async def _settle_media_frame(frame: Frame) -> None:
                      f"{await frame.evaluate(_MEDIA_STATE_JS)}")
 
 
+# Stops a replayed page's players: they kept streaming the very videos being fetched here,
+# and an archive serves a client only so fast (web.archive.org ~330 KB/s, however many
+# connections), so both downloads crawled. A Kwai capture's 5.7 MB video took 71 s.
+_STOP_PLAYBACK_JS = """() => document.querySelectorAll('video, audio').forEach(m => {
+    try { m.pause(); m.autoplay = false; m.preload = 'none'; } catch (_) {}
+})"""
+
+
+def _playback_urls(frame) -> set[str]:
+    """The videos the page's players downloaded (see `BrowserMedia.watch_playback()`)."""
+    page = frame if isinstance(frame, Page) else getattr(frame, "page", None)
+    media = getattr(page, "_scrapemm_media", None)
+    return media.playback_urls() if media is not None else set()
+
+
+async def _stop_playback(frame: Frame) -> None:
+    """Pauses the media of the frame and of the frames within it. Best-effort: a frame
+    that does not answer keeps playing, which costs time, not the retrieval."""
+    frames = [frame, *frame.child_frames]
+    for f in frames:
+        with suppress(PlaywrightError, asyncio.TimeoutError):
+            await asyncio.wait_for(f.evaluate(_STOP_PLAYBACK_JS), 5)
+
+
 async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video_limit: int = MAX_VIDEO_BYTES,
                                 concurrency: int = STASH_CONCURRENCY) -> None:
     """Fetches the frame's media inside the frame, where the replay's session and service
@@ -477,7 +552,9 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
     # First, as the page may still be building itself: collected too early, a video its
     # player had not yet created was missing (see `_settle_media_frame()`)
     await _settle_media_frame(frame)
-    video_seconds = budget.cap(STASH_VIDEO_TIMEOUT, reserve=30)  # Leaves time to read them out
+    await _stop_playback(frame)
+    # Leaves time to read them out. Never 0: the page takes that for no limit at all
+    video_seconds = budget.cap(STASH_VIDEO_TIMEOUT, reserve=30, floor=5)
     image_seconds = min(STASH_IMAGE_TIMEOUT, video_seconds)
     try:
         await install_stash(frame)
@@ -771,8 +848,10 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
                 if (!needs.length) return false;
 
                 const loc = location.href || '';
+                // Since 10-2026 with a segment of its own in front of /replay-web-page/
+                // (rejouer.perma.cc/6a1b84c3250d/replay-web-page/...)
                 const prefixMatch = loc.match(
-                  /^(https:\\/\\/rejouer\\.perma\\.cc\\/replay-web-page\\/w\\/id-[^/]+)\\//
+                  /^(https:\\/\\/rejouer\\.perma\\.cc\\/(?:[^/]+\\/)?replay-web-page\\/w\\/id-[^/]+)\\//
                 );
                 if (!prefixMatch) return false;
                 const replayBase = prefixMatch[1];
@@ -831,7 +910,8 @@ async def _stash_media_in_frame(frame, image_limit: int = MAX_IMAGE_BYTES, video
                 "blobAttr": BLOB_ATTR,
                 "imageTimeoutMs": int(image_seconds * 1000),
                 "videoTimeoutMs": int(video_seconds * 1000),
-                "skipUrls": sorted(budget.abandoned()),
+                # Also what a player downloaded: completed later, not fetched again
+                "skipUrls": sorted(budget.abandoned() | _playback_urls(frame)),
             },
         ), timeout=video_seconds + 15)
         logger.debug(f"Fetched in {frame.url[:120]}: {result}")
@@ -920,9 +1000,10 @@ async def _timemap_newest(url: str) -> Optional[str]:
     if status == 404:
         return None
     if status == 429:
-        _rate_limited_until = time.time() + LOOKUP_RATE_LIMIT_PAUSE
+        pause = float(get_setting("perma_cc_rate_limit_pause", LOOKUP_RATE_LIMIT_PAUSE))
+        _rate_limited_until = time.time() + pause
         raise RateLimitError("Perma.cc is rate-limiting archive lookups; paused for "
-                             f"{LOOKUP_RATE_LIMIT_PAUSE // 60} min.")
+                             f"{pause / 60:.0f} min.")
     if status != 200:
         raise RetrievalFailed(f"Perma.cc answered the archive lookup with HTTP {status}.")
     try:
@@ -958,7 +1039,9 @@ async def find_perma_archive(url: str, session=None) -> Optional[str]:
         for candidate in _lookup_candidates(url):
             if link := await _timemap_newest(candidate):
                 break
-    _lookups[url] = (link, time.time() + (LOOKUP_HIT_TTL if link else LOOKUP_MISS_TTL))
+    ttl = (get_setting("perma_cc_lookup_hit_ttl", LOOKUP_HIT_TTL) if link
+           else get_setting("perma_cc_lookup_miss_ttl", LOOKUP_MISS_TTL))
+    _lookups[url] = (link, time.time() + ttl)
     if len(_lookups) > 10_000:  # Keep it bounded: drop the expired ones
         for key in [k for k, (_, expiry) in _lookups.items() if expiry <= time.time()]:
             del _lookups[key]

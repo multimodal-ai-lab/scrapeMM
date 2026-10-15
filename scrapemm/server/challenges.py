@@ -31,6 +31,8 @@ from dataclasses import dataclass, field, asdict
 from typing import Optional
 
 from scrapemm.common.paths import APP_NAME
+from .config import get_setting
+from .domains import is_public_suffix
 from .paths import CONFIG_DIR
 
 logger = logging.getLogger(APP_NAME)
@@ -107,19 +109,20 @@ class ChallengeStore:
             challenge.last_seen = time.time()
             if not any(p.url == url and p.output_format == output_format
                        for p in challenge.pending):
-                if len(challenge.pending) < MAX_PENDING:
+                max_pending = int(get_setting("captcha_max_pending", MAX_PENDING))
+                if len(challenge.pending) < max_pending:
                     challenge.pending.append(Pending(url, output_format, methods, max_video_size))
                 else:
-                    logger.warning(f"Not queueing {url}: {MAX_PENDING} URLs are already "
+                    logger.warning(f"Not queueing {url}: {max_pending} URLs are already "
                                    f"waiting on the {domain} CAPTCHA.")
             self._save()
 
     def holds(self, domain: str) -> bool:
         """Whether new URLs of this domain should wait instead of being scraped."""
         from .integrations import DOMAIN_TO_INTEGRATION
-        if domain in ALWAYS_GATED:
-            return True
-        return domain in self._challenges and domain not in DOMAIN_TO_INTEGRATION
+        if domain in DOMAIN_TO_INTEGRATION:
+            return False  # Its integration does not care (researchgate.net: OpenAlex)
+        return domain in ALWAYS_GATED or domain in self._challenges
 
     def get(self, domain: str) -> Optional[Challenge]:
         return self._challenges.get(domain)
@@ -165,6 +168,12 @@ class ChallengeStore:
                 logger.info(f"Dropping the {entry['domain']} CAPTCHA challenge: its CAPTCHA "
                             f"is part of the archived copies, which nobody can solve.")
                 continue
+            if is_public_suffix(entry.get("domain") or ""):
+                # Recorded before challenges were held per registrable domain: it held all
+                # of gov.ua for one site's CAPTCHA. Its URLs are retried when asked again
+                logger.info(f"Dropping the {entry['domain']} CAPTCHA challenge: it stood for "
+                            f"every site under {entry['domain']}.")
+                continue
             try:
                 pending = [Pending(**p) for p in entry.pop("pending", [])]
                 challenges[entry["domain"]] = Challenge(**entry, pending=pending)
@@ -203,6 +212,7 @@ def list_challenges() -> list[dict]:
             "last_seen": challenge.last_seen,
             "urls": [p.url for p in challenge.pending],
             "waiting": len(challenge.pending),
+            "latest": max((p.queued_at for p in challenge.pending), default=None),
             "held": store.holds(challenge.domain),
             "kind": "generic",
         })
@@ -215,7 +225,8 @@ def waiting_count() -> int:
 
 def _archive_today_challenge() -> Optional[dict]:
     try:
-        from .integrations.archive_today import get_archive_today_buffer
+        from .integrations.archive_today import (get_archive_today_buffer,
+                                                 get_archive_today_latest)
         buffered = get_archive_today_buffer()
     except Exception:
         logger.debug("Could not read the Archive.today buffer.", exc_info=True)
@@ -230,6 +241,7 @@ def _archive_today_challenge() -> Optional[dict]:
         "last_seen": None,
         "urls": buffered,
         "waiting": len(buffered),
+        "latest": get_archive_today_latest(),
         "held": False,
         "kind": "archive_today",
     }

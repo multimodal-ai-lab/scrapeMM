@@ -1,7 +1,8 @@
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 from urllib.parse import urlparse
 
 import aiohttp
@@ -25,6 +26,10 @@ logger = logging.getLogger("scrapeMM")
 POST_REGEX = re.compile(
     r"instagram\.com/(?:[A-Za-z0-9._]+/)?(p|reels?|tv)/([A-Za-z0-9_-]+)")
 EMBED_URL = "https://www.instagram.com/p/{shortcode}/embed/captioned/"
+# A shortcode is the post's media ID in base 64, whose upper bits are the milliseconds
+# since Instagram's epoch: the post's time, without asking Instagram
+SHORTCODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+INSTAGRAM_EPOCH_MS = 1314220021721
 
 # The profile data Instagram's own web app loads. Answers anonymous requests only at
 # times (else "Please wait a few minutes", require_login), a logged-in session reliably.
@@ -42,6 +47,7 @@ EMBED_MEDIA_MARKER = "EmbeddedMediaImage"
 
 class Instagram(RetrievalIntegration):
     name = "Instagram"
+    post_media = True
     domains = ["instagram.com"]
     cookie_file = CONFIG_DIR / "instagram_cookie.txt"
 
@@ -62,6 +68,16 @@ class Instagram(RetrievalIntegration):
         self.connected = True
 
     async def _get(self, url: str, **kwargs) -> ScrapedContent:
+        """Retrieves content from an Instagram post, reel or profile URL, with the post's
+        time (see `shortcode_time()`) where the retrieval did not bring it."""
+        content = await self._retrieve(url, **kwargs)
+        if content is not None and content.published_at is None and (match := POST_REGEX.search(url)):
+            if taken := shortcode_time(match.group(2)):
+                content.published_at = taken.isoformat(timespec="seconds")
+                content = content.prefixed(f"Posted: {taken:%Y-%m-%d %H:%M} UTC\n")
+        return content
+
+    async def _retrieve(self, url: str, **kwargs) -> ScrapedContent:
         """Retrieves content from an Instagram post, reel or profile URL."""
         if match := POST_REGEX.search(url):
             # The canonical form: neither yt-dlp nor the embed know the one that
@@ -114,9 +130,8 @@ class Instagram(RetrievalIntegration):
             # Age-restricted posts ("can't be seen by certain audiences") are only
             # served to a logged-in session.
             cookie_file_path = self.cookie_file.as_posix() if get_secret("instagram_cookie") else None
-            sequence = await get_content_with_ytdlp(url, platform="Instagram",
-                                                    cookiefile=cookie_file_path, **kwargs)
-            return ScrapedContent(multimodal=sequence)
+            return await get_content_with_ytdlp(url, platform="Instagram",
+                                                cookiefile=cookie_file_path, **kwargs)
 
     async def _get_photo(self, url: str, **kwargs) -> ScrapedContent:
         """Retrieves content from an Instagram photo URL (can also be a reel)."""
@@ -231,8 +246,8 @@ class Instagram(RetrievalIntegration):
 
         items: list = [header]
         if picture_url := user.get("profile_pic_url_hd") or user.get("profile_pic_url"):
-            # Profile pictures are small; keep them anyway, they identify the account
-            if picture := await download_image(picture_url, session, ignore_small_images=False):
+            # Kept only if large enough, like any image (see `MIN_MEDIA_SIDE`)
+            if picture := await download_image(picture_url, session):
                 items.append(picture)
 
         recent = []
@@ -273,3 +288,16 @@ def _count(user: dict, edge: str) -> str:
     """A follower-type count, as Instagram's API nests it."""
     count = (user.get(edge) or {}).get("count")
     return f"{count:,}" if isinstance(count, int) else "?"
+
+
+def shortcode_time(shortcode: str) -> Optional[datetime]:
+    """When the post with this shortcode was made (see `SHORTCODE_ALPHABET`); None if the
+    code does not decode to a plausible time."""
+    media_id = 0
+    for char in shortcode[:11]:  # A private post's long code starts with the ID's 11 characters
+        if (digit := SHORTCODE_ALPHABET.find(char)) < 0:
+            return None
+        media_id = media_id * 64 + digit
+    when = datetime.fromtimestamp(((media_id >> 23) + INSTAGRAM_EPOCH_MS) / 1000, tz=timezone.utc)
+    plausible = datetime(2010, 10, 1, tzinfo=timezone.utc) < when < datetime.now(timezone.utc) + timedelta(days=1)
+    return when.replace(microsecond=0) if plausible else None

@@ -39,14 +39,17 @@ DEFAULT_MAX_MB = 512  # The text the entries hold, see `_size()`; media stay on 
 MAX_ENTRIES = DEFAULT_MAX_ENTRIES  # Kept for callers of the former constant
 
 # A cache entry is identified by all the parameters that influence the retrieved content:
-# the URL, the requested output format, the methods used, and the video size limit
-CacheKey = tuple[str, str, tuple[str, ...], Optional[int]]
+# the URL, the requested output format, the methods used, the video size limit, and
+# whether videos over it are downscaled
+CacheKey = tuple[str, str, tuple[str, ...], Optional[int], bool]
 
 
 def cache_key(url: str, output_format: OutputFormat, methods: list[str],
-              max_video_size: Optional[int] = None) -> CacheKey:
-    """Constructs the cache key identifying a particular retrieval request."""
-    return url, output_format, tuple(methods), max_video_size
+              max_video_size: Optional[int] = None, downscale_videos: bool = False) -> CacheKey:
+    """Constructs the cache key identifying a particular retrieval request. Downscaling
+    makes no difference without a size limit."""
+    return (url, output_format, tuple(methods), max_video_size,
+            downscale_videos and max_video_size is not None)
 
 
 def _size(response: ScrapingResponse) -> int:
@@ -269,6 +272,13 @@ def _archived_url(capture: str) -> Optional[str]:
 # slow -- archive.ph delays requests after a burst)
 _failed_media: dict[str, float] = {}
 FAILED_MEDIA_MEMORY = 3600.0
+
+
+def _failed_media_memory() -> float:
+    from .config import get_setting  # Imported here: config imports this module
+    return float(get_setting("failed_media_memory", FAILED_MEDIA_MEMORY))
+
+
 _SRC = re.compile(r"""\b(?:src|poster|data-src)\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
 
 
@@ -276,8 +286,9 @@ def note_failed_medium(url: str, page_url: Optional[str] = None) -> None:
     if (key := media_key(url, page_url)) is not None:
         now = time.monotonic()
         _failed_media[key] = now
+        memory = _failed_media_memory()
         if len(_failed_media) > 10_000:
-            for k in [k for k, t in _failed_media.items() if now - t > FAILED_MEDIA_MEMORY]:
+            for k in [k for k, t in _failed_media.items() if now - t > memory]:
                 _failed_media.pop(k, None)
 
 
@@ -287,9 +298,10 @@ def _lacks_media(url: str, html: Optional[str]) -> bool:
         return False
     from urllib.parse import urljoin
     now = time.monotonic()
+    memory = _failed_media_memory()
     for src in _SRC.findall(html):
         key = media_key(urljoin(url, src), url)
-        if key is not None and now - _failed_media.get(key, -FAILED_MEDIA_MEMORY) < FAILED_MEDIA_MEMORY:
+        if key is not None and now - _failed_media.get(key, -memory) < memory:
             return True
     return False
 
@@ -305,6 +317,8 @@ def complete_capture(url: str, response: ScrapingResponse) -> bool:
         return False
     if getattr(content, "stand_in", False):
         return False
+    if content.capture is not None and content.capture.live:
+        return False  # The live post stands in (in part): it is no capture to keep
     if _lacks_media(url, content.html):
         return False
     multimodal = content.multimodal
@@ -403,10 +417,11 @@ class ImmutableCache:
 
     @staticmethod
     def _result_key(key) -> Optional[str]:
-        url, output_format, _methods, max_video_size = key
+        url, output_format, _methods, max_video_size, downscale = key
         if (capture := capture_key(url)) is None:
             return None
-        return f"{capture}|{output_format}|{max_video_size}|{_result_version()}"
+        downscaled = "|downscaled" if downscale else ""  # Earlier entries' keys unchanged
+        return f"{capture}|{output_format}|{max_video_size}{downscaled}|{_result_version()}"
 
     def result(self, key) -> Optional[ScrapingResponse]:
         """The kept result for the cache key of an archive capture, if there is one and
@@ -427,9 +442,13 @@ class ImmutableCache:
             logger.info(f"📦 The permanent cache's result for {key[0]} is unusable ({e}); "
                         f"retrieving it afresh.")
             return None
-        from scrapemm.common.scraping_response import ScrapedContent
+        from scrapemm.common.scraping_response import Capture, OmittedMedium, ScrapedContent
         content = ScrapedContent(html=entry.get("html"), markdown=entry.get("markdown"),
-                                 multimodal=multimodal)
+                                 multimodal=multimodal,
+                                 omitted_media=[OmittedMedium.from_dict(d)
+                                                for d in entry.get("omitted_media") or []],
+                                 capture=Capture.from_dict(entry["capture"]) if entry.get("capture") else None,
+                                 published_at=entry.get("published_at"))
         logger.info(f"📦 Permanent cache hit for {key[0]}.")
         return ScrapingResponse(url=key[0], content=content, method=entry.get("method"),
                                 output_format=key[1], retrieval_time=0.0, from_cache=True)
@@ -443,7 +462,10 @@ class ImmutableCache:
         content = response.content
         entry = {"url": key[0], "method": response.method, "html": content.html,
                  "markdown": content.markdown, "stored_at": time.time(),
-                 "multimodal": None if content.multimodal is None else str(content.multimodal)}
+                 "multimodal": None if content.multimodal is None else str(content.multimodal),
+                 "omitted_media": [medium.to_dict() for medium in content.omitted_media],
+                 "capture": content.capture.to_dict() if content.capture else None,
+                 "published_at": content.published_at}
         self.put(RESULT, entry_key, json.dumps(entry).encode("utf-8"))
 
     # -- Media -----------------------------------------------------------------------

@@ -14,6 +14,7 @@ const DESCRIPTIONS: Record<string, string> = {
   UnsupportedDomainError: 'This URL is not supported.',
   RetrievalInterrupted: 'A user stopped this retrieval.',
   RetrievalFailed: 'The content could not be retrieved.',
+  ServiceUnavailableError: 'The archive or service was unavailable (down or overloaded); try again later.',
   TimeoutError: 'The retrieval timed out.',
   DiskFull: 'The server ran out of disk space.',
 }

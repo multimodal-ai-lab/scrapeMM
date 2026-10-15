@@ -1,139 +1,112 @@
 <script setup lang="ts">
-/** Server configuration. Every section keeps a draft; the one save button at the bottom
- *  right saves all changed sections together -- except Secrets, saved one by one as they
- *  are entered. The blacklist itself lives on its own page; only how long its automatic
- *  entries last is a setting. The API keys have their own page too. */
+/** Server configuration, one section at a time: a panel on the left lists the sections,
+ *  and the one picked is all the page shows -- the single long scroll it used to be had
+ *  grown past finding anything on it. The section is kept in the URL, so a reload or a
+ *  link lands on it.
+ *
+ *  Every section keeps a draft; the one save button at the bottom right saves all changed
+ *  sections together -- except Secrets, saved one by one as they are entered. So all
+ *  sections stay mounted, the hidden ones merely hidden: switching away from a section
+ *  must neither lose its draft nor take it off the save button. The blacklist itself
+ *  lives on its own page, the API keys too. */
 const api = useApi()
+const route = useRoute()
+const router = useRouter()
 const sections = provideSettingsSections()
+const server = useServerConfig()
 
 const error = ref('')
 const notice = ref('')
 
-// --- Retrieval ----------------------------------------------------------------------
+// --- The sections -------------------------------------------------------------------
 
-/** The Retrieval section's fields, as the form edits them (numbers as text) */
-interface RetrievalForm {
-  firecrawl_urls: string
-  max_concurrency: string
-  max_browser_pages: string
-  max_search_concurrency: string
-  youtube_min_interval: string
-  youtube_cooldown: string
-  blacklist_ttl: string
-  max_jobs: string
-  job_retention_days: string
-  archive_today_interactive_solve: boolean
-  archive_today_screenshot_fallback: boolean
-  remove_consent_dialogs: boolean
+interface Entry { id: string, label: string, icon: string, blurb: string }
+
+const GROUPS: { label: string, entries: Entry[] }[] = [
+  { label: 'Retrieval', entries: [
+    { id: 'general', label: 'General', icon: 'i-fa7-solid-sliders',
+      blurb: 'What applies to every retrieval, whichever method runs it.' },
+    { id: 'chain', label: 'Retrieval chain', icon: 'i-fa7-solid-list-ol',
+      blurb: 'The methods scrapeMM tries for every URL, top to bottom, until one gets the page.' },
+    { id: 'site-rules', label: 'Site rules', icon: 'i-fa7-solid-route',
+      blurb: 'Sites that need particular methods: rules replace the chain\'s live methods for matching domains.' },
+    { id: 'parallelism', label: 'Parallelism', icon: 'i-fa7-solid-layer-group',
+      blurb: 'Slots: how many URLs a method retrieves at once. Cooldown: the least time between two of its retrievals starting (YouTube needs one).' },
+  ] },
+  { label: 'Sources', entries: [
+    { id: 'integrations', label: 'Integrations', icon: 'i-fa7-solid-puzzle-piece',
+      blurb: 'The integrations for particular platforms, which retrieve through their APIs.' },
+    { id: 'archives', label: 'Archives', icon: 'i-fa7-solid-box-archive',
+      blurb: 'Copies of a page captured earlier: Archive.today, the Wayback Machine and others.' },
+    { id: 'browser', label: 'Browser', icon: 'i-fa7-solid-window-maximize',
+      blurb: 'The server\'s own browser, which the Browser method and the archives retrieve with.' },
+  ] },
+  { label: 'Data', entries: [
+    { id: 'cache', label: 'Cache', icon: 'i-fa7-solid-database',
+      blurb: 'Recent results served again for the same URL, and archive captures kept for good.' },
+    { id: 'media', label: 'Media', icon: 'i-fa7-solid-photo-film',
+      blurb: 'Which images and videos a result keeps: small ones on web pages are left out as icons and logos, a post\'s own media are kept.' },
+    { id: 'history', label: 'History', icon: 'i-fa7-solid-clock-rotate-left',
+      blurb: 'How far back the Jobs and Statistics views reach. The Dashboard\'s totals count everything ever run.' },
+  ] },
+  { label: 'Access', entries: [
+    { id: 'secrets', label: 'Secrets', icon: 'i-fa7-solid-lock',
+      blurb: 'The credentials the integrations need.' },
+    { id: 'proxy', label: 'Proxy', icon: 'i-fa7-solid-shuffle',
+      blurb: 'Ways around sites that refuse this server\'s address: as many endpoints as you have, picked by their record.' },
+  ] },
+]
+
+const ENTRIES = GROUPS.flatMap((g) => g.entries)
+const IDS = ENTRIES.map((e) => e.id)
+
+// Anchors of the page as it was, still linked to from elsewhere (bookmarks, old links)
+const OLD_ANCHORS: Record<string, string> = { exceptions: 'site-rules', retrieval: 'general' }
+
+const sectionOf = (name: unknown) => {
+  const id = typeof name === 'string' ? (OLD_ANCHORS[name] ?? name) : ''
+  return IDS.includes(id) ? id : null
 }
 
-const NUMBERS = ['max_concurrency', 'max_browser_pages', 'max_search_concurrency',
-  'youtube_min_interval', 'youtube_cooldown', 'blacklist_ttl', 'max_jobs',
-  'job_retention_days'] as const
+const current = computed(() =>
+  sectionOf(route.query.section) ?? sectionOf(route.hash.slice(1)) ?? IDS[0]!)
 
-const retrievalSaved = ref<RetrievalForm | null>(null)
-const retrieval = ref<RetrievalForm | null>(null)
-
-function toForm(config: Record<string, any>): RetrievalForm {
-  const text = (v: any) => (v === null || v === undefined ? '' : String(v))
-  return {
-    firecrawl_urls: (config.firecrawl_urls || []).join('\n'),
-    max_concurrency: text(config.max_concurrency),
-    max_browser_pages: text(config.max_browser_pages),
-    max_search_concurrency: text(config.max_search_concurrency),
-    youtube_min_interval: text(config.youtube_min_interval),
-    youtube_cooldown: text(config.youtube_cooldown),
-    blacklist_ttl: text(config.blacklist_ttl),
-    max_jobs: text(config.max_jobs),
-    job_retention_days: text(config.job_retention_days),
-    archive_today_interactive_solve: !!config.archive_today_interactive_solve,
-    archive_today_screenshot_fallback: !!config.archive_today_screenshot_fallback,
-    remove_consent_dialogs: config.remove_consent_dialogs !== false, // On unless turned off
-  }
-}
-
-const retrievalDirty = computed(() => !!retrieval.value
-  && JSON.stringify(retrieval.value) !== JSON.stringify(retrievalSaved.value))
-
-async function saveRetrieval() {
-  const form = retrieval.value!
-  const body: Record<string, any> = {
-    firecrawl_urls: form.firecrawl_urls.split('\n').map((u) => u.trim()).filter(Boolean),
-    archive_today_interactive_solve: form.archive_today_interactive_solve,
-    archive_today_screenshot_fallback: form.archive_today_screenshot_fallback,
-    remove_consent_dialogs: form.remove_consent_dialogs,
-  }
-  for (const key of NUMBERS) {
-    const value = form[key].trim()
-    // Empty means "keep the server's default", not "set it to zero"
-    if (!value) continue
-    if (Number.isNaN(Number(value)) || Number(value) < 0) throw new Error(`"${value}" is not a valid number.`)
-    body[key] = Number(value)
-  }
-  const config = (await api.patch<any>('/v1/config', body)).config
-  retrievalSaved.value = toForm(config)
-  retrieval.value = toForm(config)
-}
-
-// Registered directly: `inject()` does not see what the same component provides
-sections.set('retrieval', {
-  id: 'retrieval', title: 'Retrieval', dirty: retrievalDirty, save: saveRetrieval,
-  discard: () => { retrieval.value = { ...retrievalSaved.value! } },
+// An old anchor link becomes the query it now is, so the URL says what is shown
+onMounted(() => {
+  const fromHash = sectionOf(route.hash.slice(1))
+  if (fromHash && !route.query.section) router.replace({ query: { ...route.query, section: fromHash }, hash: '' })
 })
 
-// --- Cache --------------------------------------------------------------------------
+// A new section starts at its top, not wherever the last one was scrolled to
+watch(current, () => { if (window.scrollY > 0) window.scrollTo({ top: 0 }) })
 
-interface CacheForm { enabled: boolean, ttl: string, max_entries: string, max_mb: string, immutable_max_mb: string }
+function show(id: string) {
+  router.replace({ query: { ...route.query, section: id }, hash: '' })
+}
+
+/** The panel entries with unsaved changes, for their dots */
+const unsaved = computed(() => new Set([...sections.values()]
+  .filter((s) => unref(s.dirty)).map((s) => s.panel ?? s.id)))
+
+// The narrow layout's select: the same groups, as Nuxt UI's grouped items
+const selectItems = GROUPS.map((g) => [
+  { type: 'label' as const, label: g.label },
+  ...g.entries.map((e) => ({ label: e.label, value: e.id, icon: e.icon })),
+])
+
+const entry = (id: string) => ENTRIES.find((e) => e.id === id)!
+
+/** How many plain settings the server describes for a section, to say so when none */
+const scalarCount = (id: string) => (server.value?.schema || []).filter((s) =>
+  s.section === id && ['int', 'float', 'bool', 'str'].includes(s.type)).length
+
+// --- Cache usage --------------------------------------------------------------------
+
 const cacheStats = ref<any>(null)
-const cacheSaved = ref<CacheForm | null>(null)
-const cacheForm = ref<CacheForm | null>(null)
-
-function toCacheForm(stats: any): CacheForm {
-  return { enabled: !!stats.enabled, ttl: String(stats.ttl), max_entries: String(stats.max_entries),
-    max_mb: String(stats.max_mb), immutable_max_mb: String(stats.immutable?.max_mb ?? 10240) }
-}
-
-const cacheDirty = computed(() => !!cacheForm.value
-  && JSON.stringify(cacheForm.value) !== JSON.stringify(cacheSaved.value))
-
-const cacheProblem = computed(() => {
-  const f = cacheForm.value
-  if (!f) return ''
-  const ttl = Number(f.ttl), entries = Number(f.max_entries), mb = Number(f.max_mb)
-  if (f.ttl.trim() === '' || Number.isNaN(ttl) || ttl < 0) return 'The lifetime must be 0 or more seconds.'
-  if (!Number.isInteger(entries) || entries < 1 || entries > 1_000_000) return 'Max entries must be a whole number from 1 to 1,000,000.'
-  if (Number.isNaN(mb) || mb < 1 || mb > 65536) return 'Max size must be between 1 and 65,536 MB.'
-  const permanentMb = Number(f.immutable_max_mb)
-  if (Number.isNaN(permanentMb) || permanentMb < 1 || permanentMb > 1048576) return 'The permanent cache must be between 1 MB and 1 TB.'
-  return ''
-})
-
-async function saveCache() {
-  if (cacheProblem.value) throw new Error(cacheProblem.value)
-  const f = cacheForm.value!
-  const stats = await api.put<any>('/v1/cache/config', {
-    enabled: f.enabled, ttl: Number(f.ttl), max_entries: Number(f.max_entries), max_mb: Number(f.max_mb),
-    immutable_max_mb: Number(f.immutable_max_mb),
-  })
-  adoptCache(stats)
-}
-
-function adoptCache(stats: any) {
-  cacheStats.value = stats
-  cacheSaved.value = toCacheForm(stats)
-  cacheForm.value = toCacheForm(stats)
-}
-
-sections.set('cache', {
-  id: 'cache', title: 'Cache', dirty: cacheDirty, save: saveCache,
-  discard: () => { cacheForm.value = { ...cacheSaved.value! } },
-})
 
 async function refreshCacheStats() {
   try {
-    const stats = await api.get<any>('/v1/cache')
-    cacheStats.value = stats
-    if (!cacheDirty.value) adoptCache(stats)
+    cacheStats.value = await api.get<any>('/v1/cache')
   } catch { /* The figures are a convenience */ }
 }
 
@@ -159,21 +132,18 @@ async function clearCache(tier: 'recent' | 'all' = 'recent') {
   }
 }
 
-// --- Media -------------------------------------------------------------------------
+// --- Media --------------------------------------------------------------------------
 
 const media = ref<any>(null)
 
 let statsTimer: ReturnType<typeof setInterval> | undefined
 
 onMounted(async () => {
+  // Each on its own: the figures failing must not keep the settings from loading
+  api.get<any>('/v1/media').then((m) => { media.value = m }).catch(() => {})
+  refreshCacheStats()
   try {
-    const [cfg, stats, mediaState] = await Promise.all([
-      api.get<any>('/v1/config'), api.get<any>('/v1/cache'), api.get<any>('/v1/media'),
-    ])
-    retrievalSaved.value = toForm(cfg.config)
-    retrieval.value = toForm(cfg.config)
-    adoptCache(stats)
-    media.value = mediaState
+    adoptServerConfig(server, await api.get<any>('/v1/config'))
   } catch (e: any) {
     error.value = e.message
   }
@@ -183,196 +153,187 @@ onBeforeUnmount(() => clearInterval(statsTimer))
 </script>
 
 <template>
-  <div class="space-y-6 max-w-3xl pb-24">
-    <h1 class="text-2xl font-semibold">Settings</h1>
+  <div class="pb-24">
+    <h1 class="text-2xl font-semibold mb-6">Settings</h1>
 
-    <UAlert v-if="error" color="error" variant="subtle" :description="error" />
-    <UAlert v-if="notice" color="success" variant="subtle" :description="notice" />
+    <div class="flex flex-col md:flex-row gap-4 md:gap-8">
+      <!-- Wide: a panel beside the content, staying in view as a long section scrolls
+           (which takes <main> not being a scroll container, see app.vue). In a window
+           too short for it, the panel scrolls by itself. -->
+      <nav
+        class="hidden md:block w-48 shrink-0 sticky top-6 self-start space-y-4
+               max-h-[calc(100vh-3rem)] overflow-y-auto"
+        aria-label="Settings sections"
+      >
+        <div v-for="group in GROUPS" :key="group.label" class="space-y-1">
+          <p class="px-2.5 text-xs font-semibold uppercase tracking-wider text-dimmed">{{ group.label }}</p>
+          <NuxtLink
+            v-for="e in group.entries" :key="e.id" :to="{ query: { section: e.id } }" replace
+            class="flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-sm hover-row"
+            :class="current === e.id ? 'bg-elevated text-highlighted font-medium' : 'text-muted hover:text-default'"
+            :aria-current="current === e.id ? 'page' : undefined"
+          >
+            <UIcon :name="e.icon" class="size-3.5 shrink-0" />
+            <span class="truncate flex-1">{{ e.label }}</span>
+            <span
+              v-if="unsaved.has(e.id)" class="size-1.5 rounded-full bg-warning shrink-0"
+              title="Unsaved changes" aria-label="Unsaved changes"
+            />
+          </NuxtLink>
+        </div>
+      </nav>
 
-    <!-- The most consequential settings first -->
-    <ChainEditor />
-    <ExceptionsEditor />
-    <ChainPreview />
-    <SecretsSection />
-    <ProxySection />
+      <!-- Narrow: the same sections in a select above the content -->
+      <USelect
+        :model-value="current" :items="selectItems" :icon="entry(current).icon"
+        class="md:hidden w-full" aria-label="Settings section"
+        @update:model-value="show(String($event))"
+      >
+        <template #item-trailing="{ item }">
+          <span
+            v-if="unsaved.has((item as any).value)" class="size-1.5 rounded-full bg-warning"
+            aria-label="Unsaved changes"
+          />
+        </template>
+      </USelect>
 
-    <UCard v-if="retrieval">
-      <template #header>
-        <h2 class="font-medium flex items-center gap-2">
-          <UIcon name="i-fa7-solid-sliders" class="size-4 text-primary" />
-          Retrieval
-          <UBadge v-if="retrievalDirty" color="warning" variant="subtle" size="sm" label="Unsaved" />
-        </h2>
-      </template>
-      <div class="space-y-4">
-        <UFormField
-          label="Firecrawl instances" hint="One URL per line"
-          description="scrapeMM spreads its scrapes across every instance that responds."
+      <div class="flex-1 min-w-0 max-w-3xl space-y-4">
+        <UAlert v-if="error" color="error" variant="subtle" :description="error" close @update:open="error = ''" />
+        <UAlert v-if="notice" color="success" variant="subtle" :description="notice" close @update:open="notice = ''" />
+
+        <!-- v-show, never v-if: see the top -->
+        <section
+          v-for="e in ENTRIES" v-show="current === e.id" :key="e.id"
+          :aria-labelledby="`settings-${e.id}`" class="space-y-4"
         >
-          <UTextarea v-model="retrieval.firecrawl_urls" :rows="3" class="w-full" placeholder="http://firecrawl:3002" />
-        </UFormField>
-        <div class="grid sm:grid-cols-2 gap-4">
-          <UFormField label="Max concurrent URLs">
-            <UInput v-model="retrieval.max_concurrency" type="number" min="1" placeholder="40 (default)" />
-          </UFormField>
-          <UFormField
-            label="Max concurrent browser pages"
-            description="Retrievals in the server's browser (the Browser method, the archives) at once; more wait. Lower it if the server runs short of memory."
-          >
-            <UInput v-model="retrieval.max_browser_pages" type="number" min="1" placeholder="32 (default)" />
-          </UFormField>
-          <UFormField
-            label="Max concurrent searches"
-            description="Searches with a search provider at once, across all clients; more wait. Keeps bursts within the provider's rate limit."
-          >
-            <UInput v-model="retrieval.max_search_concurrency" type="number" min="1" placeholder="10 (default)" />
-          </UFormField>
-          <UFormField
-            label="YouTube pace (s)"
-            description="Seconds between two YouTube retrievals. YouTube starts its bot check after bursts; 12 s stays under its ~300 videos an hour."
-          >
-            <UInput v-model="retrieval.youtube_min_interval" type="number" min="0" step="1" placeholder="12" />
-          </UFormField>
-          <UFormField
-            label="YouTube pause after a refusal (s)"
-            description="How long YouTube is left alone once it refused this server (its bot check, a refused stream). Asking again sooner only extends the block; with a proxy in use, YouTube goes through it meanwhile."
-          >
-            <UInput v-model="retrieval.youtube_cooldown" type="number" min="0" step="60" placeholder="1800" />
-          </UFormField>
-          <UFormField
-            label="Blacklist lifetime (s)"
-            description="How long automatic CAPTCHA blacklistings last. 0 never expires."
-            hint="Manage entries under Blacklist"
-          >
-            <UInput v-model="retrieval.blacklist_ttl" type="number" min="0" />
-          </UFormField>
-        </div>
-        <!-- How much history the Jobs and Statistics views reach back. The Dashboard's
-             totals count everything ever run, whatever is pruned. -->
-        <div class="border-t border-default pt-4 space-y-3">
-          <h3 class="text-sm font-medium">Job history</h3>
-          <div class="grid sm:grid-cols-2 gap-4">
-            <UFormField
-              label="Jobs kept at most"
-              description="The oldest go first. Each keeps its content, about 110 KB per URL. 0 keeps all."
-            >
-              <UInput v-model="retrieval.max_jobs" type="number" min="0" step="1000" placeholder="10000 (default)" />
-            </UFormField>
-            <UFormField
-              label="Kept for (days)"
-              description="Older jobs and search records are removed. 0 keeps them for ever."
-            >
-              <UInput v-model="retrieval.job_retention_days" type="number" min="0" placeholder="90 (default)" />
-            </UFormField>
-          </div>
-        </div>
-        <div class="space-y-2">
-          <UCheckbox
-            v-model="retrieval.remove_consent_dialogs"
-            label="Remove cookie/consent dialogs"
-            description="Removes the dialogs of known consent platforms (Cookiebot, OneTrust, Usercentrics, …) in the browser before the page is read. Faster on pages with large consent dialogs, and screenshots are not covered by them. The dialog's text is then not part of the result."
-          />
-          <UCheckbox
-            v-model="retrieval.archive_today_interactive_solve"
-            label="Archive.today: ask for a CAPTCHA at the moment of a gated request"
-            description="Off by default. Sensible only for one-off, attended retrievals."
-          />
-          <UCheckbox
-            v-model="retrieval.archive_today_screenshot_fallback"
-            label="Archive.today: serve the snapshot's screenshot when it is gated"
-            description="Gives an unattended run something rather than an error — but a screenshot is not the page text."
-          />
-        </div>
-      </div>
-    </UCard>
+          <header>
+            <h2 :id="`settings-${e.id}`" class="text-lg font-semibold flex items-center gap-2">
+              <UIcon :name="e.icon" class="size-4 text-primary" />
+              {{ e.label }}
+            </h2>
+            <p class="text-sm text-muted mt-0.5">{{ e.blurb }}</p>
+          </header>
 
-    <UCard v-if="cacheForm">
-      <template #header>
-        <div class="flex items-center justify-between gap-2">
-          <h2 class="font-medium flex items-center gap-2">
-            <UIcon name="i-fa7-solid-database" class="size-4 text-primary" />
-            Cache
-            <UBadge v-if="cacheDirty" color="warning" variant="subtle" size="sm" label="Unsaved" />
-          </h2>
-          <div class="flex items-center gap-1">
-            <UButton size="xs" variant="ghost" icon="i-fa7-solid-broom" label="Clear recent"
-              title="Empties the recent results; the permanent archive tier stays" @click="clearCache('recent')" />
-            <UButton size="xs" variant="ghost" color="error" icon="i-fa7-solid-trash" label="Clear all"
-              title="Also empties the permanent tier (archive captures, their media, Archive.today pages)"
-              @click="clearCache('all')" />
-          </div>
-        </div>
-      </template>
-      <div class="space-y-4">
-        <div class="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-          <USwitch v-model="cacheForm.enabled" label="Re-use recent results" />
-          <span class="text-muted tabular-nums">
-            {{ cacheStats?.entries ?? 0 }} entries · {{ cacheStats?.size_mb ?? 0 }} MB in memory
-          </span>
-        </div>
-        <p class="text-xs text-muted -mt-2">
-          A successful retrieval is served again for the same URL and settings until it
-          expires. Clients can ask for a fresh one anyway (<code class="font-mono">use_cache=False</code>).
-          Off, no recent result is kept; the permanent archive tier below stays on.
-        </p>
-        <div class="grid sm:grid-cols-3 gap-4" :class="cacheForm.enabled ? '' : 'opacity-60'">
-          <UFormField label="Lifetime (s)" description="0 turns the cache off too.">
-            <UInput v-model="cacheForm.ttl" type="number" min="0" step="3600" :disabled="!cacheForm.enabled" />
-          </UFormField>
-          <UFormField label="Max entries" description="The oldest go first.">
-            <UInput v-model="cacheForm.max_entries" type="number" min="1" step="100" :disabled="!cacheForm.enabled" />
-          </UFormField>
-          <UFormField label="Max size (MB)" description="Page text in memory; media stay on disk.">
-            <UInput v-model="cacheForm.max_mb" type="number" min="1" step="64" :disabled="!cacheForm.enabled" />
-          </UFormField>
-        </div>
-        <div class="border-t border-default pt-4 space-y-3">
-          <div class="flex flex-wrap items-baseline gap-x-6 gap-y-1 text-sm">
-            <span class="font-medium">Permanent archive tier</span>
-            <UBadge color="success" variant="subtle" size="sm" label="always on" />
-            <span class="text-muted tabular-nums">
-              <template v-if="permanentEntries">
-                {{ permanentEntries.results }} results · {{ permanentEntries.media }} media ·
-                {{ permanentEntries.pages }} Archive.today pages · {{ permanentEntries.snapshots }} snapshot records
-                · {{ cacheStats?.immutable?.size_mb ?? 0 }} of {{ cacheStats?.immutable?.max_mb }} MB on disk
-              </template>
-              <template v-else>counting…</template>
-            </span>
-          </div>
-          <p class="text-xs text-muted">
-            Archive captures never change: an Archive.today snapshot, a Wayback capture with its
-            timestamp, a Perma.cc record, a Ghostarchive archive. Their complete results, and which
-            media-registry file each archived medium became, are kept on disk without expiry, so asking again needs no network, and Archive.today
-            pages retrieved during a solved CAPTCHA stay available. The switch above does not turn
-            this tier off; the least recently used entries go once it is full.
-          </p>
-          <div class="grid sm:grid-cols-3 gap-4">
-            <UFormField label="Permanent tier size (MB)" description="On disk, besides the media registry.">
-              <UInput v-model="cacheForm.immutable_max_mb" type="number" min="1" step="1024" />
-            </UFormField>
-          </div>
-        </div>
-        <p v-if="cacheProblem" class="text-xs text-error">{{ cacheProblem }}</p>
-      </div>
-    </UCard>
+          <template v-if="e.id === 'general'">
+            <FirecrawlEditor panel="general" />
+            <SettingsFields section="general" title="General" :known="IDS" />
+          </template>
 
-    <UCard v-if="media">
-      <template #header>
-        <h2 class="font-medium flex items-center gap-2">
-          <UIcon name="i-fa7-solid-photo-film" class="size-4 text-primary" />
-          Media registry
-        </h2>
-      </template>
-      <p class="text-sm text-muted">
-        {{ media.files ?? 'Still counting the' }} files at <code class="font-mono">{{ media.root }}</code>
-        <span v-if="media.host_root"> (host path <code class="font-mono">{{ media.host_root }}</code>)</span>.
-      </p>
-      <p class="text-xs text-muted mt-2">
-        The server never deletes media on its own: clients that share this machine hold
-        references straight into this directory, and removing a file would break
-        sequences handed out earlier. Prune it yourself when you decide to.
-      </p>
-    </UCard>
+          <template v-else-if="e.id === 'chain'">
+            <ChainEditor />
+            <SettingsFields section="chain" title="Retrieval chain: settings" />
+            <ChainPreview />
+          </template>
+
+          <template v-else-if="e.id === 'site-rules'">
+            <SiteRulesEditor />
+            <SettingsFields section="site-rules" title="Site rules: settings" />
+            <ChainPreview />
+          </template>
+
+          <template v-else-if="e.id === 'parallelism'">
+            <ParallelismEditor />
+            <!-- The one place where two limits stack, which the table alone does not show -->
+            <UAlert
+              color="neutral" variant="subtle" icon="i-fa7-solid-circle-info"
+              title="Browser slots and browser pages"
+              description="Slots are per method; pages are the shared browser's. A Browser
+                retrieval needs a Browser slot, then a free page — and the archive replays
+                (Wayback, Perma.cc, Ghostarchive, Archive.today) take pages from the same
+                pool. With as many Browser slots as pages, the Browser method alone can fill
+                the browser and leave the archives waiting: give it fewer slots than there
+                are pages to keep some for them."
+            />
+            <SettingsFields section="parallelism" title="Parallelism: settings" />
+            <p v-if="server && !server.methods.length && !scalarCount('parallelism')" class="text-sm text-muted">
+              This server does not tell the methods' limits yet.
+            </p>
+          </template>
+
+          <template v-else-if="e.id === 'cache'">
+            <UCard>
+              <div class="space-y-4">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <span class="text-sm text-muted tabular-nums">
+                    <template v-if="cacheStats">
+                      {{ cacheStats.enabled ? 'On' : 'Off' }} · {{ compact(cacheStats.entries ?? 0) }} entries ·
+                      {{ cacheStats.size_mb ?? 0 }} MB in memory
+                    </template>
+                    <template v-else>…</template>
+                  </span>
+                  <div class="flex items-center gap-1">
+                    <UButton size="xs" variant="ghost" icon="i-fa7-solid-broom" label="Clear recent"
+                      title="Empties the recent results; the permanent archive tier stays" @click="clearCache('recent')" />
+                    <UButton size="xs" variant="ghost" color="error" icon="i-fa7-solid-trash" label="Clear all"
+                      title="Also empties the permanent tier (archive captures, their media, Archive.today pages)"
+                      @click="clearCache('all')" />
+                  </div>
+                </div>
+                <p class="text-xs text-muted">
+                  A successful retrieval is served again for the same URL and settings until it
+                  expires. Clients can ask for a fresh one anyway (<code class="font-mono">use_cache=False</code>).
+                </p>
+                <div class="border-t border-default pt-4 space-y-2">
+                  <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
+                    <span class="font-medium">Permanent archive tier</span>
+                    <UBadge color="success" variant="subtle" size="sm" label="always on" />
+                    <span class="text-muted tabular-nums">
+                      <template v-if="permanentEntries">
+                        {{ permanentEntries.results }} results · {{ permanentEntries.media }} media ·
+                        {{ permanentEntries.pages }} Archive.today pages · {{ permanentEntries.snapshots }} snapshot records
+                        · {{ cacheStats?.immutable?.size_mb ?? 0 }} of {{ cacheStats?.immutable?.max_mb }} MB on disk
+                      </template>
+                      <template v-else>counting…</template>
+                    </span>
+                  </div>
+                  <p class="text-xs text-muted">
+                    Archive captures never change: an Archive.today snapshot, a Wayback capture with its
+                    timestamp, a Perma.cc record, a Ghostarchive archive. Their complete results, and which
+                    media-registry file each archived medium became, are kept on disk without expiry, so
+                    asking again needs no network, and Archive.today pages retrieved during a solved CAPTCHA
+                    stay available. Turning the cache off does not turn this tier off; the least recently
+                    used entries go once it is full.
+                  </p>
+                </div>
+              </div>
+            </UCard>
+            <SettingsFields section="cache" title="Cache" />
+            <UCard v-if="media">
+              <h3 class="text-sm font-medium flex items-center gap-2">
+                <UIcon name="i-fa7-solid-photo-film" class="size-3.5 text-dimmed" />
+                Media registry
+              </h3>
+              <p class="text-sm text-muted mt-2">
+                {{ media.files == null ? 'Still counting the' : compact(media.files) }} files at <code class="font-mono">{{ media.root }}</code>
+                <span v-if="media.host_root"> (host path <code class="font-mono">{{ media.host_root }}</code>)</span>.
+              </p>
+              <p class="text-xs text-muted mt-2">
+                The server never deletes media on its own: clients that share this machine hold
+                references straight into this directory, and removing a file would break
+                sequences handed out earlier. Prune it yourself when you decide to.
+              </p>
+            </UCard>
+          </template>
+
+          <SecretsSection v-else-if="e.id === 'secrets'" />
+          <template v-else-if="e.id === 'proxy'">
+            <ProxySection />
+            <SettingsFields section="proxy" title="Proxy routing" />
+          </template>
+
+          <template v-else>
+            <p v-if="e.id === 'integrations'" class="text-xs text-muted">
+              Their API keys and logins are under
+              <NuxtLink to="/settings?section=secrets" class="text-primary hover:underline">Secrets</NuxtLink>.
+            </p>
+            <SettingsFields :section="e.id" :title="e.label" />
+            <p v-if="server && !scalarCount(e.id)" class="text-sm text-muted">
+              Nothing to set here on this server.
+            </p>
+          </template>
+        </section>
+      </div>
+    </div>
 
     <SaveFab :sections="sections" />
   </div>

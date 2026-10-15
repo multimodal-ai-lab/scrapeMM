@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, replace
 from traceback import format_exc
@@ -23,7 +24,7 @@ from scrapemm.common import (ScrapingResponse, ScrapedContent, OutputFormat, OUT
 from scrapemm.common.exceptions import RetrievalFailed, UnsupportedDomainError, \
     DomainBlacklistedError, DiskFull, TargetUnavailableError, QuotaExceededError, \
     AccessBlockedError, CaptchaEncounteredError, PaywallError, RegionBlockedError
-from scrapemm.server import challenges, reachability, chain, proxy, timing
+from scrapemm.server import challenges, reachability, chain, proxy, slots, timing
 from scrapemm.server.download.documents import (document_extension, is_document_content_type,
                                                 to_content as documents_to_content)
 from scrapemm.server import screenshot as screenshot_module
@@ -31,9 +32,13 @@ from scrapemm.server.blacklist import blacklist
 from scrapemm.server.cache import cache, cache_key
 from scrapemm.server.captcha_detect import detect_captcha
 from scrapemm.server.paywall_detect import detect_paywall
-from scrapemm.server.config import get_config_var
+from scrapemm.server.config import get_config_var, get_setting
 from scrapemm.server.download import download_image, download_video
-from scrapemm.server.download.common import HEADERS
+from scrapemm.server.download.common import HEADERS, site_cookies
+from scrapemm.server.download.util import collecting_omitted
+from scrapemm.server.published import published_from_html
+from scrapemm.server.wall_detect import age_gate, login_wall, no_content_notice, raw_document
+from scrapemm.server.download.videos import downscale_requested
 from scrapemm.server.download.util import (looks_like_image_file_url, looks_like_video_file_url,
                                            looks_like_hls_url)
 from scrapemm.server.integrations import (retrieve_via_integration, fire, decodo, browser,
@@ -54,7 +59,8 @@ DEFAULT_HEDGING_DELAY = None
 # The order of the methods, the domain routes and which methods run at all are the
 # retrieval chain's business (see `chain.py`); the engine executes its plan.
 BROWSER = "browser"
-PLAIN_HTTP = chain.label("plain_http")
+PLAIN_HTTP_KEY = "plain_http"
+PLAIN_HTTP = chain.label(PLAIN_HTTP_KEY)
 
 UNSUPPORTED_DOMAINS = []
 
@@ -72,7 +78,8 @@ async def retrieve(
         hedging_delay: float | None = None,
         strip: bool = False,
         screenshot: bool = False,
-        enable_archives_fallback: bool | None = None
+        enable_archives_fallback: bool | None = None,
+        downscale_videos: bool = False,
 ) -> ScrapingResponse | list[ScrapingResponse]:
     """Main function of this repository. Downloads the contents present at the given URL(s).
     For each URL, returns a ScrapingResponse containing the retrieved content, error, and method.
@@ -132,6 +139,9 @@ async def retrieve(
         when the live page cannot be retrieved. None (the default) decides by `prioritize`: on for
         "completeness", off for "speed". Archives named in an explicit `methods` list are tried
         regardless. The result is then a copy of the page as it was captured, which may be old.
+    :param downscale_videos: If True, a video larger than `max_video_size` is downloaded in
+        the highest lower resolution that fits, instead of being left out. Only for videos
+        downloaded with yt-dlp (YouTube, TikTok, Instagram, Facebook, embedded players).
     """
     # Ensure URLs are string or list
     assert isinstance(urls, (str, list)), "'urls' must be a string or a list of strings."
@@ -181,12 +191,14 @@ async def retrieve(
         # Retrieve URLs concurrently
         tasks = [_retrieve_single(url, session, url_to_methods[url], actions,
                                   output_format, max_video_size, prioritize, use_cache,
-                                  hedging_delay, screenshot, enable_archives_fallback) for url in
+                                  hedging_delay, screenshot, enable_archives_fallback,
+                                  downscale_videos) for url in
                  urls_unique]
         results = await run_with_semaphore(tasks, limit=40, show_progress=show_progress and len(urls_unique) > 1,
                                            progress_description="Retrieving URLs...")
         if strip:
             results = [await _strip(response) for response in results]
+        results = [_with_capture_note(response) for response in results]
         _release_media_memory()
 
         # Reconstruct output list, each result under the URL as requested, not as
@@ -196,25 +208,6 @@ async def retrieve(
             return results[urls]
         else:
             return [results[url] for url in urls_to_retrieve]
-
-
-DEFAULT_MAX_CONCURRENCY = 40
-
-_semaphore: Optional[asyncio.Semaphore] = None
-_semaphore_limit: Optional[int] = None
-
-
-def _concurrency_gate() -> asyncio.Semaphore:
-    """The server's global limit on URLs in flight. `retrieve()` applies its own limit
-    per batch; the API streams URLs individually, so the limit has to live here instead
-    -- otherwise ten concurrent API calls of fifty URLs each would launch five hundred
-    retrievals at once."""
-    global _semaphore, _semaphore_limit
-    limit = int(get_config_var("max_concurrency", DEFAULT_MAX_CONCURRENCY))
-    if _semaphore is None or _semaphore_limit != limit:
-        _semaphore = asyncio.Semaphore(limit)
-        _semaphore_limit = limit
-    return _semaphore
 
 
 async def retrieve_one(
@@ -230,10 +223,12 @@ async def retrieve_one(
         strip: bool = False,
         screenshot: bool = False,
         enable_archives_fallback: bool | None = None,
+        downscale_videos: bool = False,
 ) -> ScrapingResponse:
-    """Retrieves a single URL, subject to the server's concurrency limit. This is what
-    the API streams over: it needs results one at a time, as they finish, rather than
-    the whole batch at once."""
+    """Retrieves a single URL. This is what the API streams over: it needs results one
+    at a time, as they finish, rather than the whole batch at once. How many run at once
+    is up to each method's slots (see `slots`): ten concurrent API calls of fifty URLs
+    each launch five hundred retrievals, which then wait for their methods' slots."""
     if methods is None:
         methods = "auto"
     if hedging_delay is None:
@@ -247,13 +242,13 @@ async def retrieve_one(
     # per caller, on the shared result. A screenshot is: it is taken during the retrieval.
     key = (preprocess_url(url), output_format, json.dumps(methods, default=str),
            json.dumps(actions, sort_keys=True, default=str), max_video_size, prioritize,
-           use_cache, hedging_delay, screenshot, enable_archives_fallback)
+           use_cache, hedging_delay, screenshot, enable_archives_fallback, downscale_videos)
     shared = _in_flight.get(key)
     joined = shared is not None
     if shared is None:
-        shared = _InFlight(asyncio.create_task(_gated_retrieve(
+        shared = _InFlight(asyncio.create_task(_shared_retrieve(
             url, session, methods, actions, output_format, max_video_size, prioritize,
-            use_cache, hedging_delay, screenshot, enable_archives_fallback)))
+            use_cache, hedging_delay, screenshot, enable_archives_fallback, downscale_videos)))
         _in_flight[key] = shared
         shared.task.add_done_callback(lambda _, k=key, s=shared: _forget(k, s))
     else:
@@ -276,6 +271,7 @@ async def retrieve_one(
         response = replace(response, from_cache=True)
     if strip:
         response = await _strip(response)
+    response = _with_capture_note(response)
     # Report under the URL as requested, not as preprocessed (e.g. percent-decoded):
     # the client maps results back onto its request by URL
     return replace(response, url=url)
@@ -287,6 +283,17 @@ async def _strip(response: ScrapingResponse) -> ScrapingResponse:
     if response.content is None:
         return response
     return replace(response, content=await strip_content(response.content, url=response.url))
+
+
+def _with_capture_note(response: ScrapingResponse) -> ScrapingResponse:
+    """An archive's capture with its facts stated before the text (see `Capture.note()`):
+    which archive, when, and of which page. Added as the response is handed out, after
+    stripping (which rebuilds the text from the HTML), to a copy: the cached content
+    stays as retrieved. The HTML stays as captured."""
+    content = response.content
+    if content is None or content.capture is None:
+        return response
+    return replace(response, content=content.prefixed(content.capture.note()))
 
 
 @dataclass
@@ -304,27 +311,27 @@ def _forget(key: tuple, shared: _InFlight) -> None:
         del _in_flight[key]
 
 
-async def _gated_retrieve(url, session, methods, actions, output_format, max_video_size,
-                          prioritize, use_cache, hedging_delay, screenshot,
-                          enable_archives_fallback) -> ScrapingResponse:
+async def _shared_retrieve(url, session, methods, actions, output_format, max_video_size,
+                           prioritize, use_cache, hedging_delay, screenshot,
+                           enable_archives_fallback, downscale_videos) -> ScrapingResponse:
     # Its own HTTP session rather than the first caller's: that one closes when its job
     # ends or its client disconnects, while others may still be waiting on this result
-    global _active
     clock = timing.start_clock()  # Queue time starts here, see `timing`
-    async with (_concurrency_gate(),
-                aiohttp.ClientSession(headers=HEADERS, trace_configs=[timing.request_trace()]) as own):
-        clock.admit()
-        _active += 1
-        try:
+    _retrievals.add(clock)
+    try:
+        async with aiohttp.ClientSession(headers=HEADERS,
+                                         trace_configs=[timing.request_trace()]) as own:
             return await _retrieve_single(url, own, methods, actions, output_format,
                                           max_video_size, prioritize, use_cache, hedging_delay,
-                                          screenshot, enable_archives_fallback)
-        finally:
-            _active -= 1
-            _release_media_memory()
+                                          screenshot, enable_archives_fallback, downscale_videos)
+    finally:
+        _retrievals.discard(clock)
+        _release_media_memory()
 
 
-_active = 0  # Retrievals under way, see `_gated_retrieve()`
+# The clocks of the retrievals under way (see `_shared_retrieve()`): those not yet
+# admitted and waiting for a slot are the URLs waiting in line (see `status._queue()`)
+_retrievals: set[timing.RetrievalClock] = set()
 
 
 def _release_media_memory() -> None:
@@ -339,7 +346,7 @@ def _release_media_memory() -> None:
     for item in list(item_registry.cache.values()):
         if isinstance(item, Image) and item._image is not None:
             item._image = None
-    if _active == 0 and _libc is not None:
+    if not _retrievals and _libc is not None:
         _libc.malloc_trim(0)
 
 
@@ -351,11 +358,10 @@ except OSError:
 
 async def _retrieve_single(url: str, session: aiohttp.ClientSession, *args) -> ScrapingResponse:
     """Retrieves the URL, its response timed from its first outgoing request on (see
-    `timing`). In a batch of `retrieve()`, the URL counts as admitted when this runs."""
+    `timing`). The URL is admitted once its first method has a slot (see `slots`)."""
     clock = timing.current()
-    if clock is None:
+    if clock is None:  # In a batch of `retrieve()`
         clock = timing.start_clock()
-    clock.admit()
     return clock.stamp(await _retrieve(url, session, *args))
 
 
@@ -370,12 +376,14 @@ async def _retrieve(
         use_cache: bool = True,
         hedging_delay: float | None = None,
         screenshot: bool = False,
-        enable_archives_fallback: bool | None = None
+        enable_archives_fallback: bool | None = None,
+        downscale_videos: bool = False,
 ) -> ScrapingResponse:
     logger.debug(f"Retrieving {url}")
     start_time = time.time()
     # The methods that render the page capture it while they have it open
     screenshot_module.requested(screenshot)
+    downscale_requested(downscale_videos)
 
     if get_domain(url) in UNSUPPORTED_DOMAINS:
         return _failure(url, output_format, dict(scrapemm=UnsupportedDomainError("Unsupported domain.")),
@@ -386,7 +394,9 @@ async def _retrieve(
 
     # Refuse blacklisted domains, e.g., domains that are protected by a CAPTCHA
     domain = get_domain(url)
-    if reason := blacklist.reason(domain):
+    # Not for a domain an integration serves: the integration does not go where the
+    # blacklisted CAPTCHA was (researchgate.net's DataDome; its integration asks OpenAlex)
+    if (reason := blacklist.reason(domain)) and domain not in DOMAIN_TO_INTEGRATION:
         e = DomainBlacklistedError(
             f"Domain '{domain}' is blacklisted: {reason}\nRemove it under Settings in "
             f"the server's web UI to allow it again.")
@@ -417,7 +427,7 @@ async def _retrieve(
 
     # Re-use a recent, successful retrieval of the same URL, if there is any
     key = cache_key(url, output_format, [chain.label(m) for m in plan.order],
-                    max_video_size)
+                    max_video_size, downscale_videos)
     if use_cache:
         cached = cache.get(key)
         # Without a screenshot, it cannot answer for one: retrieved again, with one, the
@@ -450,6 +460,10 @@ async def _retrieve(
     # Set once a method found the page withheld from this server's region (HTTP 451):
     # the other methods fetching from here would be too, the others may not
     region_blocked: list[RegionBlockedError] = []
+    # Set once a method fetching from here was refused by the site (access denied, HTTP
+    # 403): the other methods fetching from here would be too -- the self-hosted Firecrawl
+    # got the same 403 after the browser had (nbcnewyork.com, Akamai)
+    refused_here: list[AccessBlockedError] = []
     # The methods that go through the proxy right away (see `scrapemm.server.proxy`)
     proxy_first: set[str] = set()
     if domain not in DOMAIN_TO_INTEGRATION:
@@ -463,10 +477,11 @@ async def _retrieve(
             # Only from this server, maybe (e.g. its IP is blocked): services that fetch
             # from elsewhere still get their chance, the local methods are skipped
             local = _local_methods()
-            if proxy.active():
-                # ...unless they can go through the proxy: from its address, the host
-                # may well answer
-                proxy_first = {m for m in methods if m in local and m in proxy.PROXY_METHODS}
+            if proxy.available():
+                # ...unless they can go through a proxy: from its address, the host may
+                # well answer
+                proxy_first = {m for m in methods if m in local and m in proxy.PROXY_METHODS
+                               and proxy.available(m, domain)}
                 local = local - proxy_first
                 if proxy_first:
                     logger.info(f"🔀 {url} is unreachable from this server; trying "
@@ -495,12 +510,14 @@ async def _retrieve(
         if output_format == "multimodal":
             medium = None
             if looks_like_image_file_url(url) or looks_like_video_file_url(url) or looks_like_hls_url(url):
-                timing.work_started()
-            if looks_like_image_file_url(url):
-                medium = await download_image(url, session=session)
-            elif looks_like_video_file_url(url) or looks_like_hls_url(url):
-                medium = await download_video(url, session=session,
-                                              max_video_size=max_video_size)
+                # A plain request of the file, in one of that method's slots
+                async with slots.hold(PLAIN_HTTP_KEY):
+                    timing.work_started()
+                    if looks_like_image_file_url(url):
+                        medium = await download_image(url, session=session)
+                    else:
+                        medium = await download_video(url, session=session,
+                                                      max_video_size=max_video_size)
             if medium:
                 content = ScrapedContent(multimodal=MultimodalSequence(medium))
                 response = ScrapingResponse(url=url, content=content, method="Direct download",
@@ -546,41 +563,79 @@ async def _retrieve(
     proxied: set[str] = set()
     direct_errors: dict[str, Exception] = {}
 
-    async def run_attempt(method_name: str, via_proxy: bool) -> tuple[tuple[str, object], bool]:
-        """Runs the method once, through the proxy if so, and classifies its outcome.
-        Also returns whether the attempt went through the proxy."""
-        with proxy.attempt(proxy.active() if via_proxy else None) as current:
+    async def run_attempt(method_name: str, via: Optional[proxy.Proxy]
+                          ) -> tuple[tuple[str, object], proxy.Attempt]:
+        """Runs the method once, through `via` if given, and classifies its outcome. Also
+        returns the attempt: whether, and through which proxy, it went."""
+        with proxy.attempt(via) as current:
             content = await _execute(url, map_method_to_retrieval_routine, method_name, session)
         if isinstance(content, Exception):
-            return ("error", content), current.used
-        # In a thread: the checks parse the whole page (BeautifulSoup for the paywall
-        # check), which for a large page held the event loop -- every request -- for
-        # seconds. In a thread, the loop keeps getting its turns.
-        return await run_light(_classify, url, method_name, content, output_format), current.used
+            outcome = ("error", content)
+        else:
+            # In a thread: the checks parse the whole page (BeautifulSoup for the paywall
+            # check), which for a large page held the event loop -- every request -- for
+            # seconds. In a thread, the loop keeps getting its turns.
+            outcome = await run_light(_classify, url, method_name, content, output_format)
+        if current.used:  # Its record: how this proxy fares with this method
+            proxy.learn(current.proxy, method_name,
+                        outcome[1] if outcome[0] == "error" else None, site=domain)
+        return outcome, current
 
     async def evaluate(method_name: str) -> tuple[str, object]:
         """Runs one method and classifies its outcome. A method that failed because of
-        this server's address is retried once through the proxy, if one is in use."""
+        this server's address is retried through a proxy, if one is usable for it -- and
+        refused there too, through the next, up to `proxy_tries` proxies."""
         local = method_name in _local_methods()
+        proxy_ok = method_name in proxy.PROXY_METHODS and proxy.available(method_name, domain)
+        # Where the site turned out to be blocked: the next proxy exits elsewhere
+        avoid: set = {proxy.region_of(None)} if region_blocked else set()
         via_proxy = method_name in proxy_first
         if region_blocked and local:
-            if not (method_name in proxy.PROXY_METHODS and proxy.active()):
+            if not proxy_ok:
                 return "error", RegionBlockedError(f"Skipped: {region_blocked[0]}")
             via_proxy = True  # From the proxy's region instead
-        logger.debug(f"Now executing {method_name}{' through the proxy' if via_proxy else ''}...")
-        outcome, used = await run_attempt(method_name, via_proxy)
-        if outcome[0] == "error" and not used and proxy.retry_worthy(method_name, outcome[1]):
-            logger.info(f"🔀 Retrying {method_name} for {url} through the proxy: "
+        if refused_here and local and not via_proxy:
+            if not proxy_ok:
+                return "error", AccessBlockedError(f"Skipped: {refused_here[0]}")
+            via_proxy = True  # From the proxy's address instead
+        logger.debug(f"Now executing {method_name}{' through a proxy' if via_proxy else ''}...")
+        outcome, current = await run_attempt(
+            method_name, proxy.pick(method_name, site=domain, avoid_regions=avoid)
+            if via_proxy else None)
+        if (local and not current.used and isinstance(outcome[1], AccessBlockedError)
+                and proxy.ip_blocked(outcome[1])):
+            if not refused_here:
+                logger.info(f"⛔ {url} refuses this server; skipping the other methods that "
+                            f"fetch from here"
+                            f"{' (or going through a proxy)' if proxy_ok else ''}.")
+            refused_here.append(outcome[1])
+        tried = [current.proxy.url] if current.used else []
+
+        def note_region() -> None:
+            if isinstance(outcome[1], RegionBlockedError):
+                avoid.add(proxy.region_of(current.proxy if current.used else None))
+        note_region()
+        while (outcome[0] == "error" and method_name in proxy.PROXY_METHODS
+               and proxy.ip_blocked(outcome[1]) and len(tried) < proxy.tries()
+               and (via := proxy.pick(method_name, exclude=tried, site=domain,
+                                      avoid_regions=avoid))):
+            logger.info(f"🔀 Retrying {method_name} for {url} through the proxy {via.url}: "
                         f"{str(outcome[1]).splitlines()[0][:200]}")
-            direct_errors[method_name] = outcome[1]
-            outcome, used = await run_attempt(method_name, True)
-        if used:
+            if not current.used:
+                direct_errors[method_name] = outcome[1]
+            outcome, current = await run_attempt(method_name, via)
+            note_region()
+            if current.used:
+                tried.append(current.proxy.url)
+            else:
+                break  # The method did not go through it after all: another would not either
+        if tried:
             proxied.add(method_name)
         elif isinstance(outcome[1], RegionBlockedError) and local:
             if not region_blocked:
                 logger.info(f"🌍 {url} is withheld from this server's region; skipping the "
                             f"other methods that fetch from here"
-                            f"{' (or going through the proxy)' if proxy.active() else ''}.")
+                            f"{' (or going through a proxy)' if proxy_ok else ''}.")
             region_blocked.append(outcome[1])
         return outcome
 
@@ -642,6 +697,10 @@ async def _retrieve(
     if winner is not None:
         return await _success(url, key, *winner, errors, output_format, start_time)
 
+    # An archive's capture of a platform's post that holds nothing usable: the live post
+    if live := await _live_instead(url, session, errors, output_format, max_video_size):
+        return await _success(url, key, *live, errors, output_format, start_time)
+
     # All methods failed
     logger.warning(f"All retrieval methods failed for URL: {url}")
 
@@ -664,12 +723,28 @@ def _classify(url: str, method_name: str, content: Optional[ScrapedContent],
 
     _derive_markdown(content)
 
+    # ...nor a document's raw bytes passed off as its text (Decodo hands a PDF on as is):
+    # the methods that read documents come next
+    if raw_document(content):
+        logger.info(f"Method {method_name} returned the raw bytes of the document {url}.")
+        return "error", RetrievalFailed(f"Method {method_name} returned the document's raw "
+                                        f"bytes, not its text.")
+
     # ...nor a notice that the page is withheld from this region (a 451 page). It may
     # carry a CAPTCHA widget too, and is no CAPTCHA anybody could solve
     if notice := _region_block_notice(content):
         logger.info(f"🌍 Method {method_name} got a regional block notice for {url}.")
         return "error", RegionBlockedError(f"Method {method_name}: the page is blocked in "
                                             f"this region (\"{notice}\").")
+
+    # ...nor a CDN's or firewall's "access denied" page: the site refused this server
+    # (an AccessBlockedError, so the method is retried through the proxy, if one is in
+    # use, and the chain goes on to the methods that fetch from elsewhere)
+    if blocker := _access_denied_page(content):
+        logger.info(f"⛔ Method {method_name} got {blocker}'s \"access denied\" page for {url}.")
+        return "error", AccessBlockedError(
+            f"Method {method_name}: access denied -- {blocker} refused to serve this "
+            f"server the page.")
 
     # Ensure the method returned the actual content and not a CAPTCHA challenge
     if captcha := detect_captcha(content):
@@ -684,6 +759,17 @@ def _classify(url: str, method_name: str, content: Optional[ScrapedContent],
         logger.warning(f"🤖 Method {method_name} encountered a {captcha} at {url}.")
         return "error", CaptchaEncounteredError(f"Method {method_name} encountered a {captcha}.")
 
+    # ...nor a login page or an age check in place of the content (worded without an IP
+    # marker: logging in from elsewhere would not help, see `proxy.ip_blocked()`)
+    if heading := login_wall(url, content):
+        logger.info(f"🔒 Method {method_name} got a login page for {url}: \"{heading}\".")
+        return "error", AccessBlockedError(f"Method {method_name} got a login page instead of "
+                                           f"the content (\"{heading}\").")
+    if phrase := age_gate(content):
+        logger.info(f"🔒 Method {method_name} got an age check for {url}: \"{phrase}\".")
+        return "error", AccessBlockedError(f"Method {method_name} got an age check instead of "
+                                           f"the content (\"{phrase}\").")
+
     # ...nor only the teaser of a paywalled article
     if reason := detect_paywall(content):
         logger.info(f"💰 Method {method_name} got only the paywalled teaser of {url}: {reason}.")
@@ -696,6 +782,13 @@ def _classify(url: str, method_name: str, content: Optional[ScrapedContent],
         logger.info(f"Method {method_name} returned an empty page for {url}.")
         return "error", RetrievalFailed(f"Method {method_name} returned an empty page "
                                         f"without any text or media.")
+
+    # ...nor a page that only says it needs JavaScript, or an app's error screen (as in
+    # archive captures of script-rendered pages)
+    if phrase := no_content_notice(content):
+        logger.info(f"Method {method_name} got a page without its content for {url}: \"{phrase}\".")
+        return "error", RetrievalFailed(f"Method {method_name} got a page without its content, "
+                                        f"only the notice \"{phrase}\".")
 
     # ...nor an archive's own "no such capture" page (Perma.cc's and the Wayback
     # Machine's replayers answer a miss with a page of their own, which scraped fine).
@@ -748,6 +841,42 @@ def _region_block_notice(content: ScrapedContent) -> Optional[str]:
     return next((m for m in REGION_BLOCK_MARKERS if m in text), None)
 
 
+# What CDNs and web application firewalls show a visitor they refuse, by who shows it:
+# each a set of phrases that must all be there. Only short pages count (see
+# `_access_denied_page()`): an article about blocking quotes them in a long text.
+ACCESS_DENIED_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    # nbcnewyork.com: "Access Denied ... You don't have permission to access ... on this
+    # server. Reference #18.d4b31402... https://errors.edgesuite.net/..."
+    ("Akamai", ("you don't have permission to access", "reference #")),
+    ("Akamai", ("errors.edgesuite.net",)),
+    ("Imperva", ("request unsuccessful", "incapsula incident id")),
+    ("Sucuri", ("sucuri website firewall", "access denied")),
+    ("CloudFront", ("the request could not be satisfied", "cloudfront")),
+    ("Cloudflare", ("sorry, you have been blocked", "cloudflare")),
+    ("the server", ("403 forbidden",)),
+    # eci.gov.in's firewall: "406 - Not Acceptable ... Request was blocked due to
+    # suspicious behavior."
+    ("the server", ("request was blocked due to suspicious behavior",)),
+    ("the server", ("406 - not acceptable",)),
+)
+ACCESS_DENIED_MAX_CHARS = 2000
+
+
+def _access_denied_page(content: ScrapedContent) -> Optional[str]:
+    """Who refused this server the page, if the content is a CDN's or firewall's "access
+    denied" page: a short page with that one's phrases (see ACCESS_DENIED_MARKERS)."""
+    text = content.markdown or (str(content.multimodal) if content.multimodal else "")
+    if content.html:
+        text += " " + content.html[:20_000]  # The reference link may be in the markup only
+    text = " ".join(text.lower().replace("\u2019", "'").split())
+    visible = content.markdown or (str(content.multimodal) if content.multimodal else "") \
+        or _TAGS.sub(" ", content.html or "")
+    if len(" ".join(visible.split())) > ACCESS_DENIED_MAX_CHARS:
+        return None
+    return next((who for who, phrases in ACCESS_DENIED_MARKERS
+                 if all(phrase in text for phrase in phrases)), None)
+
+
 # What the replayers show for a capture they do not have: pywb (Perma.cc, and archives
 # built on it) and the Wayback Machine
 REPLAY_MISS_MARKERS = (
@@ -774,7 +903,7 @@ def _replay_miss(content: ScrapedContent) -> Optional[str]:
 # A page title that says the page does not exist: "Page Not Found - First Check", "404",
 # "Error 404: ...", "Seite nicht gefunden", ...
 _NOT_FOUND_TITLE = re.compile(
-    r"^\W*(?:(?:error\s*)?404\b|(?:page|article|content|story)?\s*(?:could\s*not|couldn.t|cannot|can.t)"
+    r"^\W*(?:(?:error|fehler|erreur|errore|erro|b[łl][ąa]d)?\s*:?\s*404\b|(?:page|article|content|story)?\s*(?:could\s*not|couldn.t|cannot|can.t)"
     r"\s*be\s*found|(?:page|article|content|story)\s*(?:not\s*found|does(?:\s*not|n.t)\s*exist)|not\s*found\b"
     r"|p[aá]gina\s*(?:no\s*encontrada|n[aã]o\s*encontrada)|seite\s*nicht\s*gefunden|page\s*introuvable"
     r"|pagina\s*non\s*trovata)", re.IGNORECASE)
@@ -822,10 +951,90 @@ def _derive_markdown(content: ScrapedContent) -> None:
     content.markdown = " ".join(parts)
 
 
+async def _live_instead(url: str, session: aiohttp.ClientSession, errors: dict,
+                        output_format: OutputFormat, max_video_size: Optional[int]
+                        ) -> Optional[tuple[str, ScrapedContent]]:
+    """For an archive's URL whose capture of a platform's post held nothing usable: the
+    live post, by the platform's integration, marked as such (`Capture.live`). None if
+    the capture is of no platform's post, the live post cannot be had either, or the
+    setting `archive_live_fallback` is off."""
+    if not get_setting("archive_live_fallback", True):
+        return None
+    archive = DOMAIN_TO_INTEGRATION.get(get_domain(url))
+    if archive is None or archive.name.lower() not in chain.ARCHIVE_INTEGRATIONS:
+        return None
+    try:
+        capture = await archive._capture(url, session=session)
+    except Exception as e:
+        logger.debug(f"Could not tell what {url} captures: {type(e).__name__}: {e}")
+        return None
+    original = capture.original_url if capture else None
+    platform = chain.platform_of(original) if original else None
+    if not platform:
+        return None
+    logger.info(f"🔁 {archive.name} holds nothing usable at {url}; retrieving the live post "
+                f"{original} with {platform} instead.")
+    label = f"{platform} (live post, not the capture)"
+    try:
+        content = await retrieve_via_integration(preprocess_url(original), platform, session=session,
+                                                 output_format=output_format,
+                                                 max_video_size=max_video_size)
+    except Exception as e:
+        errors[label] = e
+        return None
+    status, result = await run_light(_classify, original, platform, content, output_format)
+    if status != "success":
+        errors[label] = result if status == "error" else RetrievalFailed(
+            f"The live post did not provide the content as {output_format}.")
+        return None
+    reason = next((str(e).splitlines()[0][:200] for e in errors.values() if e and str(e)), None)
+    result.capture = replace(capture, live="post",
+                             remark=f"the capture failed: {reason}" if reason else None)
+    return label, result
+
+
+def _max_video_size_of(key) -> Optional[int]:
+    """The video size limit of a retrieval, from its cache key (see `cache.cache_key`)."""
+    return key[3] if key else None
+
+
+async def _with_live_video(content: ScrapedContent, max_video_size: Optional[int]) -> None:
+    """Adds the live video to an archive's capture of a video page that holds none
+    (Archive.today never keeps videos; YouTube's streams expire), marked as such
+    (`Capture.live`). Nothing if the setting `archive_live_fallback` is off."""
+    capture, sequence = content.capture, content.multimodal
+    if (capture is None or capture.live or sequence is None or sequence.videos
+            or not capture.original_url or not chain.is_video_url(capture.original_url)
+            or not get_setting("archive_live_fallback", True)):
+        return
+    from scrapemm.server.integrations.ytdlp import download_video_with_ytdlp
+    try:
+        async with aiohttp.ClientSession(headers=HEADERS) as own:
+            video, _, _ = await download_video_with_ytdlp(capture.original_url, own,
+                                                          max_video_size=max_video_size)
+    except Exception as e:
+        logger.info(f"No live video for the capture of {capture.original_url}: {type(e).__name__}: {e}")
+        return
+    if video is None:
+        return
+    logger.info(f"🔁 Added the live video of {capture.original_url} to its capture, which holds none.")
+    content.multimodal = MultimodalSequence([*sequence, "\n\nThe video, from the live page now "
+                                                        "(the capture holds none):", video])
+    content.capture = replace(capture, live="video",
+                              remark="the capture holds no video; the video is the live one, "
+                                     "retrieved now from its platform.")
+
+
 async def _success(url: str, key, method_name: str, content: ScrapedContent,
                    errors: dict, output_format: OutputFormat,
                    start_time: float) -> ScrapingResponse:
     logger.info(f"🎉 Successfully retrieved with method: {method_name}")
+    if output_format == "multimodal":
+        await _with_live_video(content, _max_video_size_of(key))
+    if content.published_at is None:
+        # The page's own declaration, where the source said nothing; in an archive's
+        # capture, the archived page's
+        content.published_at = published_from_html(content.html)
     if content.multimodal is not None:
         await postprocess_media(content.multimodal)
     # What the method captured of the page, if asked to (see `screenshot`)
@@ -870,7 +1079,7 @@ def _segments(order: list[str]) -> list[tuple[str, list[str]]]:
 def _archive_deadline(url: str) -> Optional[float]:
     """When the archive methods of a platform URL must be done, all together (see
     PLATFORM_ARCHIVE_BUDGET); None for the open web."""
-    return time.monotonic() + PLATFORM_ARCHIVE_BUDGET if chain.platform_of(url) else None
+    return time.monotonic() + _platform_archive_budget() if chain.platform_of(url) else None
 
 
 async def _run_archives(archives: list[str], url: str, session: aiohttp.ClientSession,
@@ -888,26 +1097,28 @@ async def _run_archives(archives: list[str], url: str, session: aiohttp.ClientSe
     for key in archives:
         name = chain.label(key)
         if key == "wayback":
-            routine = _wayback(url, session, errors, output_format, max_video_size)
+            archive = _wayback
         elif key == "perma_cc":
-            routine = _perma_cc(url, session, errors, output_format, max_video_size)
+            archive = _perma_cc
         else:
             errors[name] = NotImplementedError(f"No archive method '{key}'.")
             continue
+        # In one of the archive method's slots; waiting for it counts against the deadline
+        routine = _in_slot(key, archive, url, session, errors, output_format, max_video_size)
         try:
             if deadline is None:
                 content = await routine
             elif (remaining := deadline - time.monotonic()) <= 0:
                 routine.close()
                 errors[name] = RetrievalFailed(
-                    f"Not tried: the {PLATFORM_ARCHIVE_BUDGET:.0f} s for archived copies of "
+                    f"Not tried: the {_platform_archive_budget():.0f} s for archived copies of "
                     f"{platform} URLs were used up.")
                 continue
             else:
                 content = await asyncio.wait_for(routine, remaining)
         except asyncio.TimeoutError:
             errors[name] = RetrievalFailed(
-                f"{name} did not deliver within the {PLATFORM_ARCHIVE_BUDGET:.0f} s allowed "
+                f"{name} did not deliver within the {_platform_archive_budget():.0f} s allowed "
                 f"for archived copies of {platform} URLs.")
             continue
         except Exception as e:
@@ -930,11 +1141,33 @@ async def _run_archives(archives: list[str], url: str, session: aiohttp.ClientSe
     return None
 
 
+async def _in_slot(key: str, routine: Callable[..., Coroutine], *args, **kwargs):
+    """`routine(*args, **kwargs)`, run in one of the method's slots (see `slots`). Takes
+    the function rather than its coroutine: a coroutine whose task is cancelled while
+    waiting for the slot would never be awaited."""
+    async with slots.hold(key):
+        with collecting_omitted() as omitted:
+            return _with_omitted(await routine(*args, **kwargs), omitted)
+
+
+def _with_omitted(content, omitted: list):
+    """The content, with the media its attempt left out (see `report_omitted()`)."""
+    if omitted and isinstance(content, ScrapedContent):
+        content.omitted_media = [*content.omitted_media,
+                                 *(m for m in omitted if m not in content.omitted_media)]
+    return content
+
+
 # Seconds the archive stage may take for a platform URL, all archives together. Its
 # integration has already failed, mostly for good (a removed post, a bot check), and an
 # archive of a platform page seldom holds the content: better an answer in under a minute
 # than a replay of a YouTube page for minutes.
 PLATFORM_ARCHIVE_BUDGET = 45.0
+
+
+def _platform_archive_budget() -> float:
+    return float(get_setting("platform_archive_budget", PLATFORM_ARCHIVE_BUDGET))
+
 
 # Visible text of a platform's login or consent page, lower case. Checked in archived
 # copies of platform URLs only, where such a page is what the archive captured instead of
@@ -1079,7 +1312,8 @@ async def _latest_wayback_snapshot(url: str, session: aiohttp.ClientSession) -> 
         timestamp, original = max(found)  # The newest
         snapshot = f"https://web.archive.org/web/{timestamp}/{original}"
     if snapshot or answered:  # Not a lookup that failed: that one is worth repeating
-        ttl = WAYBACK_HIT_TTL if snapshot else WAYBACK_MISS_TTL
+        ttl = (get_setting("wayback_hit_ttl", WAYBACK_HIT_TTL) if snapshot
+               else get_setting("wayback_miss_ttl", WAYBACK_MISS_TTL))
         _wayback_cache[key] = (time.monotonic() + ttl, snapshot)
     return snapshot
 
@@ -1115,7 +1349,8 @@ async def _wayback_json(endpoint: str, params: dict, session: aiohttp.ClientSess
                 else:
                     problem = f"HTTP {response.status}"
                     if response.status == 429 and attempt:
-                        _wayback_backoff[0] = time.monotonic() + WAYBACK_BACKOFF
+                        _wayback_backoff[0] = (time.monotonic()
+                                               + get_setting("wayback_backoff", WAYBACK_BACKOFF))
                     elif 400 <= response.status < 500 and response.status != 429:
                         break  # Asking again will not change that
         except asyncio.TimeoutError:
@@ -1329,12 +1564,12 @@ async def _plain_get(url: str, session: aiohttp.ClientSession
     if proxy.wants_curl():
         from scrapemm.server.download.requests import curl_get
         response = await curl_get(url, headers=HEADERS, impersonate="chrome124", timeout=30,
-                                  allow_redirects=True)
+                                  allow_redirects=True, cookies=site_cookies(url))
         return (response.status_code, response.headers.get("content-type", "text/html"),
                 response.content if response.status_code == 200 else b"", str(response.url),
                 getattr(response, "encoding", None))
     async with session.get(url, headers=HEADERS, allow_redirects=True,
-                           timeout=aiohttp.ClientTimeout(total=30),
+                           timeout=aiohttp.ClientTimeout(total=30), cookies=site_cookies(url),
                            proxy=proxy.aiohttp_proxy()) as response:
         content_type = response.headers.get("content-type", "text/html")
         data = await response.read() if response.status == 200 else b""
@@ -1365,8 +1600,8 @@ async def _cloudflare_fallback(url: str, domain: str, session: aiohttp.ClientSes
 
     logger.info(f"☁️ {url} is behind a Cloudflare challenge; trying the browser.")
     try:
-        content = await browser._get(url, output_format=output_format,
-                                     max_video_size=max_video_size)
+        content = await _in_slot(BROWSER, browser._get, url, output_format=output_format,
+                                 max_video_size=max_video_size)
     except Exception as e:
         errors[BROWSER] = e
         return None
@@ -1461,11 +1696,16 @@ async def _execute(
         url: str, method_to_routine: Callable[[str], Coroutine], method_name: str,
         session: aiohttp.ClientSession, attempts_remaining: int = 1,
 ) -> ScrapedContent | Exception | None:
-    """Executes a retrieval routine and handles exceptions. If an error occurred, returns
-    the exception object in place of the result."""
+    """Executes a retrieval routine in one of its method's slots (see `slots`) and
+    handles exceptions. If an error occurred, returns the exception object in place of
+    the result."""
     try:
-        routine = method_to_routine(method_name)  # Apply factory to get the actual routine
-        return await routine
+        async with slots.hold(slot_key(method_name)):
+            # The factory is applied only now: its coroutine would never be awaited if
+            # the task were cancelled while waiting for the slot. The media it leaves out
+            # are its own: a method running beside it reports into a list of its own.
+            with collecting_omitted() as omitted:
+                return _with_omitted(await method_to_routine(method_name), omitted)
 
     except NotImplementedError as e:
         logger.info("Reached a method that is not implemented.", exc_info=True)
@@ -1481,7 +1721,8 @@ async def _execute(
 
     except (TimeoutError, PlaywrightTimeoutError) as e:
         logger.warning(f"Timeout while retrieving with method {method_name}: {e}")
-        return e
+        # asyncio's timeouts say nothing: the response's error must say what timed out
+        return e if str(e) else TimeoutError(f"{method_name} got no answer from the site in time.")
 
     except OSError as e:
         if "Disk is full" in str(e):
@@ -1534,6 +1775,12 @@ async def _execute(
         return e
 
 
+def slot_key(method_name: str) -> str:
+    """The slots' key of a method named as responses name it: "Plain HTTP" ->
+    "plain_http", "Facebook" -> "facebook" (see `slots`)."""
+    return chain.key_of(method_name).lower()
+
+
 def resolve_best_methods(url: str, allowed_methods: Literal["auto"] | list[str]) -> list[str]:
     """The methods that will be tried for this URL, live ones first, by the names
     responses give them (see `chain.resolve()`)."""
@@ -1553,7 +1800,22 @@ async def postprocess_media(result: MultimodalSequence):
         await asyncio.gather(*(normalize_video(video) for video in result.videos))
 
 
+# Relocations one at a time: the same item may be on several pages retrieved at once,
+# and two threads moving its file both found it at its old path -- the second failed its
+# whole retrieval (perma.cc/N8MR-NS96, in a test run). They are renames, so this is cheap.
+_relocate_lock = threading.Lock()
+
+
 def _relocate_items(result: MultimodalSequence):
     """Moves every item into the ezmm registry directory."""
-    for item in result.unique_items():
-        item.relocate(move_not_copy=True)
+    with _relocate_lock:
+        for item in result.unique_items():
+            try:
+                item.relocate(move_not_copy=True)
+            except FileNotFoundError:
+                # Moved already, by another instance of the item (or another process)
+                target = item._default_file_path()
+                if not target.exists():
+                    raise
+                item.file_path = target
+                item_registry.update_file_path(item)

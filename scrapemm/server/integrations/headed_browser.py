@@ -11,6 +11,7 @@ import tempfile
 import time
 import urllib.request
 import uuid
+from collections import Counter
 from contextlib import suppress, contextmanager
 from contextvars import ContextVar
 
@@ -27,10 +28,12 @@ from seleniumbase import cdp_driver
 from seleniumbase.undetected.cdp_driver.browser import Browser
 
 from scrapemm.common import RetrievalFailed
-from scrapemm.common.exceptions import TargetUnavailableError, RegionBlockedError
+from scrapemm.common.exceptions import (AccessBlockedError, TargetUnavailableError, RegionBlockedError,
+                                        ServiceUnavailableError)
+from scrapemm.server.wall_detect import LOGIN_PATH
 from scrapemm.server.download.documents import document_extension
 from scrapemm.server import screenshot, timing
-from scrapemm.server.config import get_config_var
+from scrapemm.server.config import get_config_var, get_setting
 from scrapemm.server.download.browser import BrowserMedia, annotate_rendered_media
 from scrapemm.server.paths import BROWSER_PROFILE_PATH
 from scrapemm.server import budget
@@ -569,6 +572,10 @@ TAB_ANSWER_TIMEOUT = 3
 # What is slow to arrive (a video in an archive's replay) gives up before this, so that
 # the page comes back without it instead of failing as a whole (see `budget`).
 BROWSER_RETRIEVAL_TIMEOUT = 120
+# The archives that replay a capture (Perma.cc, the Internet Archive, Ghostarchive) render
+# it in nested frames and serve its media slowly (web.archive.org: ~330 KB/s for a client):
+# a capture with a video took up to 115 s and was cut off at 120 s now and then
+ARCHIVE_RETRIEVAL_TIMEOUT = 180
 
 # The tabs that running retrievals opened (CDP target ids). Any other tab showing a
 # page may be left over -- see `_close_orphaned_tabs()`.
@@ -781,7 +788,7 @@ def _shared_state() -> dict:
         # First use, or a new event loop (e.g. tests): objects of another loop are unusable
         _shared.clear()
         _shared.update(loop=loop, lock=asyncio.Lock(), playwright=None,
-                       connection=None, generation=None)
+                       connection=None, generation=None, default_context=None)
     return _shared
 
 
@@ -795,13 +802,20 @@ async def _shared_playwright() -> Playwright:
 
 async def _shared_context(browser: Browser, generation: int) -> BrowserContext:
     """The default context of the shared browser, through the shared connection. A
-    new connection is made only when the browser was replaced or the old one broke."""
+    new connection is made only when the browser was replaced or the old one broke.
+
+    The default context is taken once, as the connection is made, and kept: the Browser
+    method's proxied attempts open contexts of their own on this connection (see
+    `proxy_browser.py`), and after that `connection.contexts[0]` is no longer the default
+    one. Pages of every method then opened in a proxied context -- Perma.cc's failed
+    within a second with ERR_PROXY_CONNECTION_FAILED, and others went through the proxy
+    without anybody asking for it."""
     state = _shared_state()
     async with state["lock"]:
         connection = state["connection"]
         if connection is not None and (state["generation"] != generation
                                        or not connection.is_connected()):
-            state["connection"] = None
+            state["connection"], state["default_context"] = None, None
             with suppress(Exception):
                 await asyncio.wait_for(connection.close(), timeout=5)
             connection = None
@@ -819,7 +833,8 @@ async def _shared_context(browser: Browser, generation: int) -> BrowserContext:
                     await asyncio.wait_for(playwright.stop(), timeout=5)
                 raise
             state["connection"], state["generation"] = connection, generation
-        return connection.contexts[0]
+            state["default_context"] = connection.contexts[0]  # Before any other exists
+        return state["default_context"]
 
 
 async def _tab_answers(session: aiohttp.ClientSession, ws_url: Optional[str]) -> bool:
@@ -956,7 +971,7 @@ async def _fetch_in_browser(page: Page, url: str) -> tuple[Optional[bytes], Opti
                 session.send("IO.read", {"handle": stream, "size": 1 << 20}), timeout=60)
             piece = chunk.get("data", "")
             chunks.append(base64.b64decode(piece) if chunk.get("base64Encoded")
-                          else piece.encode("latin-1"))
+                          else piece.encode("utf-8"))  # Text chunks come decoded
             if chunk.get("eof"):
                 break
         return b"".join(chunks), headers.get("content-type"), "read"
@@ -1002,6 +1017,12 @@ async def _shows_bot_check(page: Page) -> bool:
 # code: 522" when the origin times out). A 503 may also be Cloudflare's challenge, which
 # is told apart (see `_failed_server()`).
 GATEWAY_ERRORS = (500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 530)
+# A refusal (unauthorized, forbidden, a firewall's "not acceptable"): its page is no
+# content -- unless it has some, as a few sites send their articles with a 403
+BLOCKING_STATUSES = (401, 403, 406)
+BLOCKED_MAX_WORDS = 150
+_MAIN_WORDS_JS = ("() => ((document.querySelector('main, article, [role=main]') || document.body || {})"
+                  ".innerText || '').split(/\\s+/).filter(Boolean).length")
 
 
 def _note_served_document(response, page: Page, served: list[str],
@@ -1199,6 +1220,30 @@ def _persist_browser_profile_at_exit() -> None:
         shutil.rmtree(profile, ignore_errors=True)
 
 
+# A browser retrieval taking at least this long logs how its time was spent
+SLOW_BROWSE_LOG_AFTER = 30
+
+
+class _Phases:
+    """How long each step of a browser retrieval took, for the log. A step runs from its
+    `enter()` to the next one's, so the step a retrieval was cut off in is known too."""
+
+    def __init__(self):
+        self.start = self._since = time.monotonic()
+        self._current: Optional[str] = None
+        self.done: list[tuple[str, float]] = []
+
+    def enter(self, name: Optional[str]) -> None:
+        now = time.monotonic()
+        if self._current is not None:
+            self.done.append((self._current, now - self._since))
+        self._current, self._since = name, now
+
+    def summary(self) -> str:
+        self.enter(None)
+        return ", ".join(f"{name} {seconds:.1f} s" for name, seconds in self.done)
+
+
 class HeadedBrowser(RetrievalIntegration):
     """Base class for retrieval integrations that need a headed browser to avoid bot blocking
      mechanisms (e.g., Cloudflare) when retrieving web content. See `Browser` for the
@@ -1209,10 +1254,20 @@ class HeadedBrowser(RetrievalIntegration):
     # the archive integrations: a replay may pass on the archived page's own status.
     fails_on_not_found = False
     waits_for_browser_slot = True  # Its time starts with a slot, see `_get()`
+    # The setting that limits a retrieval's seconds (see `_get()`, `retrieval_timeout`)
+    retrieval_timeout_setting: ClassVar[str] = "browser_retrieval_timeout"
     # Seconds a page gets to load its document, and whether a page that missed that is
     # tried once more on a new tab (under load, a page that is quick alone can miss it)
     navigation_timeout: ClassVar[float] = 60
     retry_on_timeout: ClassVar[bool] = True
+
+    @property
+    def retrieval_timeout(self) -> float:
+        """Seconds a retrieval may take, per the setting `retrieval_timeout_setting`."""
+        default = (ARCHIVE_RETRIEVAL_TIMEOUT
+                   if self.retrieval_timeout_setting == "archive_retrieval_timeout"
+                   else BROWSER_RETRIEVAL_TIMEOUT)
+        return float(get_setting(self.retrieval_timeout_setting, default))
 
     # Shared UC browser for all HeadedBrowser integrations (Perma.cc, Archive.org, …).
     _browser: ClassVar[Optional[Browser]] = None
@@ -1232,7 +1287,10 @@ class HeadedBrowser(RetrievalIntegration):
         it either succeeds or raises an informative exception."""
         assert get_domain(url) in self.domains, f"Invalid domain {get_domain(url)} for integration {self.name}."
         logger.debug(f"Calling {self.name} service for {url}")
-        return await self._get(url, **kwargs)
+        content = await self._get(url, **kwargs)
+        if content is not None and content.capture is None:
+            content.capture = await self._capture(url, **kwargs)
+        return content
 
     async def _connect(self):
         """Establishes a connection to a persistent, shared UC browser. Playwright connects
@@ -1497,12 +1555,13 @@ class HeadedBrowser(RetrievalIntegration):
             await slot.acquire()
             timing.wait_for_slot(time.time() - waiting_since)
             timing.work_started()
-            budget.start(BROWSER_RETRIEVAL_TIMEOUT)  # Inherited by the task below
+            timeout = self.retrieval_timeout
+            budget.start(timeout)  # Inherited by the task below
             # Not asyncio.wait_for(): that waits for the cancelled retrieval to wind
             # down, and a stuck one may never do so. The slot is freed right away instead.
             task = asyncio.ensure_future(self._browse(url, slot=slot, **kwargs))
             try:
-                done, _ = await asyncio.wait({task}, timeout=BROWSER_RETRIEVAL_TIMEOUT)
+                done, _ = await asyncio.wait({task}, timeout=timeout)
             except asyncio.CancelledError:
                 task.cancel()  # The caller gave up (e.g. a run was stopped): so does this
                 raise
@@ -1511,7 +1570,7 @@ class HeadedBrowser(RetrievalIntegration):
             task.cancel()
             task.add_done_callback(lambda t: t.cancelled() or t.exception())  # No "never retrieved" noise
             raise RetrievalFailed(f"{self.name} did not finish retrieving {url} within "
-                                  f"{BROWSER_RETRIEVAL_TIMEOUT // 60} minutes; given up.")
+                                  f"{timeout:.0f} s; given up.")
         finally:
             slot.release()
 
@@ -1519,9 +1578,28 @@ class HeadedBrowser(RetrievalIntegration):
                       **kwargs) -> ScrapedContent:
         """Opens `url` in a tab of its own and extracts it. The tab is closed, and `slot`
         released, as soon as the page is no longer needed -- before media downloads that
-        do not need it (see `resolve_media()`)."""
+        do not need it (see `resolve_media()`). A slow retrieval logs its steps' times,
+        a cut-off one too (see `_browse_page()`)."""
+        phases, media_stats = _Phases(), Counter()
+        outcome = "failed"
+        try:
+            content = await self._browse_page(url, slot, phases, media_stats, **kwargs)
+            outcome = "done"
+            return content
+        except asyncio.CancelledError:
+            outcome = "cut off"
+            raise
+        finally:
+            took = time.monotonic() - phases.start
+            if took >= SLOW_BROWSE_LOG_AFTER:
+                logger.info(f"⏱️ {url} took {took:.0f} s in the browser ({outcome}): "
+                            f"{phases.summary()}; media: {dict(media_stats) or 'none'}.")
+
+    async def _browse_page(self, url: str, slot: Optional[_BrowserSlot], phases: _Phases,
+                           media_stats: Counter, **kwargs) -> ScrapedContent:
         target_url = url  # What is loaded; after a renderer crash, maybe a lighter page
         for attempt in range(2):  # one try + one crash-triggered retry
+            phases.enter("tab")
             page, generation = await self._new_page(None)
             media: Optional[BrowserMedia] = None
             page_open = True
@@ -1558,11 +1636,13 @@ class HeadedBrowser(RetrievalIntegration):
             try:
                 # Before navigating, so it sees every medium the page loads
                 media = BrowserMedia(page)
+                media.stats = media_stats  # Counted where `_browse()` can log them
                 self._watch_page(page)
                 await page.set_viewport_size({"width": 1920, "height": 1080})
 
                 # domcontentloaded: return as soon as the DOM is parseable. Waiting for "load"
                 # often burns many seconds on archive/analytics assets after content is ready.
+                phases.enter("load")
                 try:
                     response = await page.goto(target_url,
                                                timeout=self.navigation_timeout * 1000,
@@ -1620,6 +1700,7 @@ class HeadedBrowser(RetrievalIntegration):
                                                 or document_extension(url)):
                     if (document := await self._document(page, downloads, url, served)) is not None:
                         return document
+                phases.enter("settle")
                 await self._pass_cloudflare(page)
                 await self._settle_after_goto(page)
                 if (statuses and statuses[-1] in GATEWAY_ERRORS and not served
@@ -1628,9 +1709,25 @@ class HeadedBrowser(RetrievalIntegration):
                     # an archive, it is the archive that is down, not the capture gone.
                     if self.fails_on_not_found:
                         raise RetrievalFailed(f"{url} answered HTTP {statuses[-1]}.")
-                    raise RetrievalFailed(f"{self.name} is unavailable right now: it answered "
-                                          f"HTTP {statuses[-1]} for {url}.")
+                    raise ServiceUnavailableError(
+                        f"{self.name} is unavailable right now (HTTP {statuses[-1]}): it is "
+                        f"down or overloaded, the capture is not gone. Try again later.")
 
+                if self.fails_on_not_found:
+                    # Sent to a login or age-check page instead (unless one was asked for)
+                    shown = urlparse(getattr(page, "url", "") or "").path
+                    if LOGIN_PATH.search(shown) and not LOGIN_PATH.search(urlparse(url).path):
+                        raise AccessBlockedError(f"{url} sent the browser to a login or age-check "
+                                                 f"page ({page.url}).")
+                    # A refusal's page, which only looks like content (an access-denied
+                    # page in the site's own frame, a firewall's block page)
+                    if (statuses and statuses[-1] in BLOCKING_STATUSES and not served
+                            and not await _shows_cloudflare_challenge(page)
+                            and (await evaluate_within(page, _MAIN_WORDS_JS) or 0) < BLOCKED_MAX_WORDS):
+                        raise AccessBlockedError(f"{url} answered HTTP {statuses[-1]} with next to "
+                                                 f"no content.")
+
+                phases.enter("read")
                 if target := await self._extract_content(page):
                     shown_url = getattr(page, "url", "") or ""  # What the content came from
                     # Before reading and before any screenshot: never content, and on
@@ -1642,10 +1739,13 @@ class HeadedBrowser(RetrievalIntegration):
                     if html:
                         # On request, the page as it is shown, now that it is loaded and
                         # before resolving the media may close it: no second load
+                        if screenshot.wanted():
+                            phases.enter("screenshot")
                         png = await screenshot.capture(page) if screenshot.wanted() else None
                         # Media that need the page are resolved while it is open;
                         # `done_with_page` is called once only the others are left
                         from scrapemm.server.util import to_scraped_content
+                        phases.enter("media")
                         content = await to_scraped_content(
                             html, session=page.context.request,
                             output_format=kwargs.get("output_format", "multimodal"),
@@ -1999,6 +2099,21 @@ DOM_LOAD_WAIT = 4
 DOM_SETTLE_TIMEOUT = 8
 DOM_THIN_TEXT = 1000
 DOM_THIN_TIMEOUT = 15
+# ...unless it is a media page: little text (under MEDIA_PAGE_TEXT characters) beside a
+# medium it already shows -- a video with a source, or an image at least
+# MEDIA_PAGE_IMAGE_WIDTH pixels wide or covering MEDIA_PAGE_IMAGE_SHARE of the viewport.
+# Media hosts (mvau.lt: 300-400 characters, a 1080 px image or a video) waited out the
+# full DOM_THIN_TIMEOUT for text that never comes. An article's shell sits at more text
+# than that (Animal Politico's: 600 characters, before its text arrived).
+MEDIA_PAGE_TEXT = 500
+MEDIA_PAGE_IMAGE_WIDTH = 800
+MEDIA_PAGE_IMAGE_SHARE = 0.10
+# ...nor is an error page, titled so: no text is coming (nbcnewyork.com's "Access Denied"
+# waited out the full DOM_THIN_TIMEOUT). Not Cloudflare's "Just a moment...": that one
+# does turn into the page by itself.
+ERROR_PAGE_TITLE = (r"^\W*(access denied|forbidden|403\b|404\b|not found|page not found|"
+                    r"request unsuccessful|attention required|error\b|bad request|"
+                    r"service unavailable|502\b|503\b)")
 
 _DOM_STATE_JS = ("() => [document.documentElement ? document.documentElement.outerHTML.length : 0,"
                  " document.readyState]")
@@ -2023,12 +2138,32 @@ async def evaluate_within(target: Page | Frame, script: str, arg=None,
         raise PlaywrightTimeoutError(f"The frame did not answer within {timeout:.0f} s.") from None
 
 
+_THIN_STATE_JS = """({imageWidth, imageShare, errorTitle}) => {
+    const text = document.body ? document.body.innerText.length : 0;
+    if (new RegExp(errorTitle, 'i').test(document.title || '')) return [text, false, true];
+    const viewport = window.innerWidth * window.innerHeight;
+    const share = e => { const r = e.getBoundingClientRect();
+        const w = Math.max(0, Math.min(r.right, window.innerWidth) - Math.max(r.left, 0));
+        const h = Math.max(0, Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0));
+        return viewport ? w * h / viewport : 0; };
+    const media = [...document.querySelectorAll('video')].some(v => v.currentSrc || v.src)
+        || [...document.images].some(i => i.naturalWidth >= imageWidth || share(i) >= imageShare);
+    return [text, media, false];
+}"""
+
+
 async def _is_thin(target: Page | Frame, min_text: int) -> bool:
+    """Whether the document has less text than `min_text` and so is most likely a shell
+    still waiting for its content -- unless it is a media page (see MEDIA_PAGE_*) or an
+    error page (ERROR_PAGE_TITLE)."""
     try:
-        return await evaluate_within(
-            target, "() => (document.body ? document.body.innerText.length : 0)") < min_text
+        text, media, error_page = await evaluate_within(
+            target, _THIN_STATE_JS,
+            {"imageWidth": MEDIA_PAGE_IMAGE_WIDTH, "imageShare": MEDIA_PAGE_IMAGE_SHARE,
+             "errorTitle": ERROR_PAGE_TITLE})
     except PlaywrightError:
         return True  # Mid-navigation: the next document is still to come
+    return text < min_text and not error_page and not (text < MEDIA_PAGE_TEXT and media)
 
 
 async def settle_dom(target: Page | Frame, min_text: int = 0) -> None:
@@ -2134,6 +2269,13 @@ class Browser(HeadedBrowser):
     name = "Browser"
     domains = []
     fails_on_not_found = True
+
+    async def _prepare_context(self, context: BrowserContext) -> None:
+        """The cookies of sites' click-through notices (see `SITE_COOKIES`)."""
+        from scrapemm.server.download.common import SITE_COOKIES
+        await context.add_cookies([{"name": name, "value": value, "domain": host, "path": "/"}
+                                   for host, cookies in SITE_COOKIES.items()
+                                   for name, value in cookies.items()])
 
     async def _settle_after_goto(self, page: Page) -> None:
         """Waits until the page stops building itself. At `domcontentloaded` the markup is

@@ -2,16 +2,17 @@
 
 A URL's `retrieval_time` runs from its first outgoing request to its result, and
 `queue_time` from its arrival until that first request. Under load a URL first waits
-for the server's concurrency slot and then, if the browser is the first thing it tries,
-for a browser slot (`_BrowserSlot`): neither is the target's or the method's doing, so
-neither counts as retrieval time.
+for a slot of the first method it tries (see `slots`; being granted it admits the URL)
+and then, if that is the browser, for a browser page (`_BrowserSlot`): neither is the
+target's or the method's doing, so neither counts as retrieval time. Waits for the slots
+of later methods are part of the retrieval.
 
 The first request is marked (see `work_started()`) where a URL's work begins: the host
 reachability check, the direct download of a media file, a non-browser method or
 integration starting, a request on the retrieval's HTTP session, and a browser page
 once it has its slot. Whatever comes first starts the clock; later marks change
-nothing. A URL that never sends anything (cache hit, refused domain) starts as soon as
-it is admitted."""
+nothing. A URL that never sends anything starts when it is admitted, or, if it never
+needs a slot either (cache hit, refused domain), on arrival."""
 
 import time
 from contextvars import ContextVar
@@ -28,6 +29,9 @@ class RetrievalClock:
         # Waits for a browser slot after the clock started (the reachability check comes
         # first): queue time all the same, see `wait_for_slot()`
         self.slot_wait = 0.0
+        # Waits for the first method's slot under way: while there are any, the URL is
+        # waiting in line (the dashboard's queue, see `status._queue()`)
+        self.waiting_for_slot = 0
 
     def admit(self) -> None:
         if self.admitted is None:
@@ -67,8 +71,8 @@ def work_started() -> None:
 
 
 def wait_for_slot(seconds: float) -> None:
-    """Counts `seconds` spent waiting for a browser slot as queue time, even if the
-    clock had started already."""
+    """Counts `seconds` spent waiting for a slot (the first method's, a browser page's)
+    as queue time, even if the clock had started already."""
     if (clock := _current.get()) is not None and clock.started is not None:
         clock.slot_wait += seconds
 

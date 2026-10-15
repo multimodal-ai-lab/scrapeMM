@@ -183,6 +183,8 @@ DOMAIN_ROUTES: dict[str, list[str]] = {
     "perma.cc": ["integrations"],
     "archive.org": ["integrations"],
     "awesomescreenshot.com": ["integrations"],
+    "megalodon.jp": ["integrations"],
+    "gyo.tc": ["integrations"],
     # Miscellaneous:
     "washingtonpost.com": ["decodo", "plain_http"],
     "verafiles.org": ["decodo", "firecrawl", "plain_http"],
@@ -283,7 +285,7 @@ def match_exception(host: str, exceptions: list[DomainRule]) -> Optional[DomainR
 
 
 # Integrations whose URLs are archives themselves, which the archive stage skips
-ARCHIVE_INTEGRATIONS = {"internet archive", "perma.cc", "archive.today", "ghostarchive"}
+ARCHIVE_INTEGRATIONS = {"internet archive", "perma.cc", "archive.today", "ghostarchive", "megalodon"}
 
 # Platforms whose content the archive services do not preserve: their URLs skip the
 # archive stage. Not TikTok: Wayback captures of TikTok videos do hold the video.

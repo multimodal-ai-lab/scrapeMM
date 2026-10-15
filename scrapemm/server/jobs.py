@@ -26,6 +26,7 @@ from typing import Any, Optional
 from scrapemm.common.outcome import OK, UNAVAILABLE, ERROR, classify, decisive_error
 from scrapemm.common.paths import APP_NAME
 from scrapemm.common.wire import ResponsePayload
+from .config import get_setting
 from .paths import JOBS_DB_PATH
 
 logger = logging.getLogger(APP_NAME)
@@ -70,9 +71,10 @@ WAL_SIZE_LIMIT = 64 * 1024 * 1024  # Bytes the write-ahead log is cut back to
 SLOT = 15 * 60
 RECENT_SPAN = 25 * 60 * 60
 
-# How much job history is kept, unless the settings say otherwise (`job_retention_days`,
-# `max_jobs`; 0 for no limit). Each job keeps its content, ~110 KB a URL, so 10,000 jobs
-# of one URL already take about a gigabyte.
+# How long jobs keep their page content, unless the settings say otherwise
+# (`job_retention_days`, `max_jobs`; 0 for no limit). The content takes ~110 KB a URL, so
+# 10,000 jobs of one URL already hold about a gigabyte. Jobs and their results' figures
+# (method, outcome, times) are kept for ever: they are what the statistics are made of.
 DEFAULT_RETENTION_DAYS = 90
 DEFAULT_MAX_JOBS = 10_000
 PRUNE_INTERVAL = 3600  # Seconds between prunings while the server runs, see `app`
@@ -135,8 +137,8 @@ class JobStore:
                     PRIMARY KEY (job_id, url)
                 );
                 CREATE INDEX IF NOT EXISTS jobs_created_idx ON jobs(created_at DESC);
-                -- One row per search request (see `api/search.py`): no query, no
-                -- answer, just enough to count them
+                -- One row per search request (see `api/search.py`): for the dashboard's
+                -- counts and the history's Searches view
                 CREATE TABLE IF NOT EXISTS searches (
                     created_at   REAL NOT NULL,
                     provider     TEXT NOT NULL,
@@ -217,6 +219,10 @@ class JobStore:
         searches = {row["name"] for row in self._connection.execute("PRAGMA table_info(searches)")}
         if "api_key" not in searches:  # Only recorded since; older rows have none
             self._connection.execute("ALTER TABLE searches ADD COLUMN api_key TEXT")
+        # What the history's Searches view shows; only recorded since, older rows have none
+        for column in ("query TEXT", "summary TEXT", "error TEXT", "duration REAL", "urls TEXT"):
+            if column.split()[0] not in searches:
+                self._connection.execute(f"ALTER TABLE searches ADD COLUMN {column}")
         rows = self._connection.execute(
             "SELECT rowid, success, errors FROM results WHERE outcome IS NULL").fetchall()
         for row in rows:
@@ -489,9 +495,11 @@ class JobStore:
 
     def prune(self, retention_days: Optional[float] = None,
               max_jobs: Optional[int] = None) -> int:
-        """Drops job records that are too old or too many: by the settings
-        `job_retention_days` and `max_jobs` unless given, 0 meaning no limit. Never touches
-        media, nor the all-time counters."""
+        """Drops the page content of jobs that are too old or too many: by the settings
+        `job_retention_days` and `max_jobs` unless given, 0 meaning no limit. The jobs and
+        their results stay, without content, and so does what the statistics are made of:
+        dropping them along with the content cut the statistics off at a day's worth of
+        jobs. Never touches media. Returns the number of results whose content went."""
         from .config import get_config_var
         if retention_days is None:
             retention_days = get_config_var("job_retention_days")
@@ -504,22 +512,18 @@ class JobStore:
             removed = 0
             if deadline is not None:
                 removed += self._connection.execute(
-                    "DELETE FROM jobs WHERE created_at < ?", (deadline,)).rowcount
+                    "DELETE FROM result_content WHERE job_id IN ("
+                    "  SELECT id FROM jobs WHERE created_at < ?)", (deadline,)).rowcount
             if max_jobs > 0:
                 removed += self._connection.execute(
-                    "DELETE FROM jobs WHERE id NOT IN ("
+                    "DELETE FROM result_content WHERE job_id NOT IN ("
                     "  SELECT id FROM jobs ORDER BY created_at DESC LIMIT ?)",
                     (int(max_jobs),)).rowcount
-            self._connection.execute(
-                "DELETE FROM results WHERE job_id NOT IN (SELECT id FROM jobs)")
-            self._connection.execute(
-                "DELETE FROM result_content WHERE job_id NOT IN (SELECT id FROM jobs)")
-            if deadline is not None:
-                self._connection.execute("DELETE FROM searches WHERE created_at < ?", (deadline,))
             self._connection.commit()
-            self.version += 1
+            if removed:
+                self.version += 1
         if removed:
-            logger.info(f"Pruned {removed} job records (media untouched).")
+            logger.info(f"Dropped the content of {removed} results of old jobs (jobs and media kept).")
         return removed
 
     def stats(self) -> dict:
@@ -600,16 +604,23 @@ class JobStore:
             f"FROM results WHERE created_at >= ? GROUP BY slot ORDER BY slot", (since,))]
 
     def record_search(self, provider: str, status: int, results: Optional[int],
-                      api_key: str) -> None:
-        """Counts one search request: which provider, its HTTP status, how many results,
-        and the API key (its id) it was made with."""
+                      api_key: str, query: Optional[dict] = None, summary: Optional[str] = None,
+                      error: Optional[str] = None, duration: Optional[float] = None,
+                      urls: Optional[list[str]] = None) -> None:
+        """Records one search request: which provider, its HTTP status, how many results,
+        and the API key (its id) it was made with; for the history also the query (in
+        its wire form, and in a few words), why it failed, how long it took and the
+        URLs it found (at most `MAX_STORED_SEARCH_URLS`)."""
         if not api_key:
             raise ValueError("A search runs under the API key of whoever made it; none was given.")
         with self._lock:
             self._connection.execute(
-                "INSERT INTO searches (created_at, provider, status, results, api_key) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (time.time(), provider, status, results, api_key))
+                "INSERT INTO searches (created_at, provider, status, results, api_key, "
+                "query, summary, error, duration, urls) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (time.time(), provider, status, results, api_key,
+                 json.dumps(query, default=str) if query is not None else None, summary,
+                 error[:500] if error else None, duration,
+                 json.dumps(urls[:MAX_STORED_SEARCH_URLS]) if urls is not None else None))
             self._connection.commit()
             self.version += 1
 
@@ -624,6 +635,124 @@ class JobStore:
         return {"recent": [list(row) for row in rows],
                 "total": self.query("SELECT COUNT(*) FROM searches")[0][0]}
 
+    # --- The history's Retrievals and Searches views ---------------------------------
+
+    def _result_filters(self, url: Optional[str] = None, method: Optional[str] = None,
+                        outcome: Optional[str] = None, output_format: Optional[str] = None,
+                        since: Optional[float] = None, until: Optional[float] = None
+                        ) -> tuple[str, list[Any]]:
+        """The WHERE clause over single results (joined with their job), as `_filters`
+        has it over jobs."""
+        clauses: list[str] = []
+        args: list[Any] = []
+        if url:
+            clauses.append("results.url LIKE ?")
+            args.append(f"%{url}%")
+        if method:
+            clauses.append("results.method = ?")
+            args.append(method)
+        if outcome:
+            clauses.append("results.outcome = ?" if outcome in (OK, UNAVAILABLE, ERROR)
+                           else "results.outcome_kind = ?")
+            args.append(outcome)
+        if output_format:
+            clauses.append("json_extract(jobs.params, '$.output_format') = ?")
+            args.append(output_format)
+        if since is not None:
+            clauses.append("results.created_at >= ?")
+            args.append(since)
+        if until is not None:
+            clauses.append("results.created_at <= ?")
+            args.append(until)
+        return (f" WHERE {' AND '.join(clauses)}" if clauses else ""), args
+
+    def list_results(self, limit: int = 50, offset: int = 0, sort: str = "newest",
+                     **criteria) -> list[dict]:
+        """Single retrievals, each URL of each job, newest first unless `sort` (a key of
+        `RESULT_SORTS`) says otherwise."""
+        where, args = self._result_filters(**criteria)
+        order = RESULT_SORTS.get(sort, RESULT_SORTS["newest"])
+        rows = self.query(
+            "SELECT results.job_id, results.url, results.success, results.method, "
+            "results.errors, results.retrieval_time, results.queue_time, results.from_cache, "
+            "results.created_at, results.outcome, results.outcome_kind, jobs.status AS job_status, "
+            "json_extract(jobs.params, '$.output_format') AS output_format "
+            f"FROM results JOIN jobs ON jobs.id = results.job_id{where} "
+            f"ORDER BY {order}, results.created_at DESC LIMIT ? OFFSET ?", [*args, limit, offset])
+        listed = []
+        for row in rows:
+            entry = dict(row)
+            errors = json.loads(entry.pop("errors")) if entry["errors"] else {}
+            entry["success"] = bool(entry["success"])
+            entry["from_cache"] = bool(entry["from_cache"])
+            entry["error"] = None if entry["success"] else _main_error(errors)
+            listed.append(entry)
+        return listed
+
+    def count_results(self, **criteria) -> int:
+        where, args = self._result_filters(**criteria)
+        join = " JOIN jobs ON jobs.id = results.job_id" if criteria.get("output_format") else ""
+        return self.query(f"SELECT COUNT(*) FROM results{join}{where}", args)[0][0]
+
+    def _search_filters(self, query: Optional[str] = None, provider: Optional[str] = None,
+                        status: Optional[str] = None, since: Optional[float] = None,
+                        until: Optional[float] = None) -> tuple[str, list[Any]]:
+        """`status`: "ok" (answered), "failed" (anything else), or an HTTP status code."""
+        clauses: list[str] = []
+        args: list[Any] = []
+        if query:
+            clauses.append("(searches.query LIKE ? OR searches.summary LIKE ?)")
+            args += [f"%{query}%", f"%{query}%"]
+        if provider:
+            clauses.append("searches.provider = ?")
+            args.append(provider)
+        if status == "ok":
+            clauses.append("searches.status = 200")
+        elif status == "failed":
+            clauses.append("searches.status != 200")
+        elif status and status.isdigit():
+            clauses.append("searches.status = ?")
+            args.append(int(status))
+        if since is not None:
+            clauses.append("searches.created_at >= ?")
+            args.append(since)
+        if until is not None:
+            clauses.append("searches.created_at <= ?")
+            args.append(until)
+        return (f" WHERE {' AND '.join(clauses)}" if clauses else ""), args
+
+    def list_searches(self, limit: int = 50, offset: int = 0, sort: str = "newest",
+                      **criteria) -> list[dict]:
+        """The recorded search requests, newest first unless `sort` (a key of
+        `SEARCH_SORTS`) says otherwise."""
+        where, args = self._search_filters(**criteria)
+        order = SEARCH_SORTS.get(sort, SEARCH_SORTS["newest"])
+        rows = self.query(
+            "SELECT rowid AS id, created_at, provider, status, results, query, summary, "
+            f"error, duration, urls FROM searches{where} "
+            f"ORDER BY {order}, created_at DESC LIMIT ? OFFSET ?", [*args, limit, offset])
+        listed = []
+        for row in rows:
+            entry = dict(row)
+            entry["query"] = json.loads(entry["query"]) if entry["query"] else None
+            entry["urls"] = json.loads(entry["urls"]) if entry["urls"] else []
+            listed.append(entry)
+        return listed
+
+    def count_searches(self, **criteria) -> int:
+        where, args = self._search_filters(**criteria)
+        return self.query(f"SELECT COUNT(*) FROM searches{where}", args)[0][0]
+
+    def search_stats(self) -> dict:
+        """All searches recorded, and how many of them failed."""
+        total, failed = self.query("SELECT COUNT(*), COALESCE(SUM(status != 200), 0) FROM searches")[0]
+        return {"searches": total, "failed": failed}
+
+    def search_providers(self) -> list[str]:
+        """Every provider ever searched with here, for the filter dropdown."""
+        return [row[0] for row in self.query(
+            "SELECT DISTINCT provider FROM searches ORDER BY provider")]
+
     def close(self) -> None:
         with self._read_lock:
             self._reader.close()
@@ -635,10 +764,11 @@ def _truncate(content: dict) -> dict:
     """Caps the stored text fields, marking what was cut so the UI can say so."""
     content = dict(content)
     content["truncated"] = []
+    limit = int(get_setting("job_max_stored_kb", MAX_STORED_CONTENT // 1024)) * 1024
     for field in ("html", "markdown", "multimodal"):
         value = content.get(field)
-        if isinstance(value, str) and len(value) > MAX_STORED_CONTENT:
-            content[field] = value[:MAX_STORED_CONTENT]
+        if isinstance(value, str) and len(value) > limit:
+            content[field] = value[:limit]
             content["truncated"].append(field)
     return content
 
@@ -652,7 +782,27 @@ SORTS = {
     "most_urls": "jobs.url_count DESC",
     "fewest_urls": "jobs.url_count ASC",
     "most_failed": "jobs.failed DESC",
+    "fewest_failed": "jobs.failed ASC",
 }
+
+# The same for single retrievals and for searches
+RESULT_SORTS = {
+    "newest": "results.created_at DESC",
+    "oldest": "results.created_at ASC",
+    "slowest": "results.retrieval_time IS NULL, results.retrieval_time DESC",
+    "fastest": "results.retrieval_time IS NULL, results.retrieval_time ASC",
+}
+SEARCH_SORTS = {
+    "newest": "searches.created_at DESC",
+    "oldest": "searches.created_at ASC",
+    "slowest": "searches.duration IS NULL, searches.duration DESC",
+    "fastest": "searches.duration IS NULL, searches.duration ASC",
+    "most_results": "searches.results IS NULL, searches.results DESC",
+    "fewest_results": "searches.results IS NULL, searches.results ASC",
+}
+
+# The result URLs kept of a search, for the history to show (Serper gives up to 100)
+MAX_STORED_SEARCH_URLS = 100
 
 # URLs listed per job in the overview; the detail view has them all
 URL_PREVIEW = 5

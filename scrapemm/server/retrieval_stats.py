@@ -34,6 +34,20 @@ NO_METHOD = "(none)"  # Failed retrievals: no method delivered anything
 NO_KEY = "(none)"  # Jobs without a key: test runs, and retrievals before keys were recorded
 OTHER = "Other"
 TOP_DOMAINS = 8
+# The retrieval time histogram: bins of this many seconds up to the limit, and one beyond
+TIME_BIN_SECONDS = 5
+TIME_HISTOGRAM_LIMIT = 60
+
+
+def _time_histogram(times: list[float]) -> list[dict]:
+    """How many retrievals took 0-5 s, 5-10 s, ... 55-60 s, and 60 s or more."""
+    bins = TIME_HISTOGRAM_LIMIT // TIME_BIN_SECONDS
+    counts = [0] * (bins + 1)
+    for t in times:
+        counts[min(int(t // TIME_BIN_SECONDS), bins)] += 1
+    return [{"from": i * TIME_BIN_SECONDS,
+             "to": (i + 1) * TIME_BIN_SECONDS if i < bins else None,
+             "count": n} for i, n in enumerate(counts)]
 
 
 def _bucket_start(t: float, size: int, offset: int, anchor: int) -> int:
@@ -194,6 +208,8 @@ def retrieval_stats(store, bucket: Bucket = "day", group: Group = "outcome",
             "median_queue_time": statistics.median(t for v in waits for t in v)
             if any(waits) else None,
         },
+        # Retrieved URLs, cache hits excluded, like the median above
+        "time_histogram": _time_histogram([t for v in times for t in v]),
         "methods": sorted(
             ({"method": m, "count": len(v), "median_time": statistics.median(v),
               "p90_time": _percentile(v, 0.9)} for m, v in by_method.items()),

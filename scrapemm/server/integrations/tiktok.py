@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+from typing import Optional
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
@@ -16,9 +17,9 @@ from scrapemm.common.exceptions import (AccessBlockedError, RateLimitError, Retr
 from scrapemm.server.download import download_image
 from scrapemm.server.integrations.base import RetrievalIntegration
 from scrapemm.server.integrations import decodo
-from scrapemm.server.integrations.ytdlp import download_video_with_ytdlp
+from scrapemm.server.integrations.ytdlp import VIDEO_OMITTED, download_video_with_ytdlp
 from scrapemm.server.secrets import get_secret
-from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
+from scrapemm.common.scraping_response import ScrapedContent, OutputFormat, utc_iso
 from scrapemm.server.util import to_scraped_content, preprocess_html
 
 logger = logging.getLogger("scrapeMM")
@@ -51,6 +52,7 @@ class TikTok(RetrievalIntegration):
     """
 
     name = "TikTok"
+    post_media = True
     domains = ["tiktok.com"]
 
     async def _connect(self):
@@ -96,7 +98,12 @@ class TikTok(RetrievalIntegration):
                 return await self._get_user_profile(url, session)
         except Exception as e:
             if "Your IP address is blocked from accessing this post" in str(e):
-                raise AccessBlockedError(f"TikTok prevents your IP address from accessing the post {url}")
+                # TikTok says so also for posts it withholds from everybody (restricted or
+                # taken down): one refused from proxies in three countries and from a
+                # residential address alike (October 2026). The proxies are tried all the same
+                raise AccessBlockedError(f"TikTok refuses the post {url} to this IP address. If it "
+                                         f"does so through the proxies too, the post is most likely "
+                                         f"restricted or taken down.")
             elif "This post may not be comfortable for some audiences" in str(e):
                 raise AccessBlockedError("Video is blocked by TikTok for being 'uncomfortable for some audiences'.")
             else:
@@ -117,8 +124,10 @@ class TikTok(RetrievalIntegration):
                 download_video_with_ytdlp(url, session, max_video_size=max_video_size),
             )
 
-            sequence = await self._create_video_sequence_from_api(video_data or metadata, video, thumbnail)
-            return ScrapedContent(multimodal=sequence)
+            sequence = await self._create_video_sequence_from_api(
+                video_data or metadata, video, thumbnail,
+                omitted=(metadata or {}).get(VIDEO_OMITTED))
+            return ScrapedContent(multimodal=sequence, published_at=utc_iso(self._created_at(video_id)))
 
         except (RetrievalFailed, AccessBlockedError, TargetUnavailableError, RateLimitError):
             raise  # Already says what went wrong (yt-dlp's failures are classified)
@@ -312,8 +321,10 @@ class TikTok(RetrievalIntegration):
         return ScrapedContent(multimodal=sequence)
 
     async def _create_video_sequence_from_api(self, metadata: dict, video: Video | None,
-                                              thumbnail: Image | None) -> MultimodalSequence:
-        """Creates MultimodalSequence from API data."""
+                                              thumbnail: Image | None,
+                                              omitted: Optional[str] = None) -> MultimodalSequence:
+        """Creates MultimodalSequence from API data. `omitted` says why the video is
+        missing, if it was left out (see `ytdlp.VIDEO_OMITTED`)."""
         # Extract relevant metadata (coming from either TikTok Research API or yt-dlp)
         username = metadata.get('username') or metadata.get('uploader', 'Unknown')
         description = metadata.get('video_description') or metadata.get('description', '')
@@ -329,13 +340,14 @@ class TikTok(RetrievalIntegration):
 
         hashtags_text = f"Hashtags: {', '.join(['#' + tag for tag in hashtags])}" if hashtags else ""
         voice_text = f"Voice transcription: {voice_to_text}" if voice_to_text else ""
+        omitted_text = f"\nVideo omitted: {omitted}" if omitted else ""
 
         text = f"""**TikTok Video** (API data)
 Author: @{username}
 Posted: {create_time}
 Duration: {duration}s
 Region: {region_code}
-Views: {view_count:,} - Likes: {like_count:,} - Comments: {comment_count:,} - Shares: {share_count:,}
+Views: {view_count:,} - Likes: {like_count:,} - Comments: {comment_count:,} - Shares: {share_count:,}{omitted_text}
 {hashtags_text}
 
 {description}
@@ -364,7 +376,7 @@ Views: {view_count:,} - Likes: {like_count:,} - Comments: {comment_count:,} - Sh
 
         avatar = None
         if avatar_url:
-            avatar = await download_image(avatar_url, session, ignore_small_images=False)
+            avatar = await download_image(avatar_url, session)  # Kept only if large enough
 
         text = f"""**TikTok Profile**
 User: {display_name} (@{username})

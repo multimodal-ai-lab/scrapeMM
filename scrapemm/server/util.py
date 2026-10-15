@@ -26,8 +26,11 @@ from markdownify import MarkdownConverter
 from playwright.async_api import APIRequestContext, Page, Frame
 
 from scrapemm.server import budget
+from scrapemm.server.config import get_setting
+from scrapemm.server.domains import is_public_suffix
 from scrapemm.server.download import download_video, download_image
-from scrapemm.server.download.images import _is_svg, image_from_binary, image_size
+from scrapemm.server.download.images import (min_media_side, _is_svg, image_from_binary,
+                                             image_size, is_too_small)
 from scrapemm.server.download.util import (
     looks_like_image_file_url,
     looks_like_vector_file_url,
@@ -35,20 +38,22 @@ from scrapemm.server.download.util import (
     looks_like_video_embed_url,
 )
 from scrapemm.server.download.browser import BrowserMedia, BLOB_ATTR, BLOB_SCHEME, CURRENT_ATTR
-from scrapemm.server.download.videos import _resolve_ffmpeg_path, _resolve_ffprobe_path
+from scrapemm.server.download.videos import (_resolve_ffmpeg_path, _resolve_ffprobe_path,
+                                             is_too_small_video)
 
 if TYPE_CHECKING:
     from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
 
 logger = logging.getLogger("scrapeMM")
 
-DOMAIN_REGEX = r"(?:https?:\/\/)?(?:www\.)?([-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6})/?"
+DOMAIN_REGEX = r"(?:https?:\/\/)?(?:www\.)?([-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,63})/?"
 
 
 # Hosts whose URLs only work in another form, by host. www.malayalam.factcrescendo.com
 # answers every URL with a redirect to a host that does not exist
 # (https://malayalam.factcrescendo.comslug: the slash lost); without the www. the page
 # is served. Retrieving it as given sent every method after the dead end in turn.
+KEEP_ENCODED = re.compile(r"^https?://(?:www\.)?(?:megalodon\.jp|gyo\.tc)(?=[/:?#]|$)", re.IGNORECASE)
 HOST_FIXES = {"www.malayalam.factcrescendo.com": "malayalam.factcrescendo.com"}
 _HOST_FIX_REGEX = re.compile(
     r"^(https?://)(" + "|".join(re.escape(host) for host in HOST_FIXES) + r")(?=[/:?#]|$)",
@@ -59,8 +64,47 @@ def preprocess_url(url: str) -> str:
     """Decodes a URL and removes unwanted symbols from it such
     as surrounding whitespace, non-breaking spaces, etc. A host that is known to need
     another form is given it (see `HOST_FIXES`)."""
-    url = unquote(str(url)).strip()
-    return _HOST_FIX_REGEX.sub(lambda m: m.group(1) + HOST_FIXES[m.group(2).lower()], url, count=1)
+    url = str(url).strip()
+    # A Megalodon address holds the archived URL as it is, its own encoded parts included
+    # (an embed's `href=https%3A%2F%2F...%26id%3D...`): decoded, it names another address
+    # and Megalodon has no capture of it (see `integrations.megalodon`)
+    if not KEEP_ENCODED.match(url):
+        # In the query, characters with a meaning there stay encoded: decoded, a "%2B"
+        # would become a "+", which the server reads as a space (eci.gov.in's tokens)
+        path, mark, query = url.partition("?")
+        url = (unquote(path) + mark + unquote(_RESERVED_ESCAPE.sub(r"%25\1", query))).strip()
+    url = _HOST_FIX_REGEX.sub(lambda m: m.group(1) + HOST_FIXES[m.group(2).lower()], url, count=1)
+    return _site_rewrite(url)
+
+
+_RESERVED_ESCAPE = re.compile(r"%(2[Bb]|26|3[Dd]|23|3[Ff]|25|2[Ff])")  # + & = # ? % /
+# The Wayback Machine's address of a capture whose "https://" collapsed to "https:/"
+_WAYBACK_COLLAPSED = re.compile(r"^(https?://web\.archive\.org/web/[^/]+/)(https?:)/(?!/)", re.IGNORECASE)
+# A law on zakon.rada.gov.ua, not one of its sub-pages: its text is loaded by script, its
+# print view has it in the page
+_ZAKON_LAW = re.compile(r"^(https?://zakon\.rada\.gov\.ua/laws/show/)(?!.*/(?:card|print|conv|info|stru|"
+                        r"links|anot|ed\d{8})(?:[#?/]|$))([^#?]+?)/?(#.*)?$", re.IGNORECASE)
+# A judgment in HUDOC's app, named in its fragment ({"itemid":["001-224984"]}): the app
+# renders it by script, the document endpoint serves it as HTML
+_HUDOC_ITEM = re.compile(r'^https?://hudoc\.echr\.coe\.int/.*?(?:"itemid"\s*:\s*\[\s*"|[?&]i=)(\d{3}-\d+)',
+                         re.IGNORECASE)
+# A Telegram post as TGStat shows it (behind a login wall for this server): the same
+# post, from Telegram itself
+_TGSTAT_POST = re.compile(r"^https?://(?:www\.)?tgstat\.(?:ru|com)/(?:[a-z]{2}/)?channel/@([A-Za-z0-9_]{4,})/(\d+)/?(?:[?#].*)?$",
+                          re.IGNORECASE)
+
+
+def _site_rewrite(url: str) -> str:
+    """The address that serves the content of `url` better, for the few sites that have
+    one; `url` itself otherwise."""
+    url = _WAYBACK_COLLAPSED.sub(r"\1\2//", url)
+    if match := _ZAKON_LAW.match(url):
+        return f"{match.group(1)}{match.group(2)}/print{match.group(3) or ''}"
+    if match := _HUDOC_ITEM.match(url):
+        return f"https://hudoc.echr.coe.int/app/conversion/docx/html/body?library=ECHR&id={match.group(1)}"
+    if match := _TGSTAT_POST.match(url):
+        return f"https://t.me/{match.group(1)}/{match.group(2)}"
+    return url
 
 
 def get_domain(url: str, keep_subdomain: bool = False) -> Optional[str]:
@@ -71,9 +115,14 @@ def get_domain(url: str, keep_subdomain: bool = False) -> Optional[str]:
     if match:
         domain = match.group(1)
         if not keep_subdomain:
-            # Keep only second-level and top-level domain
-            domain = '.'.join(domain.split('.')[-2:])
+            # The registrable domain: the second-level and top-level domain, or three
+            # levels under a country's public second level (rada.gov.ua, bbc.co.uk), lest
+            # all of gov.ua share one CAPTCHA challenge, blacklisting and browser slot
+            labels = domain.split('.')
+            keep = 3 if len(labels) >= 3 and is_public_suffix('.'.join(labels[-2:])) else 2
+            domain = '.'.join(labels[-keep:])
         return domain
+
 
 
 async def run_with_semaphore(tasks: Iterable[Awaitable],
@@ -122,8 +171,6 @@ def read_urls_from_file(file_path):
         return f.read().splitlines()
 
 
-MAX_MEDIA_PER_PAGE = 32
-
 # Threads for parsing and converting HTML: CPU-bound pure Python, so off the event loop,
 # but few, as each one holds the GIL the loop needs as well (see `decode_image()`)
 _html_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="html")
@@ -142,8 +189,6 @@ MAX_MEDIA_PER_HOST = 2
 # (thequint.com, over a trickling ad video; perma.cc/75EG-E5GK). In a browser retrieval,
 # what is left of its budget caps this further (see `budget.cap()`).
 MAX_SECONDS_PER_MEDIUM = 100
-# Images with a shorter side are icons, logos and spacers, not content
-MIN_IMAGE_SIDE = 256
 URL_REGEX = r"https?:\/\/(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9@:%_\+.~#?&//=]*)"
 DATA_URI_REGEX = r"data:([\w/+.-]+/[\w.+-]+);base64,([A-Za-z0-9+/=]+)"
 MD_HYPERLINK_REGEX = rf'(!?\[([^]^[]*)\]\((.*?)(?: "[^"]*")?\))'
@@ -274,8 +319,13 @@ def _remove_ui_elements(html: str) -> tuple[str, list[str]]:
             continue
         if id(element) in keep:
             continue  # Is or wraps the main content
-        if element.name == "header" and element.find_parent("article"):
-            continue  # An article's own header: its headline and byline
+        if element.name == "header" and (element.find_parent("article")
+                                         or any(map(_is_main_content, element.parents))):
+            # An article's own header: its headline and byline. Inside the main content
+            # too, which is where pages without an <article> put it (news.uzh.ch: date,
+            # title, teaser and author in a <header> in <main>); the site's banner is
+            # outside it
+            continue
         removed_media += [str(m["src"]) for m in _extract_media_elements(element) if m.get("src")]
         element.decompose()
         removed_any = True
@@ -446,11 +496,11 @@ def _is_placeholder_src(src: str) -> bool:
 
 
 def _shown_small(element: Tag) -> bool:
-    """Whether the page sizes the image as an icon: a width or height attribute of at
-    most 256 pixels (the size below which images are dropped anyway)."""
+    """Whether the page sizes the image as an icon: a width or height attribute of less
+    than `MIN_MEDIA_SIDE` pixels (the size below which media are dropped anyway)."""
     for attribute in ("width", "height"):
         value = str(element.get(attribute) or "").strip().removesuffix("px")
-        if value.isdigit() and int(value) <= 256:
+        if value.isdigit() and int(value) < min_media_side():
             return True
     return False
 
@@ -693,7 +743,8 @@ async def _resolve_media_in(
         **kwargs
 ) -> bool:
     """Downloads all media that are contained in the parsed HTML.
-    Removes images that are smaller than 256 x 256. Replaces the
+    Removes images and videos that are smaller than the minimum size (`MIN_MEDIA_SIDE`
+    pixels on a side, 128 x 128). Replaces the
     respective HTML elements with their proper item reference, in place. Returns
     whether the HTML had any media elements (and was changed).
 
@@ -792,18 +843,10 @@ async def _resolve_media_in(
 
     # 4. Download media, at most a few at a time from each host, like a browser does
     host_gates: dict[str, asyncio.Semaphore] = {}
+    skipped: list[str] = []  # Not waited for, as the retrieval's time was up
 
-    async def bounded(uri: str, task: Awaitable):
-        if uri in pageless:
-            # Not these: an embedded YouTube video may queue for minutes behind the
-            # others (YouTube's pacing), and still arrive
-            return await task
-        seconds = budget.cap(MAX_SECONDS_PER_MEDIUM)
-        try:
-            return await asyncio.wait_for(task, seconds)
-        except TimeoutError:
-            logger.info(f"Gave up on the medium {uri[:120]} after {seconds:.0f} s.")
-            return None
+    def bounded(uri: str, task: Awaitable):
+        return _wait_for_medium(uri, task, pageless, skipped)
 
     async def gated(uri: str, task: Awaitable):
         if uri in in_browser:
@@ -833,6 +876,10 @@ async def _resolve_media_in(
             if inspect.iscoroutine(task) and inspect.getcoroutinestate(task) == inspect.CORO_CREATED:
                 task.close()
 
+    if skipped:
+        logger.info(f"Left out {len(skipped)} media of {url or 'the page'}: the retrieval's "
+                    f"time was up (e.g. {skipped[0][:100]}).")
+
     # 5. Add downloaded media to resolved_media
     if known_media is not None:
         url_to_medium = known_media
@@ -843,6 +890,27 @@ async def _resolve_media_in(
     # 6. Replace or remove elements in the SOUP
     await _in_html_thread(_replace_media_elements, media_elements, media_uris, resolved_media)
     return True
+
+
+async def _wait_for_medium(uri: str, task: Awaitable, pageless: set[str], skipped: list[str]):
+    """Waits for one medium, at most `MAX_SECONDS_PER_MEDIUM` and no longer than the
+    retrieval has time for. One whose wait would start when the time is up is not waited
+    for at all (added to `skipped`): the page comes back without it."""
+    if uri in pageless:
+        # Not these: an embedded YouTube video may queue for minutes behind the
+        # others (YouTube's pacing), and still arrive
+        return await task
+    seconds = budget.cap(float(get_setting("max_seconds_per_medium", MAX_SECONDS_PER_MEDIUM)))
+    if seconds <= 0:
+        skipped.append(uri)
+        if inspect.iscoroutine(task):
+            task.close()
+        return None
+    try:
+        return await asyncio.wait_for(task, seconds)
+    except TimeoutError:
+        logger.info(f"Gave up on the medium {uri[:120]} after {seconds:.0f} s.")
+        return None
 
 
 def _replace_media_elements(media_elements: list[Tag], media_uris: list[Optional[str]],
@@ -859,7 +927,8 @@ def _replace_media_elements(media_elements: list[Tag], media_uris: list[Optional
         has_child_tags = any(getattr(child, "name", None) for child in element.children)
 
         if medium:
-            too_small = isinstance(medium, Image) and min(image_size(medium)) < MIN_IMAGE_SIDE
+            too_small = ((isinstance(medium, Image) and is_too_small(*image_size(medium)))
+                         or (isinstance(medium, Video) and is_too_small_video(medium)))
 
             if not too_small:
                 if uri and uri in inserted_url_refs:
@@ -1060,14 +1129,41 @@ def html2md(html: str | MultimodalSequence) -> str:
     return soup2md(BeautifulSoup(str(html), "html.parser"))
 
 
+# Deepest nesting of elements Markdown conversion copes with. markdownify recurses once
+# or twice per level, and Python stops at a depth of 1000: a page nested deeper failed
+# every method (12 times in an hour in production)
+MAX_MARKDOWN_DEPTH = 200
+
+
 def soup2md(soup: BeautifulSoup) -> str:
-    """Converts parsed HTML to Markdown, leaving the tree as is."""
+    """Converts parsed HTML to Markdown, leaving the tree as is -- unless it is nested
+    too deeply to convert, which then gets flattened (see `_flatten_deep_nesting()`)."""
+    converter = MarkdownConverter(heading_style="ATX")
     try:
-        markdown = MarkdownConverter(heading_style="ATX").convert_soup(soup)
-        return postprocess_markdown(markdown)
+        markdown = converter.convert_soup(soup)
     except RecursionError:
-        logger.debug("RecursionError while converting HTML to Markdown.")
-        raise
+        flattened = _flatten_deep_nesting(soup, MAX_MARKDOWN_DEPTH)
+        logger.info(f"Flattened {flattened} elements nested too deeply to convert to Markdown.")
+        markdown = converter.convert_soup(soup)
+    return postprocess_markdown(markdown)
+
+
+def _flatten_deep_nesting(soup: BeautifulSoup, max_depth: int) -> int:
+    """Unwraps the elements nested deeper than `max_depth`, so that their content moves up
+    to the ancestor at that depth. Text, links and media stay; only the wrappers' own
+    formatting goes. Without recursion itself, or it would fail the same way. Returns the
+    number of elements unwrapped."""
+    depths: dict[int, int] = {}
+    deep = []
+    for tag in soup.find_all(True):  # In document order: a parent before its children
+        depth = depths.get(id(tag.parent), 0) + 1
+        depths[id(tag)] = depth
+        # Childless elements (images, line breaks) add no depth, and are content
+        if depth > max_depth and tag.name != "a" and tag.contents:
+            deep.append(tag)
+    for tag in reversed(deep):  # The deepest first, so each moves up into one going next
+        tag.unwrap()
+    return len(deep)
 
 
 def sanitize(text: str) -> str:
@@ -1088,13 +1184,14 @@ def from_base64(b64_data: str, mime_type: str = "image/jpeg", url: str | None = 
                 # size of its own; rasterizing it decides.
                 if not _is_svg(binary_data):
                     with PIL.Image.open(BytesIO(binary_data)) as header:  # Reads the header only
-                        if min(header.size) < MIN_IMAGE_SIDE:
+                        if is_too_small(*header.size):
                             return None
-                # Downscaled like any downloaded image: a huge inline one otherwise
-                # took hundreds of MB
-                return image_from_binary(binary_data, source_url=url, ignore_small_images=False)
+                # Downscaled like any downloaded image (a huge inline one otherwise took
+                # hundreds of MB), and then held to the same minimum
+                return image_from_binary(binary_data, source_url=url)
             elif mime_type.startswith("video/"):
-                return Video(binary_data=binary_data, source_url=url)
+                video = Video(binary_data=binary_data, source_url=url)
+                return None if is_too_small_video(video) else video
             else:
                 raise ValueError(f"Unsupported base64 mime type: {mime_type}")
     except binascii.Error:  # base64 validation failed

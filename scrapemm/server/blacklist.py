@@ -9,6 +9,7 @@ from typing import Optional
 import yaml
 
 from scrapemm.common.paths import APP_NAME
+from .domains import is_public_suffix
 from .paths import BLACKLIST_PATH
 
 logger = logging.getLogger(APP_NAME)
@@ -88,6 +89,11 @@ class DomainBlacklist:
             self._domains = alive
             self._save()
 
+    def latest(self) -> Optional[float]:
+        """When the newest (non-expired) entry was added, None if there is none."""
+        self._prune()
+        return max((e["added"] for e in self._domains.values()), default=None)
+
     def __contains__(self, domain: str) -> bool:
         return self.reason(domain) is not None
 
@@ -104,7 +110,10 @@ class DomainBlacklist:
         except (OSError, yaml.YAMLError):
             logger.warning(f"Could not read the domain blacklist at {self.path}.", exc_info=True)
             return {}
-        return {domain: self._parse_entry(value) for domain, value in raw.items()}
+        # Not a public suffix (gov.ua), as blacklisted before domains were told apart
+        # under one: that entry would block every site under it (see `util.get_domain()`)
+        return {domain: self._parse_entry(value) for domain, value in raw.items()
+                if not is_public_suffix(domain)}
 
     @staticmethod
     def _parse_entry(value) -> dict:

@@ -77,18 +77,14 @@ onMounted(load)
 <template>
   <!-- Saved row by row, not by the page's save button: a secret is written the moment
        it is entered, so there is no draft to keep -->
-  <UCard id="secrets" class="scroll-mt-6">
-    <template #header>
-      <h2 class="font-medium flex items-center gap-2">
-        <UIcon name="i-fa7-solid-lock" class="size-4 text-primary" />
-        Secrets
-        <span v-if="!loading" class="text-xs text-muted font-normal">{{ counts.set }} of {{ counts.total }} set</span>
-      </h2>
-    </template>
+  <UCard>
     <div class="space-y-3">
-      <p class="text-sm text-muted">
-        The credentials the integrations need. Stored encrypted on the server and never
-        sent back to this page — you can replace a secret, not read it.
+      <p class="text-xs text-muted flex flex-wrap items-baseline gap-x-3">
+        <span class="flex-1 min-w-48">
+          Stored encrypted on the server and never sent back to this page — you can replace
+          a secret, not read it. Saved one by one, as they are entered.
+        </span>
+        <span v-if="!loading" class="tabular-nums">{{ counts.set }} of {{ counts.total }} set</span>
       </p>
 
       <UAlert v-if="error" color="error" variant="subtle" :description="error" />

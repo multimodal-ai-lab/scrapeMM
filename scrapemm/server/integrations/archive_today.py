@@ -55,7 +55,7 @@ from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError
 from scrapemm.server.config import get_config_var, update_config
 from scrapemm.server.paths import (SNAPSHOT_CACHE_PATH, PAGE_CACHE_DIR,
                                    BUFFER_PATH)
-from scrapemm.common.scraping_response import ScrapedContent
+from scrapemm.common.scraping_response import Capture, ScrapedContent
 from scrapemm.server.download.common import HEADERS as _DEFAULT_HEADERS
 from scrapemm.server.integrations.headed_browser import (HeadedBrowser, ContentTarget,
                                                         release_page, remote_view_hint)
@@ -496,12 +496,15 @@ class _RequestBuffer:
     def __init__(self, path: Path = BUFFER_PATH):
         self.path = path
         self._urls: Optional[list[str]] = None
+        # When a URL was last added. Not persisted: after a restart, the file's time
+        self.latest: Optional[float] = None
 
     def _load(self) -> list[str]:
         if self._urls is None:
             try:
                 loaded = json.loads(self.path.read_text(encoding="utf-8"))
                 self._urls = [u for u in loaded if isinstance(u, str)]
+                self.latest = self.path.stat().st_mtime if self._urls else None
             except (OSError, ValueError):
                 self._urls = []
         return self._urls
@@ -522,6 +525,7 @@ class _RequestBuffer:
         if url in urls:
             return
         urls.append(url)
+        self.latest = time.time()
         self._save()
         logger.info(f"📥 Buffered {url} for the next Archive.today session "
                     f"({len(urls)} waiting).")
@@ -639,7 +643,7 @@ async def identify_snapshot(url: str,
     """Resolves any Archive.today snapshot URL -- short (/uTVE4) or long
     (/2022.05.05-091515/https://...) on any mirror -- to its Snapshot. Returns None if
     the URL does not point to a snapshot or the snapshot does not exist."""
-    path = urlparse(url).path
+    path = urlparse(canonicalize_url(url)).path  # Also /wip/<id>, the capture in the making
     if match := SHORT_ID_REGEX.match(path):
         return await resolve_snapshot(match.group(1), session)
     if match := LONG_FORM_REGEX.match(path):
@@ -906,6 +910,19 @@ class ArchiveToday(HeadedBrowser):
                 return await self._screenshot_content(snapshot, session, output_format)
 
         raise CaptchaEncounteredError(GATE_HINT)
+
+    async def _capture(self, url: str, **kwargs) -> Capture:
+        """The snapshot's original URL and time, from cse.js: one request per snapshot
+        ever, as `identify_snapshot()` keeps what it found for good."""
+        try:
+            snapshot = await identify_snapshot(url, kwargs.get("session"))
+        except Exception as e:
+            logger.debug(f"Could not identify the Archive.today snapshot {url}: {e}")
+            snapshot = None
+        if snapshot is None:
+            return Capture(archive="Archive.today", archive_url=url)
+        return Capture(archive="Archive.today", original_url=snapshot.original_url,
+                       captured_at=snapshot.captured_at, archive_url=snapshot.canonical_url)
 
     async def _get_via_browser(self, url: str, **kwargs) -> ScrapedContent:
         """Browser fetch path, used when plain HTTP is decoyed on this machine or cannot
@@ -1231,6 +1248,11 @@ def get_archive_today_buffer() -> list[str]:
     """The snapshot URLs that were requested while the access check was up, oldest first.
     They are retrieved and cached the next time a session is established."""
     return _buffer.urls()
+
+
+def get_archive_today_latest() -> Optional[float]:
+    """When the newest URL was buffered, None if the buffer is empty."""
+    return _buffer.latest if _buffer.urls() else None
 
 
 def clear_archive_today_buffer() -> None:

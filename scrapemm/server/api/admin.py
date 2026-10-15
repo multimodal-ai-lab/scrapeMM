@@ -15,12 +15,12 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from scrapemm.common.paths import APP_NAME
-from .. import interrupts, registry, status as status_module
+from .. import interrupts, registry, slots, status as status_module
 from ..auth import Principal, require_admin, require_api_key
 from ..blacklist import blacklist
 from ..cache import cache, immutable, KINDS
-from ..config import SETTINGS, get_config, update_config
-from ..jobs import SORTS, jobs
+from ..config import SETTINGS, get_config, schema, update_config
+from ..jobs import RESULT_SORTS, SEARCH_SORTS, SORTS, jobs
 from ..toggles import set_enabled
 from ..secrets import (MANAGED_SECRETS, SECRETS, describe_secrets, remove_secret,
                        rotate_key, set_secret)
@@ -118,12 +118,13 @@ async def environment() -> dict:
 
 
 @router.get("/live")
-async def live() -> StreamingResponse:
+async def live(methods: bool = True) -> StreamingResponse:
     """The dashboard's live view as NDJSON: a header with every method, then the
     environment and each method's status whenever one of them changes, and a ping
-    every few seconds of silence. See `live.py` for how it is kept cheap."""
+    every few seconds of silence. See `live.py` for how it is kept cheap. With
+    `methods=false`, only the environment (for the UI's sidebar on any page)."""
     from ..live import hub
-    return StreamingResponse(hub.subscribe(), media_type="application/x-ndjson",
+    return StreamingResponse(hub.subscribe(methods), media_type="application/x-ndjson",
                              headers={"Cache-Control": "no-cache",
                                       "X-Accel-Buffering": "no"})
 
@@ -202,8 +203,12 @@ async def rotate_secrets_key() -> dict:
 
 @router.get("/config", dependencies=ADMIN)
 async def read_config() -> dict:
+    """The stored settings, their types, the schema the UI edits them by, and every
+    retrieval method's effective and default slots and cooldown (see `slots`)."""
     return {"config": get_config(),
-            "settings": {name: kind.__name__ for name, kind in SETTINGS.items()}}
+            "settings": {name: kind.__name__ for name, kind in SETTINGS.items()},
+            "schema": schema(),
+            "methods": slots.methods()}
 
 
 @router.patch("/config", dependencies=ADMIN)
@@ -221,6 +226,13 @@ async def patch_config(body: dict[str, Any]) -> dict:
         if value is None:
             coerced[name] = None
             continue
+        if name in (slots.SLOTS_KEY, slots.COOLDOWNS_KEY):
+            # Merged into the stored overrides: {method: None} resets just that method
+            try:
+                coerced[name] = slots.merge(name, get_config().get(name), value)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            continue
         try:
             coerced[name] = value if isinstance(value, expected) else expected(value)
         except (TypeError, ValueError):
@@ -229,6 +241,7 @@ async def patch_config(body: dict[str, Any]) -> dict:
                 detail=f"'{name}' expects {expected.__name__}, got {value!r}.")
 
     update_config(**coerced)
+    slots.refresh()  # Changed slots or cooldowns apply to those waiting already
     if {"job_retention_days", "max_jobs"} & coerced.keys():
         await asyncio.to_thread(jobs.prune)  # A lower limit applies at once
     return {"config": get_config()}
@@ -332,7 +345,7 @@ async def list_jobs(
                                        description="UNIX timestamp, inclusive"),
         sort: str = Query(default="newest",
                           description="newest, oldest, longest, shortest, most_urls, "
-                                      "fewest_urls or most_failed"),
+                                      "fewest_urls, most_failed or fewest_failed"),
         version: Optional[int] = Query(
             default=None,
             description="The version of an earlier answer. If the job history has not "
@@ -360,6 +373,69 @@ async def list_jobs(
             "stats": jobs.stats(),
             "methods": jobs.known_methods(),
         }
+    return await asyncio.to_thread(answer)
+
+
+@router.get("/retrievals")
+async def list_retrievals(
+        limit: int = Query(default=25, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+        url: Optional[str] = Query(default=None, description="Substring match on the URL"),
+        output_format: Optional[str] = Query(default=None),
+        method: Optional[str] = Query(default=None),
+        outcome: Optional[str] = Query(default=None, description="As for /v1/jobs"),
+        since: Optional[float] = Query(default=None, description="UNIX timestamp, inclusive"),
+        until: Optional[float] = Query(default=None, description="UNIX timestamp, inclusive"),
+        sort: str = Query(default="newest", description="newest, oldest, slowest or fastest"),
+        version: Optional[int] = Query(default=None, description="As for /v1/jobs"),
+) -> dict:
+    """The history one URL at a time: every retrieval of every job, as the UI's History
+    lists them under Retrievals."""
+    if version is not None and version == jobs.version:
+        return {"unchanged": True, "version": jobs.version}
+    if sort not in RESULT_SORTS:
+        raise HTTPException(status_code=400, detail=f"Unknown sort '{sort}'. Allowed: "
+                                                    f"{', '.join(RESULT_SORTS)}.")
+    criteria = dict(url=url, output_format=output_format, method=method, outcome=outcome,
+                    since=since, until=until)
+
+    def answer() -> dict:  # In a thread, as for /v1/jobs
+        return {"version": jobs.version,
+                "retrievals": jobs.list_results(limit=limit, offset=offset, sort=sort, **criteria),
+                "total": jobs.count_results(**criteria), "stats": jobs.stats(),
+                "methods": jobs.known_methods()}
+    return await asyncio.to_thread(answer)
+
+
+@router.get("/searches")
+async def list_searches(
+        limit: int = Query(default=25, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+        query: Optional[str] = Query(default=None, description="Substring match on the query"),
+        provider: Optional[str] = Query(default=None),
+        search_status: Optional[str] = Query(
+            default=None, alias="status",
+            description="ok, failed, or an HTTP status code (429: rate-limited, ...)"),
+        since: Optional[float] = Query(default=None, description="UNIX timestamp, inclusive"),
+        until: Optional[float] = Query(default=None, description="UNIX timestamp, inclusive"),
+        sort: str = Query(default="newest", description=", ".join(SEARCH_SORTS)),
+        version: Optional[int] = Query(default=None, description="As for /v1/jobs"),
+) -> dict:
+    """The search requests made through this server, as the UI's History lists them
+    under Searches. Queries are recorded since version 1.8.28; older rows have none."""
+    if version is not None and version == jobs.version:
+        return {"unchanged": True, "version": jobs.version}
+    if sort not in SEARCH_SORTS:
+        raise HTTPException(status_code=400, detail=f"Unknown sort '{sort}'. Allowed: "
+                                                    f"{', '.join(SEARCH_SORTS)}.")
+    criteria = dict(query=query, provider=provider, status=search_status, since=since,
+                    until=until)
+
+    def answer() -> dict:
+        return {"version": jobs.version,
+                "searches": jobs.list_searches(limit=limit, offset=offset, sort=sort, **criteria),
+                "total": jobs.count_searches(**criteria), "stats": jobs.search_stats(),
+                "providers": jobs.search_providers()}
     return await asyncio.to_thread(answer)
 
 

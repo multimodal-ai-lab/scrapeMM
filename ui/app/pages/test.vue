@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { HealthTone } from '~/composables/useHealth'
+
 /**
  * Measuring scrapeMM: one button runs the whole suite of known URLs as a job, the page
  * follows it live, and the run ends in a report of coverage and speed -- by category,
@@ -176,69 +178,68 @@ function secs(value: number | null | undefined) {
   return value == null ? '—' : seconds(value)
 }
 
-// Thresholds, the same wherever the measure appears: in a tile, a bar or a column
-type Tone = 'success' | 'warning' | 'error' | 'neutral'
-const TONE_COLOR: Record<Tone, string> = {
+// Colours for the thresholds, which are the same wherever a measure appears: here, on
+// the dashboard and in the sidebar's indicator for this page (see useHealth.ts)
+const TONE_COLOR: Record<HealthTone, string> = {
   success: 'var(--viz-good)', warning: 'var(--viz-warning)',
   error: 'var(--viz-critical)', neutral: 'var(--viz-seq)',
 }
 
-/** Up to 5 s is fast, up to 20 s acceptable, beyond that slow */
-function timeTone(value: number | null | undefined): Tone {
-  if (value == null) return 'neutral'
-  return value <= 5 ? 'success' : value <= 20 ? 'warning' : 'error'
-}
-
-/** Coverage: at least 90% is good, at least 70% acceptable, below that poor */
-function coverageTone(value: number | null | undefined): Tone {
-  if (value == null) return 'neutral'
-  return value >= 0.9 ? 'success' : value >= 0.7 ? 'warning' : 'error'
-}
-
-/** At least 95% is good, at least 80% acceptable, below that poor */
-function shareTone(value: number | null | undefined): Tone {
-  if (value == null) return 'neutral'
-  return value >= 0.95 ? 'success' : value >= 0.8 ? 'warning' : 'error'
-}
-
 /** The share of all expected images and videos that were found */
-const mediaShare = computed(() => {
+const mediaFound = computed(() => {
   const m = summary.value?.media
   if (!m) return null
   const expected = m.image.expected + m.video.expected
   return expected ? (m.image.found + m.video.found) / expected : null
 })
 
-const tiles = computed(() => {
+const coverageTiles = computed(() => {
   const s = summary.value
   if (!s) return []
   return [
     { label: 'Coverage', icon: 'i-fa7-solid-bullseye', value: percent(s.coverage), ring: s.coverage,
       detail: `${s.passed} of ${s.done} URLs with all expected media`,
       tone: coverageTone(s.coverage) },
+    { label: 'Media found', icon: 'i-fa7-solid-photo-film', value: percent(mediaFound.value),
+      ring: mediaFound.value, tone: shareTone(mediaFound.value),
+      detail: `${s.media.image.found + s.media.video.found} of ${s.media.image.expected + s.media.video.expected} expected images and videos` },
+  ]
+})
+
+const speedTiles = computed(() => {
+  const s = summary.value
+  if (!s) return []
+  return [
     { label: 'Median time', icon: 'i-fa7-solid-stopwatch', value: secs(s.time.median),
       detail: `90% within ${secs(s.time.p90)} · slowest ${secs(s.time.max)}`,
       tone: timeTone(s.time.median) },
-    { label: 'Media found', icon: 'i-fa7-solid-photo-film', value: percent(mediaShare.value),
-      ring: mediaShare.value, tone: shareTone(mediaShare.value),
-      detail: `${s.media.image.found + s.media.video.found} of ${s.media.image.expected + s.media.video.expected} expected images and videos` },
     { label: 'Throughput', icon: 'i-fa7-solid-gauge-high',
       value: s.throughput == null ? '—' : `${s.throughput.toFixed(1)}/min`,
-      detail: `${s.done} URLs in ${secs(s.elapsed)}`, tone: 'neutral' },
-  ] as const
+      detail: `${s.done} URLs in ${secs(s.elapsed)}`, tone: 'neutral' as const },
+  ]
 })
 
-/** How long retrievals took, in bins that stay readable from 1 s to a minute */
-const BINS = [[0, 2], [2, 5], [5, 10], [10, 20], [20, 30], [30, 60], [60, Infinity]] as const
+/** How long retrievals took, in equal bins of 5 s up to a minute, the rest in one */
+const BIN = 5
+const LAST_BIN = 60
 const timeHistogram = computed(() => {
   const times: number[] = summary.value?.time?.all || []
-  return BINS.map(([lo, hi]) => {
+  // Up to the slowest retrieval, but at least half a minute, so the axis stays put
+  const top = Math.min(LAST_BIN, Math.max(30, Math.ceil(Math.max(0, ...times) / BIN) * BIN))
+  const bins: { label: string, value: number, tooltip: string, color: string }[] = []
+  for (let lo = 0; lo < top; lo += BIN) {
+    const hi = lo + BIN
     const n = times.filter((t) => t >= lo && t < hi).length
-    const label = hi === Infinity ? `${lo}s+` : `${lo}–${hi}s`
-    // The bins break at 5 s and 20 s, so each one is wholly fast, acceptable or slow
-    return { label, value: n, tooltip: `${label}: ${n} URL${n === 1 ? '' : 's'}`,
-             color: TONE_COLOR[timeTone(hi === Infinity ? lo + 1 : hi)] }
-  })
+    // The bins break at 10 s and 20 s, so each one is wholly fast, acceptable or slow
+    bins.push({ label: `${lo}–${hi}s`, value: n, color: TONE_COLOR[timeTone(hi)],
+                tooltip: `${lo}–${hi}s: ${n} URL${n === 1 ? '' : 's'}` })
+  }
+  const over = times.filter((t) => t >= top).length
+  if (over) {
+    bins.push({ label: `${top}s+`, value: over, color: TONE_COLOR[timeTone(top + 1)],
+                tooltip: `${top}s and more: ${over} URL${over === 1 ? '' : 's'}` })
+  }
+  return bins
 })
 
 const categoryTimes = computed(() => (summary.value?.categories || [])
@@ -503,202 +504,261 @@ function media(record: Record<string, number> | undefined) {
         </template>
       </UAlert>
 
-      <!-- Headline figures -->
-      <!-- Four tiles in a row only where they have room for their figures -->
-      <div class="grid gap-2.5 grid-cols-2 lg:grid-cols-4">
-        <StatCard
-          v-for="t in tiles" :key="t.label" :label="t.label" :icon="t.icon"
-          :value="t.value" :detail="t.detail" :tone="t.tone" :ring="(t as any).ring"
-        />
-      </div>
+      <!-- Coverage on the left, speed on the right: each half reads top to bottom, from
+           the headline figures down to the detail and the trend -->
+      <div class="grid gap-4 lg:grid-cols-2 items-start">
+        <!-- Coverage -->
+        <section class="space-y-4 min-w-0">
+          <h2 class="text-xs font-semibold uppercase tracking-wider text-dimmed flex items-center gap-2">
+            <UIcon name="i-fa7-solid-bullseye" class="size-3.5" /> Coverage
+          </h2>
 
-      <!-- Progress and outcome split -->
-      <UCard>
-        <div class="space-y-3">
-          <VizOutcomeBar
-            :passed="summary.passed" :partial="summary.partial" :failed="summary.failed"
-            :pending="summary.total - summary.done" :height="18" :active="live"
-          />
-          <!-- The legend, with the numbers: identity never rests on colour alone -->
-          <div class="flex flex-wrap gap-x-5 gap-y-1 text-sm">
-            <span v-for="(o, key) in OUTCOME" :key="key" class="inline-flex items-center gap-1.5">
-              <UIcon :name="o.icon" class="size-3.5" :style="{ color: o.color }" />
-              <span class="text-muted">{{ o.label }}</span>
-              <span class="text-highlighted tabular-nums">{{ summary[key] }}</span>
-            </span>
-            <span v-if="summary.total > summary.done" class="inline-flex items-center gap-1.5">
-              <span class="size-3 rounded-sm" style="background: var(--viz-track)" />
-              <span class="text-muted">Pending</span>
-              <span class="text-highlighted tabular-nums">{{ summary.total - summary.done }}</span>
-            </span>
-          </div>
-        </div>
-      </UCard>
-
-      <div class="grid gap-4 lg:grid-cols-2">
-        <!-- Coverage by category -->
-        <UCard>
-          <template #header><h2 class="font-medium text-sm">Coverage by category</h2></template>
-          <div class="space-y-2.5">
-            <div
-              v-for="c in categoryRows" :key="c.category"
-              class="grid grid-cols-[auto_minmax(0,9rem)_1fr_auto] items-center gap-3 text-sm"
-            >
-              <UIcon
-                :name="CATEGORY_LOOK[c.status as CategoryStatus].icon" class="size-3.5"
-                :class="{ 'animate-spin': c.status === 'running' }"
-                :style="{ color: CATEGORY_LOOK[c.status as CategoryStatus].color }"
-                :title="CATEGORY_LOOK[c.status as CategoryStatus].label"
-              />
-              <span class="truncate text-muted" :title="c.category">{{ c.category }}</span>
-              <VizOutcomeBar
-                :passed="c.passed" :partial="c.partial" :failed="c.failed"
-                :pending="c.pending" :active="c.status === 'running'"
-              />
-              <span
-                class="tabular-nums text-xs text-highlighted w-10 text-right"
-                :title="`${c.passed} of ${c.total} passed`"
-              >
-                {{ c.passed }}/{{ c.total }}
-              </span>
-            </div>
-          </div>
-        </UCard>
-
-        <!-- Speed -->
-        <UCard>
-          <template #header>
-            <div class="flex items-baseline justify-between gap-2">
-              <h2 class="font-medium text-sm">How long retrievals took</h2>
-              <span class="text-xs text-dimmed cursor-help" :title="RETRIEVAL_TIME_MEANING">
-                URLs per time range, from their first request
-              </span>
-            </div>
-          </template>
-          <VizColumnChart :items="timeHistogram" />
-          <div class="mt-4 space-y-2">
-            <h3 class="text-xs font-semibold uppercase tracking-wider text-dimmed">Median time by category</h3>
-            <VizBarList :items="categoryTimes" />
-          </div>
-        </UCard>
-
-        <!-- What changed: the regressions are what a run is for finding -->
-        <UCard>
-          <template #header>
-            <div class="flex items-baseline justify-between gap-2">
-              <h2 class="font-medium text-sm">Since the previous run</h2>
-              <span
-                v-if="changes?.delta != null" class="text-xs tabular-nums"
-                :class="changes.delta > 0.0005 ? 'text-success'
-                  : changes.delta < -0.0005 ? 'text-error' : 'text-dimmed'"
-                :title="`Coverage of the previous run: ${percent(changes.coverageBefore)}`"
-              >
-                coverage {{ changes.delta > 0 ? '+' : '' }}{{ (changes.delta * 100).toFixed(1) }} pp
-              </span>
-            </div>
-          </template>
-          <p v-if="!previousId" class="text-sm text-muted">No earlier run to compare with.</p>
-          <USkeleton v-else-if="!changes" class="h-16 w-full" />
-          <div v-else class="space-y-4">
-            <p class="text-xs text-dimmed">
-              {{ changes.compared }} URL{{ changes.compared === 1 ? '' : 's' }} retrieved in
-              both<template v-if="live"> so far</template>: {{ changes.worse.length }} worse,
-              {{ changes.better.length }} better, the rest unchanged.
-            </p>
-            <div v-for="group in changeGroups" :key="group.key">
-              <h3 class="text-xs font-semibold uppercase tracking-wider text-dimmed mb-1.5">
-                {{ group.title }}
+          <UCard>
+            <template #header>
+              <h3 class="font-medium text-sm flex items-center gap-2">
+                <UIcon name="i-fa7-solid-layer-group" class="size-3.5 text-dimmed" />
+                Coverage by category
               </h3>
-              <div class="space-y-1 max-h-48 overflow-y-auto">
-                <div v-for="r in group.items" :key="r.url" class="flex items-center gap-2 min-w-0 text-sm">
-                  <span
-                    class="inline-flex items-center gap-0.5 shrink-0"
-                    :title="`${look(r.was).label} before, ${look(r.outcome).label.toLowerCase()} now`"
-                  >
-                    <UIcon :name="look(r.was).icon" class="size-3" :style="{ color: look(r.was).color }" />
-                    <UIcon name="i-fa7-solid-arrow-right" class="size-2.5 text-dimmed" />
-                    <UIcon :name="look(r.outcome).icon" class="size-3" :style="{ color: look(r.outcome).color }" />
+            </template>
+            <div class="space-y-5">
+              <div class="grid gap-2.5 sm:grid-cols-2">
+                <StatCard v-for="t in coverageTiles" :key="t.label" v-bind="t" />
+              </div>
+
+              <!-- Progress and outcome split -->
+              <div class="space-y-3">
+                <VizOutcomeBar
+                  :passed="summary.passed" :partial="summary.partial" :failed="summary.failed"
+                  :pending="summary.total - summary.done" :height="18" :active="live"
+                />
+                <!-- The legend, with the numbers: identity never rests on colour alone -->
+                <div class="flex flex-wrap gap-x-5 gap-y-1 text-sm">
+                  <span v-for="(o, key) in OUTCOME" :key="key" class="inline-flex items-center gap-1.5">
+                    <UIcon :name="o.icon" class="size-3.5" :style="{ color: o.color }" />
+                    <span class="text-muted">{{ o.label }}</span>
+                    <span class="text-highlighted tabular-nums">{{ summary[key] }}</span>
                   </span>
-                  <NuxtLink
-                    v-if="r.job_id || report.job_id"
-                    :to="{ path: `/jobs/${r.job_id || report.job_id}`, query: { result: r.url } }"
-                    class="flex min-w-0 hover:underline" title="Show the result in the job"
+                  <span v-if="summary.total > summary.done" class="inline-flex items-center gap-1.5">
+                    <span class="size-3 rounded-sm" style="background: var(--viz-track)" />
+                    <span class="text-muted">Pending</span>
+                    <span class="text-highlighted tabular-nums">{{ summary.total - summary.done }}</span>
+                  </span>
+                </div>
+              </div>
+
+              <div class="space-y-2.5 pt-1">
+                <div
+                  v-for="c in categoryRows" :key="c.category"
+                  class="grid grid-cols-[auto_minmax(0,9rem)_1fr_auto] items-center gap-3 text-sm"
+                >
+                  <UIcon
+                    :name="CATEGORY_LOOK[c.status as CategoryStatus].icon" class="size-3.5"
+                    :class="{ 'animate-spin': c.status === 'running' }"
+                    :style="{ color: CATEGORY_LOOK[c.status as CategoryStatus].color }"
+                    :title="CATEGORY_LOOK[c.status as CategoryStatus].label"
+                  />
+                  <span class="truncate text-muted" :title="c.category">{{ c.category }}</span>
+                  <VizOutcomeBar
+                    :passed="c.passed" :partial="c.partial" :failed="c.failed"
+                    :pending="c.pending" :active="c.status === 'running'"
+                  />
+                  <span
+                    class="tabular-nums text-xs text-highlighted w-10 text-right"
+                    :title="`${c.passed} of ${c.total} passed`"
                   >
-                    <UrlLabel :url="r.url" />
-                  </NuxtLink>
-                  <UrlLabel v-else :url="r.url" class="min-w-0" />
+                    {{ c.passed }}/{{ c.total }}
+                  </span>
+                </div>
+              </div>
+
+              <div class="space-y-2">
+                <h4 class="text-xs font-semibold uppercase tracking-wider text-dimmed">
+                  Expected media found
+                </h4>
+                <div
+                  v-for="(m, kind) in summary.media" :key="kind"
+                  class="grid grid-cols-[auto_minmax(0,9rem)_1fr_auto] items-center gap-3 text-sm"
+                >
+                  <UIcon
+                    :name="String(kind) === 'video' ? 'i-fa7-solid-film' : 'i-fa7-solid-image'"
+                    class="size-3.5 text-dimmed"
+                  />
+                  <span class="text-muted capitalize">{{ kind }}s</span>
+                  <div class="h-3 rounded-r-[4px] overflow-hidden" style="background: var(--viz-track)">
+                    <div
+                      class="h-full rounded-r-[4px] transition-[width] duration-500"
+                      :style="{ width: m.expected ? `${(m.found / m.expected) * 100}%` : '0%',
+                                background: TONE_COLOR[shareTone(m.expected ? m.found / m.expected : null)] }"
+                    />
+                  </div>
+                  <span class="tabular-nums text-xs text-highlighted">{{ m.found }} of {{ m.expected }}</span>
                 </div>
               </div>
             </div>
-          </div>
-        </UCard>
+          </UCard>
 
-        <!-- Failures and media -->
-        <UCard>
-          <template #header><h2 class="font-medium text-sm">Why URLs failed</h2></template>
-          <VizBarList :items="errorBars" :total="summary.failed" color="var(--viz-critical)" />
-          <div class="mt-5 space-y-2">
-            <h3 class="text-xs font-semibold uppercase tracking-wider text-dimmed">
-              Expected media found
-            </h3>
-            <div
-              v-for="(m, kind) in summary.media" :key="kind"
-              class="grid grid-cols-[minmax(0,9rem)_1fr_auto] items-center gap-3 text-sm"
-            >
-              <span class="text-muted capitalize">{{ kind }}s</span>
-              <div class="h-3 rounded-r-[4px] overflow-hidden" style="background: var(--viz-track)">
-                <div
-                  class="h-full rounded-r-[4px] transition-[width] duration-500"
-                  :style="{ width: m.expected ? `${(m.found / m.expected) * 100}%` : '0%',
-                            background: TONE_COLOR[shareTone(m.expected ? m.found / m.expected : null)] }"
-                />
+          <!-- Failures -->
+          <UCard>
+            <template #header>
+              <h3 class="font-medium text-sm flex items-center gap-2">
+                <UIcon name="i-fa7-solid-triangle-exclamation" class="size-3.5 text-dimmed" />
+                Why URLs failed
+              </h3>
+            </template>
+            <VizBarList
+              v-if="errorBars.length" :items="errorBars" :total="summary.failed"
+              color="var(--viz-critical)"
+            />
+            <p v-else class="text-sm text-muted">
+              No URL failed<template v-if="live"> so far</template>.
+            </p>
+          </UCard>
+
+          <!-- What changed: the regressions are what a run is for finding -->
+          <UCard>
+            <template #header>
+              <div class="flex items-baseline justify-between gap-2">
+                <h3 class="font-medium text-sm flex items-center gap-2 self-center">
+                  <UIcon name="i-fa7-solid-code-compare" class="size-3.5 text-dimmed" />
+                  Since the previous run
+                </h3>
+                <span
+                  v-if="changes?.delta != null" class="text-xs tabular-nums"
+                  :class="changes.delta > 0.0005 ? 'text-success'
+                    : changes.delta < -0.0005 ? 'text-error' : 'text-dimmed'"
+                  :title="`Coverage of the previous run: ${percent(changes.coverageBefore)}`"
+                >
+                  coverage {{ changes.delta > 0 ? '+' : '' }}{{ (changes.delta * 100).toFixed(1) }} pp
+                </span>
               </div>
-              <span class="tabular-nums text-xs text-highlighted">{{ m.found }} of {{ m.expected }}</span>
+            </template>
+            <p v-if="!previousId" class="text-sm text-muted">No earlier run to compare with.</p>
+            <USkeleton v-else-if="!changes" class="h-16 w-full" />
+            <div v-else class="space-y-4">
+              <p class="text-xs text-dimmed">
+                {{ changes.compared }} URL{{ changes.compared === 1 ? '' : 's' }} retrieved in
+                both<template v-if="live"> so far</template>: {{ changes.worse.length }} worse,
+                {{ changes.better.length }} better, the rest unchanged.
+              </p>
+              <div v-for="group in changeGroups" :key="group.key">
+                <h4 class="text-xs font-semibold uppercase tracking-wider text-dimmed mb-1.5 flex items-center gap-1.5">
+                  <UIcon
+                    :name="group.key === 'worse' ? 'i-fa7-solid-arrow-trend-down' : 'i-fa7-solid-arrow-trend-up'"
+                    class="size-3" :class="group.key === 'worse' ? 'text-error' : 'text-success'"
+                  />
+                  {{ group.title }}
+                </h4>
+                <div class="space-y-1 max-h-48 overflow-y-auto">
+                  <div v-for="r in group.items" :key="r.url" class="flex items-center gap-2 min-w-0 text-sm">
+                    <span
+                      class="inline-flex items-center gap-0.5 shrink-0"
+                      :title="`${look(r.was).label} before, ${look(r.outcome).label.toLowerCase()} now`"
+                    >
+                      <UIcon :name="look(r.was).icon" class="size-3" :style="{ color: look(r.was).color }" />
+                      <UIcon name="i-fa7-solid-arrow-right" class="size-2.5 text-dimmed" />
+                      <UIcon :name="look(r.outcome).icon" class="size-3" :style="{ color: look(r.outcome).color }" />
+                    </span>
+                    <NuxtLink
+                      v-if="r.job_id || report.job_id"
+                      :to="{ path: `/jobs/${r.job_id || report.job_id}`, query: { result: r.url } }"
+                      class="flex min-w-0 hover:underline" title="Show the result in the job"
+                    >
+                      <UrlLabel :url="r.url" />
+                    </NuxtLink>
+                    <UrlLabel v-else :url="r.url" class="min-w-0" />
+                  </div>
+                </div>
+              </div>
             </div>
-          </div>
-        </UCard>
-      </div>
+          </UCard>
 
-      <!-- Over time -->
-      <UCard v-if="trend.length > 1">
-        <template #header>
-          <div class="flex items-baseline justify-between gap-2">
-            <h2 class="font-medium text-sm">Over the last {{ trend.length }} runs</h2>
-            <span class="text-xs text-dimmed">oldest to newest</span>
-          </div>
-        </template>
-        <!-- Two measures, two charts: never one chart with two scales -->
-        <div class="grid gap-6 md:grid-cols-2">
-          <div>
-            <h3 class="text-xs text-muted mb-2">Coverage</h3>
+          <!-- Over time; its buttons open a past run's report -->
+          <UCard v-if="trend.length > 1">
+            <template #header>
+              <div class="flex items-baseline justify-between gap-2">
+                <h3 class="font-medium text-sm flex items-center gap-2 self-center">
+                  <UIcon name="i-fa7-solid-chart-line" class="size-3.5 text-dimmed" />
+                  Coverage over the last {{ trend.length }} runs
+                </h3>
+                <span class="text-xs text-dimmed">oldest to newest</span>
+              </div>
+            </template>
             <VizColumnChart
               :items="trendCoverage" :max="1" :format="(v: number) => `${Math.round(v * 100)}%`"
               labels="all" :height="120"
             />
-          </div>
-          <div>
-            <h3 class="text-xs text-muted mb-2">Median retrieval time</h3>
+            <div class="mt-4 flex flex-wrap gap-2">
+              <UButton
+                v-for="(h, i) in trend" :key="h.id" size="xs" color="neutral"
+                :variant="(viewing?.id || run.id) === h.id ? 'soft' : 'ghost'"
+                :label="`#${i + 1} · ${percent(h.summary.coverage)}`" :title="absoluteTime(h.started)"
+                @click="openReport(h.id)"
+              />
+            </div>
+          </UCard>
+        </section>
+
+        <!-- Speed -->
+        <section class="space-y-4 min-w-0">
+          <h2 class="text-xs font-semibold uppercase tracking-wider text-dimmed flex items-center gap-2">
+            <UIcon name="i-fa7-solid-gauge-high" class="size-3.5" /> Speed
+          </h2>
+
+          <UCard>
+            <template #header>
+              <div class="flex items-baseline justify-between gap-2">
+                <h3 class="font-medium text-sm flex items-center gap-2 self-center">
+                  <UIcon name="i-fa7-solid-stopwatch" class="size-3.5 text-dimmed" />
+                  How long retrievals took
+                </h3>
+                <span class="text-xs text-dimmed cursor-help" :title="RETRIEVAL_TIME_MEANING">
+                  URLs per 5 s, from their first request
+                </span>
+              </div>
+            </template>
+            <div class="space-y-5">
+              <div class="grid gap-2.5 sm:grid-cols-2">
+                <StatCard v-for="t in speedTiles" :key="t.label" v-bind="t" />
+              </div>
+              <VizColumnChart :items="timeHistogram" />
+            </div>
+          </UCard>
+
+          <UCard>
+            <template #header>
+              <h3 class="font-medium text-sm flex items-center gap-2">
+                <UIcon name="i-fa7-solid-layer-group" class="size-3.5 text-dimmed" />
+                Median time by category
+              </h3>
+            </template>
+            <VizBarList :items="categoryTimes" />
+          </UCard>
+
+          <UCard v-if="trend.length > 1">
+            <template #header>
+              <div class="flex items-baseline justify-between gap-2">
+                <h3 class="font-medium text-sm flex items-center gap-2 self-center">
+                  <UIcon name="i-fa7-solid-chart-line" class="size-3.5 text-dimmed" />
+                  Median time over the last {{ trend.length }} runs
+                </h3>
+                <span class="text-xs text-dimmed">oldest to newest</span>
+              </div>
+            </template>
             <VizColumnChart
               :items="trendMedian" :format="(v: number) => `${v.toFixed(1)}s`"
               labels="all" :height="120"
             />
-          </div>
-        </div>
-        <div class="mt-4 flex flex-wrap gap-2">
-          <UButton
-            v-for="(h, i) in trend" :key="h.id" size="xs" color="neutral"
-            :variant="(viewing?.id || run.id) === h.id ? 'soft' : 'ghost'"
-            :label="`#${i + 1} · ${percent(h.summary.coverage)}`" :title="absoluteTime(h.started)"
-            @click="openReport(h.id)"
-          />
-        </div>
-      </UCard>
+          </UCard>
+        </section>
+      </div>
 
       <!-- Every URL -->
       <UCard>
         <template #header>
           <div class="flex items-center justify-between gap-3 flex-wrap">
-            <h2 class="font-medium text-sm">Every URL</h2>
+            <h2 class="font-medium text-sm flex items-center gap-2">
+              <UIcon name="i-fa7-solid-list" class="size-3.5 text-dimmed" /> Every URL
+            </h2>
             <UTabs
               v-model="outcomeFilter" size="xs" :content="false"
               :items="[
@@ -792,6 +852,7 @@ function media(record: Record<string, number> | undefined) {
         <div class="flex items-center justify-between gap-3">
           <button type="button" class="font-medium text-sm inline-flex items-center gap-2" @click="showSuite = !showSuite">
             <UIcon name="i-fa7-solid-chevron-right" class="size-3 transition-transform" :class="showSuite ? 'rotate-90' : ''" />
+            <UIcon name="i-fa7-solid-vial" class="size-3.5 text-dimmed" />
             The suite · {{ suite.length }} URLs in {{ categories.length }} categories
           </button>
           <UButton size="xs" variant="ghost" color="neutral" label="Restore removed defaults" @click="restoreDefaults" />

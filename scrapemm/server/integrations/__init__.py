@@ -16,8 +16,10 @@ from .perma_cc import PermaCC
 from .archive_today import ArchiveToday
 from .headed_browser import HeadedBrowser, Browser
 from .ghostarchive import Ghostarchive
+from .megalodon import Megalodon
 from .awesomescreenshot import AwesomeScreenshot
 from .ncbi import NCBI
+from .researchgate import ResearchGate
 
 RETRIEVAL_INTEGRATIONS = [
     X(),
@@ -33,8 +35,10 @@ RETRIEVAL_INTEGRATIONS = [
     ArchiveToday(),
     ArchiveOrg(),
     Ghostarchive(),
+    Megalodon(),
     AwesomeScreenshot(),
     NCBI(),
+    ResearchGate(),
 ]
 
 # The Browser method: the shared headed browser on any page of the open web. A method

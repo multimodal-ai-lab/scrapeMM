@@ -39,7 +39,8 @@ Next to most parts of the open web, the following platforms are supported too:
 - ✅️ Instagram: works for most content
 - ✅️ Facebook
 - ✅ Threads: posts only (profiles TBD)
-- ✅ Reddit: posts only
+- ✅ Reddit: posts with their top comments; links to a comment with its thread
+- ✅ ResearchGate: publications, as OpenAlex records them (ResearchGate turns servers away)
 
 ### 📦 Archiving Services
 - ✅ Perma.cc
@@ -48,6 +49,15 @@ Next to most parts of the open web, the following platforms are supported too:
 - ✅ Internet Archive (web.archive.org)
 - ✅ AwesomeScreenshot.com
 - ✅ Ghostarchive (ghostarchive.org)
+
+An archived copy is marked as one: its text begins with a note (which archive, when, of
+which page), and `result.capture` says the same. Where the replay holds less than the
+archive recorded, the record is used: X posts from the archive's record of the X API's
+answer (text and video), Bloomberg articles from the capture's page data. A capture that
+shows only "please enable JavaScript" gives way to the nearest capture that shows the page.
+Where an archive's capture of a platform's post holds nothing usable, the live post stands in,
+and a capture of a video page without its video gets the live video; both say so
+(`result.capture.live`). Switch this off with the setting `archive_live_fallback`.
 
 
 ## 🏗️ Architecture
@@ -131,6 +141,14 @@ requested format; `result.content` exposes every format produced along the way:
 | `result.content.html` | `str` | The raw HTML of the page |
 | `result.content.markdown` | `str` | The page text in Markdown, media by hyperlink |
 | `result.content.multimodal` | `MultimodalSequence` | The page text with all media downloaded and embedded |
+
+Besides the content, a response says:
+
+| Attribute | Type | Content |
+|---|---|---|
+| `result.published_at` | `str` | When the post, upload or article was published, as the platform, the post's ID or the page's own metadata says: ISO 8601 in UTC, or just a day, month or year if the source is no more precise (`"2013"`) |
+| `result.capture` | `Capture` | For an archived copy (Wayback Machine, Archive.today, Perma.cc, …): the archive, the original URL, the capture time and the capture's URL. The text then begins with a note saying so |
+| `result.omitted_media` | `list[OmittedMedium]` | The media left out for their size (see `max_video_size`) |
 
 Choose with `output_format` (default `"multimodal"`):
 
@@ -353,7 +371,13 @@ Media is collected from `<img>` and `<video>` tags, from CSS background images, 
 embedded players of the common video platforms (an `<iframe>` pointing at YouTube, Vimeo,
 Dailymotion, …), which are downloaded with yt-dlp. `max_video_size` caps every one of those
 downloads; oversized videos are skipped without downloading a byte whenever the server
-announces a `Content-Length`.
+announces a `Content-Length` (or yt-dlp knows the size), and stopped as soon as they outgrow
+the limit otherwise. Media left out for their size are listed in the response's
+`omitted_media` (URL, size if known, and the limit); a video downloaded with yt-dlp also says
+so in the text (`Video omitted: …`).
+With `downscale_videos=True`, a video downloaded with yt-dlp (YouTube, TikTok, Instagram,
+Facebook, embedded players) that would exceed the limit comes in the highest lower
+resolution that fits instead.
 
 Images are taken at their highest available resolution: `srcset` candidates are compared and
 lazy-loading attributes (`data-src`, `data-lazy-src`, `data-original`, …) are honoured, so

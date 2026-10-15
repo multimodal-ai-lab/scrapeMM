@@ -2,9 +2,9 @@
 
 A search costs the server almost nothing, but it costs the provider a request, and
 providers limit how many they take at once. So searches pass one server-wide gate, as
-retrievals do (`engine._concurrency_gate`): at most `max_search_concurrency` are with a
-provider at a time, and the rest queue rather than all hitting it in the same second and
-failing on its rate limit together. Each provider also keeps one HTTP session, so that
+retrievals pass their method's (`scrapemm.server.slots`): at most
+`max_search_concurrency` are with a provider at a time, and the rest queue rather than
+all hitting it in the same second and failing on its rate limit together. Each provider also keeps one HTTP session, so that
 searches reuse its connections instead of opening a fresh TLS connection apiece.
 """
 
@@ -45,8 +45,8 @@ _gate_limit: Optional[int] = None
 
 
 def search_gate() -> asyncio.Semaphore:
-    """The limit on searches in flight. Rebuilt when the setting changes, like the
-    retrieval gate: searches already inside finish under the old limit."""
+    """The limit on searches in flight. Rebuilt when the setting changes: searches
+    already inside finish under the old limit."""
     global _gate, _gate_limit
     configured = get_config_var("max_search_concurrency")
     limit = max(1, int(DEFAULT_MAX_SEARCH_CONCURRENCY if configured is None else configured))

@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 import tempfile
+from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
 
@@ -13,11 +14,12 @@ import m3u8
 from ezmm import Video
 
 from scrapemm.server.download.util import (looks_like_hls_url, looks_like_video_file_url,
-                                    exceeds_max_size)
+                                    exceeds_max_size, report_omitted)
 
 if TYPE_CHECKING:
     from playwright.async_api import APIRequestContext
 
+from scrapemm.server.download.images import min_media_side, is_too_small
 from scrapemm.server.download.requests import fetch_headers, request_static
 from scrapemm.server.download.common import HEADERS
 
@@ -26,6 +28,20 @@ logger = logging.getLogger("scrapeMM")
 # HLS playlists routinely contain hundreds of segments. Fetch them in parallel, but
 # keep the fan-out per video modest so one video cannot monopolise the connection pool.
 MAX_CONCURRENT_SEGMENTS = 10
+
+# Set per retrieval, like the screenshot (see `screenshot.requested()`): whether a video
+# larger than the size limit is downloaded in a lower resolution that fits, instead of
+# being left out. Only yt-dlp's downloads have resolutions to choose from.
+_downscale: ContextVar[bool] = ContextVar("scrapemm_downscale_videos", default=False)
+
+
+def downscale_requested(wanted: bool) -> None:
+    """Whether the retrieval running in this task wants oversized videos downscaled."""
+    _downscale.set(wanted)
+
+
+def downscaling() -> bool:
+    return _downscale.get()
 
 
 async def download_video(
@@ -60,7 +76,7 @@ async def _download_video(
             content_type = headers.get('Content-Type') or headers.get('content-type') or ''
 
             # Skip oversized videos before downloading a single byte of them
-            if exceeds_max_size(headers, max_video_size):
+            if exceeds_max_size(headers, max_video_size, video_url):
                 logger.debug(f"Skipping {video_url}: larger than the limit of {max_video_size} bytes.")
                 return None
         except Exception as e:
@@ -121,10 +137,26 @@ async def download_video_file(
                      f"\n{type(e).__name__}: {e}")
 
 
-def video_from_binary(binary_data: bytes, source_url: str) -> Video:
-    """Create a Video object from binary data."""
+def is_too_small_video(video: Video) -> bool:
+    """Whether the video's frames are smaller than the minimum size, like an image (see
+    `MIN_MEDIA_SIDE`). One whose size cannot be read (no video stream, a file OpenCV
+    cannot open) is not judged: unknown is no reason to drop it."""
+    try:
+        width, height = video.width, video.height
+    except Exception:
+        return False
+    return bool(width and height) and is_too_small(width, height)
+
+
+def video_from_binary(binary_data: bytes, source_url: str) -> Optional[Video]:
+    """Create a Video object from binary data, unless it is smaller than the minimum
+    size (see `MIN_MEDIA_SIDE`)."""
     video = Video(binary_data=binary_data, source_url=source_url)
     video.relocate(move_not_copy=True)
+    if is_too_small_video(video):
+        logger.info(f"Left out the video of {source_url[:120]}: {video.width} x {video.height} px, "
+                    f"less than {min_media_side()} px on a side.")
+        return None
     return video
 
 
@@ -263,6 +295,7 @@ async def download_hls_video(
             if total > max_video_size:
                 logger.debug(f"Skipping HLS video {playlist_url}: {total} bytes exceed "
                              f"the limit of {max_video_size}.")
+                report_omitted(playlist_url, max_video_size, total)
                 return None
 
         # Combine all segments

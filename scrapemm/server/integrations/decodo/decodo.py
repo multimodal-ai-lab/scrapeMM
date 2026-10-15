@@ -10,6 +10,7 @@ from scrapemm.common import (AccessBlockedError, QuotaExceededError, RateLimitEr
                              RegionBlockedError, RetrievalFailed, TargetUnavailableError,
                              UnsupportedDomainError)
 from scrapemm.common.scraping_response import ScrapedContent, OutputFormat
+from scrapemm.server import slots
 from scrapemm.server.secrets import get_secret
 from scrapemm.server.util import get_domain, to_scraped_content
 
@@ -87,9 +88,12 @@ class Decodo:
         domain = get_domain(url)
         use_premium_proxy = domain in PREMIUM_PROXY_DOMAINS
 
-        # Try with JS rendering first if enabled
-        html = await self._call_decodo(url, session, enable_js, timeout=timeout, max_retries=max_retries,
-                                       use_premium_proxy=use_premium_proxy, geo=geo)
+        # In a Decodo slot (see `scrapemm.server.slots`), also when an integration falls
+        # back to Decodo; the Decodo method's retrieval holds one already
+        async with slots.hold("decodo"):
+            html = await self._call_decodo(url, session, enable_js, timeout=timeout,
+                                           max_retries=max_retries,
+                                           use_premium_proxy=use_premium_proxy, geo=geo)
 
         return await to_scraped_content(html, session=session, output_format=output_format,
                                         url=url, max_video_size=max_video_size)

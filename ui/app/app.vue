@@ -40,7 +40,7 @@ const links: NavLink[] = [
       { label: 'Search', icon: 'i-fa7-solid-magnifying-glass', to: '/playground/search' },
     ],
   },
-  { label: 'Jobs', icon: 'i-fa7-solid-clock-rotate-left', to: '/jobs' },
+  { label: 'History', icon: 'i-fa7-solid-clock-rotate-left', to: '/history' },
   { label: 'Statistics', icon: 'i-fa7-solid-chart-column', to: '/statistics' },
   { label: 'Test', icon: 'i-fa7-solid-flask', to: '/test' },
   { label: 'CAPTCHA', icon: 'i-fa7-solid-shield-halved', to: '/captcha' },
@@ -53,6 +53,48 @@ const links: NavLink[] = [
 const visibleLinks = computed(() => links.filter((link) => !link.admin || isAdmin.value))
 
 const route = useRoute()
+
+// --- Health and news ----------------------------------------------------------------
+
+const environment = useEnvironment()
+const { captchaNew, blacklistNew, test, statuses, health } = useAttention()
+
+watch(token, (value) => { if (value) followEnvironment() })
+onMounted(() => { if (token.value) followEnvironment() })
+
+/** What the logo says when hovered: which cards make it yellow or red, if any */
+const healthText = computed(() => {
+  const off = statuses.value.filter((s) => s.tone === health.value).map((s) => s.label)
+  return health.value === 'error' ? `Needs attention now: ${off.join(', ')}`
+    : health.value === 'warning' ? `Wants a look: ${off.join(', ')}`
+      : health.value === 'success' ? 'All good' : 'scrapeMM dashboard'
+})
+
+/** A page counts as seen while it is open, including what turns up meanwhile */
+watch([() => route.path, environment], () => {
+  const env = environment.value
+  if (!env) return
+  if (route.path === '/captcha') markSeen('captcha', env.captcha?.latest)
+  else if (route.path === '/blacklist') markSeen('blacklist', env.blacklist?.latest)
+  else if (route.path === '/test' && env.test && !env.test.running) markSeen('test', env.test.key)
+}, { immediate: true })
+
+interface Indicator { tone: 'running' | 'success' | 'warning' | 'error', text: string }
+
+/** The sidebar's indicators, by page. Yellow: something new to look at some time.
+ *  Red: something went wrong. A test run is a spinner, then the colour of its results. */
+const indicators = computed<Record<string, Indicator | undefined>>(() => ({
+  '/captcha': captchaNew.value
+    ? { tone: 'warning', text: 'New URLs are waiting for a CAPTCHA' } : undefined,
+  '/blacklist': blacklistNew.value
+    ? { tone: 'warning', text: 'New domains were blacklisted' } : undefined,
+  '/test': test.value === 'running' ? { tone: 'running', text: 'A test is running' }
+    : test.value && test.value !== 'neutral'
+      ? { tone: test.value, text: {
+          success: 'The last test went well', warning: 'The last test fell short',
+          error: 'The last test went badly' }[test.value] }
+      : undefined,
+}))
 
 /** An Admin page opened with a Client key (a bookmark, a typed URL): said so plainly
  *  rather than left to fail call by call. Undecided until the key's role is known. */
@@ -122,7 +164,7 @@ async function signIn() {
            `min-width: auto`, so without them its content's min-content width wins over
            the collapsed width and the panel never actually narrows. -->
       <aside
-        class="fixed inset-y-0 left-0 z-40 shrink-0 min-w-0 overflow-hidden
+        class="group/sidebar fixed inset-y-0 left-0 z-40 shrink-0 min-w-0 overflow-hidden
                border-r border-default bg-default
                flex flex-col gap-2 p-3 transition-[width] duration-200 ease-out"
         :class="collapsed ? 'w-16' : 'w-56'"
@@ -130,23 +172,29 @@ async function signIn() {
         <div class="flex items-center gap-2 px-1 h-9">
           <!-- Collapsed, the logo is all that remains of the brand, and it is what
                expands the sidebar again: the chevron no longer fits beside it. -->
+          <!-- Tinted by health: green, or yellow or red as the worst status card is -->
           <NuxtLink
-            v-if="!collapsed" to="/" class="flex items-center gap-2 min-w-0"
-            aria-label="scrapeMM dashboard"
+            v-if="!collapsed" to="/" class="brand flex items-center gap-2 min-w-0"
+            :class="`brand-${health}`" aria-label="scrapeMM dashboard" :title="healthText"
           >
-            <img src="/logo.webp" alt="" class="size-7 shrink-0">
-            <span class="font-semibold text-lg truncate">scrapeMM</span>
+            <BrandMark class="size-7 shrink-0" />
+            <span class="brand-name font-semibold text-lg whitespace-nowrap">scrapeMM</span>
           </NuxtLink>
           <button
-            v-else type="button" class="mx-auto transition-transform duration-200 hover:scale-110"
-            aria-label="Expand the sidebar" title="Expand the sidebar"
+            v-else type="button"
+            class="brand mx-auto transition-transform duration-200 hover:scale-110"
+            :class="`brand-${health}`" aria-label="Expand the sidebar"
+            :title="`${healthText} · Expand the sidebar`"
             @click="collapsed = false"
           >
-            <img src="/logo.webp" alt="" class="size-7">
+            <BrandMark class="size-7" />
           </button>
+          <!-- Only while the pointer is over the sidebar (or the button has the keyboard's
+               focus): otherwise it is clutter beside the brand -->
           <UButton
             v-if="!collapsed"
-            class="ml-auto transition-transform duration-200 hover:scale-110"
+            class="ml-auto opacity-0 transition duration-200 hover:scale-110
+                   group-hover/sidebar:opacity-100 focus-visible:opacity-100"
             variant="ghost" color="neutral" size="sm" square
             :icon="collapsed ? 'i-fa7-solid-chevron-right' : 'i-fa7-solid-chevron-left'"
             :aria-label="collapsed ? 'Expand the sidebar' : 'Collapse the sidebar'"
@@ -156,9 +204,13 @@ async function signIn() {
 
         <nav class="flex flex-col gap-1">
           <template v-for="link in visibleLinks" :key="link.to">
-            <UTooltip :text="link.label" :disabled="!collapsed" :content="{ side: 'right' }">
+            <UTooltip
+              :text="indicators[link.to] ? `${link.label} · ${indicators[link.to]!.text}` : link.label"
+              :disabled="!collapsed" :content="{ side: 'right' }"
+            >
               <NuxtLink
                 :to="link.children ? link.children[0]!.to : link.to"
+                :title="collapsed ? undefined : indicators[link.to]?.text"
                 class="flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm
                        hover-row"
                 :class="route.path === link.to
@@ -167,7 +219,21 @@ async function signIn() {
                     ? 'text-highlighted font-medium'
                     : 'text-muted hover:text-default'"
               >
-                <UIcon :name="link.icon" class="size-4 shrink-0" />
+                <span class="relative shrink-0 flex">
+                  <UIcon :name="link.icon" class="size-4" />
+                  <!-- On the icon's corner, so it stays when the sidebar is collapsed -->
+                  <span
+                    v-if="indicators[link.to]?.tone === 'running'"
+                    class="absolute -top-1.5 -right-1.5 size-2.5 rounded-full border-2
+                           border-info border-t-transparent animate-spin"
+                  />
+                  <span
+                    v-else-if="indicators[link.to]"
+                    class="absolute -top-1 -right-1 size-2 rounded-full ring-2 ring-(--ui-bg)"
+                    :class="{ success: 'bg-success', warning: 'bg-warning', running: '',
+                              error: 'bg-error animate-pulse' }[indicators[link.to]!.tone]"
+                  />
+                </span>
                 <span
                   class="truncate transition-opacity duration-200"
                   :class="collapsed ? 'opacity-0 w-0' : 'opacity-100'"
@@ -212,24 +278,34 @@ async function signIn() {
           >
             {{ me.name }} · {{ ROLE_LABELS[me.role] }}
           </div>
+          <!-- Styled like the navigation's entries above, which it sits among -->
           <UTooltip text="Log out" :disabled="!collapsed" :content="{ side: 'right' }">
-            <UButton
-              class="w-full justify-start transition-colors"
-              variant="ghost" color="neutral" size="sm" icon="i-fa7-solid-right-from-bracket"
-              :label="collapsed ? undefined : 'Log out'"
-              :square="collapsed" @click="setToken(null)"
-            />
+            <button
+              type="button"
+              class="w-full flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm
+                     hover-row text-muted hover:text-default"
+              @click="setToken(null)"
+            >
+              <UIcon name="i-fa7-solid-right-from-bracket" class="size-4 shrink-0" />
+              <span
+                class="truncate transition-opacity duration-200"
+                :class="collapsed ? 'opacity-0 w-0' : 'opacity-100'"
+              >Log out</span>
+            </button>
           </UTooltip>
         </div>
       </aside>
 
       <!-- The sidebar is fixed, so it is out of the flow: the margin is what keeps the
-           content beside it rather than underneath. -->
+           content beside it rather than underneath. Clipped, not `overflow-x-hidden`:
+           hidden makes <main> a scroll container, and `sticky` inside a page (the
+           Settings view's section panel) would then stick to it -- which never scrolls,
+           the window does -- and so never stick at all. -->
       <main
-        class="flex-1 p-6 overflow-x-hidden min-w-0 transition-[margin] duration-200 ease-out"
+        class="flex-1 p-6 overflow-x-clip min-w-0 transition-[margin] duration-200 ease-out"
         :class="collapsed ? 'ml-16' : 'ml-56'"
       >
-        <!-- The jobs overview is kept alive: coming back from a job shows it exactly as
+        <!-- The History is kept alive: coming back from a job shows it exactly as
              it was left -- filters, sorting, everything loaded and the scroll position,
              which the router restores once the page is there again -->
         <template v-if="adminPage && !isAdmin">
@@ -239,7 +315,7 @@ async function signIn() {
             description="This page needs an Admin or Root API key. Ask an admin of this server for one, or sign in with one."
           />
         </template>
-        <NuxtPage v-else :keepalive="{ include: ['JobsOverview'] }" />
+        <NuxtPage v-else :keepalive="{ include: ['HistoryOverview'] }" />
       </main>
     </div>
   </UApp>

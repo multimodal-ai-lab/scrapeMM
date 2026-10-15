@@ -25,8 +25,9 @@ from typing import Optional
 
 from scrapemm.common.exceptions import CaptchaEncounteredError
 from scrapemm.common.paths import APP_NAME
-from . import registry
+from . import registry, slots
 from .blacklist import blacklist
+from .config import get_setting
 from .cache import cache
 from .environment import ffmpeg_available, ffprobe_available
 from .jobs import SLOT, jobs
@@ -41,6 +42,11 @@ logger = logging.getLogger(APP_NAME)
 # calls and log-ins, so a reload or a second viewer reuses them; "Re-check all", a
 # changed secret or a toggled method probes afresh at once.
 STATUS_TTL = 60 * 60.0
+
+
+def _status_ttl() -> float:
+    return float(get_setting("status_ttl", STATUS_TTL))
+
 
 # How long one method may take to answer before the dashboard gives up on it
 PROBE_TIMEOUT = 20.0
@@ -136,7 +142,7 @@ def cached_status(key: str) -> tuple[Optional[IntegrationStatus], bool]:
     cached = _cache.get(key)
     if cached is None:
         return None, False
-    return cached[1], time.time() - cached[0] < STATUS_TTL
+    return cached[1], time.time() - cached[0] < _status_ttl()
 
 
 def _lock_for(name: str) -> asyncio.Lock:
@@ -183,13 +189,13 @@ async def check(name: str, force: bool = False) -> IntegrationStatus:
 
     if not force:
         cached = _cache.get(key)
-        if cached and time.time() - cached[0] < STATUS_TTL:
+        if cached and time.time() - cached[0] < _status_ttl():
             return cached[1]
 
     async with _lock_for(key):
         # Another caller may have probed while we waited for the lock
         cached = _cache.get(key)
-        if not force and cached and time.time() - cached[0] < STATUS_TTL:
+        if not force and cached and time.time() - cached[0] < _status_ttl():
             return cached[1]
 
         if key in METHOD_KEYS:
@@ -422,6 +428,7 @@ async def environment() -> dict:
         "display": _display_status(),
         "captcha": _captcha_backlog(),
         "queue": _queue(),
+        "slots": slots.snapshot(),
         "media": _media_usage(),
         "address": _address(),
         "proxy": proxy_status(),
@@ -430,7 +437,10 @@ async def environment() -> dict:
         "blacklist": {
             "domains": len(blacklist),
             "ttl": blacklist.ttl,
+            # When the newest entry came: the UI tells new entries from seen ones by it
+            "latest": blacklist.latest(),
         },
+        "test": _test_summary(),
         "cache": {
             "entries": len(cache),
             "ttl": cache.ttl,
@@ -439,8 +449,8 @@ async def environment() -> dict:
 
 
 def proxy_status() -> dict:
-    """The proxy (see `scrapemm.server.proxy`), and until when YouTube is paused for this
-    server's address, during which YouTube retrievals go through it."""
+    """The proxies (see `scrapemm.server.proxy`), and until when YouTube is paused for
+    this server's address, during which YouTube retrievals go through them."""
     from scrapemm.server import proxy
     from scrapemm.server.integrations.ytdlp import youtube_gate
     paused = youtube_gate.blocked_until
@@ -478,9 +488,8 @@ def _job_figures() -> dict:
 
 
 def _media_usage() -> dict:
-    """Never walks the tree itself (see `registry.usage`), and never because of a job:
-    re-measuring after every job kept a walk over a shared registry of millions of files
-    running for a whole batch. The figure is refreshed on the registry's TTL instead."""
+    """Never measures itself (see `registry.usage`): the figure is refreshed in the
+    background on the registry's TTL."""
     return registry.usage()
 
 
@@ -545,19 +554,15 @@ def _address() -> dict:
 
 
 def _queue() -> dict:
-    """The URLs waiting in line: accepted by a running job but not yet started, because
-    the server's concurrency limit is full. URLs parked with a CAPTCHA challenge are not
-    in line (see `_captcha_backlog()`); they wait for a human, not for a free slot."""
+    """The URLs waiting in line -- accepted by a running job, but waiting for a slot of
+    the first method they try (see `slots`) -- and those being retrieved. URLs parked
+    with a CAPTCHA challenge are not in line (see `_captcha_backlog()`); they wait for a
+    human, not for a free slot."""
     from . import engine
-    from .config import get_config_var
-    in_flight = len(getattr(engine, "_in_flight", {}))
-    active = getattr(engine, "_active", 0)
-    return {
-        "waiting": max(0, in_flight - active),
-        "active": active,
-        "limit": int(get_config_var("max_concurrency",
-                                    getattr(engine, "DEFAULT_MAX_CONCURRENCY", 40))),
-    }
+    retrievals = list(engine._retrievals)
+    waiting = sum(1 for clock in retrievals
+                  if clock.admitted is None and clock.waiting_for_slot > 0)
+    return {"waiting": waiting, "active": len(retrievals) - waiting}
 
 
 def _captcha_backlog() -> dict:
@@ -576,10 +581,22 @@ def _captcha_backlog() -> dict:
     return {
         "waiting": sum(c["waiting"] for c in listed),
         "challenges": len(listed),
+        # When the newest URL was queued: the UI tells new URLs from seen ones by it
+        "latest": max((c["latest"] for c in listed if c.get("latest")), default=None),
         # Without a display there is no way to solve one, which is worth saying when
         # something is actually waiting.
         "solvable": bool(os.getenv("DISPLAY")) or os.name == "nt",
     }
+
+
+def _test_summary() -> Optional[dict]:
+    """The test run under way, or the latest one's headline figures."""
+    from . import testsuite
+    try:
+        return testsuite.headline()
+    except Exception:
+        logger.debug("Could not read the latest test run.", exc_info=True)
+        return None
 
 
 def _display_status() -> dict:
