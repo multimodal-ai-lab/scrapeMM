@@ -243,6 +243,9 @@ class YtDlpFailed(RuntimeError):
 
 
 STREAM_REFUSED = "The platform refused to serve the video's stream to this server"
+# The video was found and its download began, but its stream stopped coming (a read
+# timeout): the route's doing, which another may not share (`proxy.worth_another_route`)
+STREAM_STALLED = "The video's stream stalled on the way to this server"
 
 
 def _stream_refused(error: Exception) -> bool:
@@ -269,6 +272,10 @@ _ERROR_PATTERNS: list[tuple[tuple[str, ...], type[Exception], str]] = [
      AccessBlockedError, STREAM_REFUSED),
     # Before the bot check: an age gate also says "Sign in to confirm (your age)", and
     # taking it for the bot check paused all of YouTube for half an hour
+    # Before "timed out" below: the video is there, its stream only stopped coming
+    # (production, 2026-10-15: "Read timed out" at googlevideo.com after 34 s through a proxy)
+    (("read timed out", "the read operation timed out", "incompleteread"),
+     RetrievalFailed, STREAM_STALLED),
     (("confirm your age", "age-restricted", "age restricted", "inappropriate for some users"),
      AccessBlockedError, "Age-restricted"),
     (("not a bot", "confirm you're not", "confirm you’re not", "confirm that you're not"),

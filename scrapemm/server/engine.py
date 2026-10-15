@@ -616,7 +616,7 @@ async def _retrieve(
                 avoid.add(proxy.region_of(current.proxy if current.used else None))
         note_region()
         while (outcome[0] == "error" and method_name in proxy.PROXY_METHODS
-               and proxy.ip_blocked(outcome[1]) and len(tried) < proxy.tries()
+               and proxy.worth_another_route(outcome[1]) and len(tried) < proxy.tries()
                and (via := proxy.pick(method_name, exclude=tried, site=domain,
                                       avoid_regions=avoid))):
             logger.info(f"🔀 Retrying {method_name} for {url} through the proxy {via.url}: "

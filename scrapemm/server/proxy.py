@@ -75,7 +75,10 @@ PROXY_METHODS = {"browser", "Plain HTTP", "YouTube", "TikTok", "Facebook", "Inst
 # What an error says when the server's address is what was refused
 _IP_MARKERS = ("refused to serve", "http error 403", "http 403", "ip address", "server's region",
                "no bot", "not a bot", "access forbidden", "forbidden", "access denied",
-               "http error 451", "http 451", "too many requests", "http error 429")
+               "http error 451", "http 451", "too many requests", "http error 429",
+               # A firewall's "not acceptable" for this server (eci.gov.in: "Request was
+               # blocked due to suspicious behavior")
+               "http 406")
 # What an error says when the proxy itself failed, not the site behind it
 _PROXY_FAILURE_MARKERS = ("err_proxy", "err_tunnel", "proxyerror", "proxy error",
                           "proxy connection", "connect to proxy", "tunnel connection failed",
@@ -611,6 +614,16 @@ def curl_proxies() -> Optional[dict]:
     """The `proxies=` argument for curl_cffi, or None."""
     proxy = route()
     return {"http": proxy.with_auth, "https": proxy.with_auth} if proxy else None
+
+
+def worth_another_route(error: BaseException) -> bool:
+    """Whether a method's failure may well not happen through another proxy: its address
+    was refused (see `ip_blocked()`), or its route stalled (a video stream that stopped
+    coming). A stall says nothing about the proxy's standing, so it costs no reputation."""
+    if ip_blocked(error):
+        return True
+    from scrapemm.server.integrations.ytdlp import STREAM_STALLED
+    return isinstance(error, RetrievalFailed) and str(error).startswith(STREAM_STALLED)
 
 
 def ip_blocked(error: BaseException) -> bool:
