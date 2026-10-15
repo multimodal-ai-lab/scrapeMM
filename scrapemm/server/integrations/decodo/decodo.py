@@ -1,7 +1,9 @@
 import asyncio
+import base64
 import json
 import logging
 from typing import Optional
+from urllib.parse import urlsplit
 
 import aiohttp
 from aiohttp import ClientConnectorError
@@ -94,6 +96,16 @@ class Decodo:
             html = await self._call_decodo(url, session, enable_js, timeout=timeout,
                                            max_retries=max_retries,
                                            use_premium_proxy=use_premium_proxy, geo=geo)
+
+        # A document (a PDF) comes base64-encoded in place of a page: read it as one
+        if document := _base64_document(html):
+            from scrapemm.common.exceptions import UnsupportedDomainError
+            from scrapemm.server.download.documents import to_content
+            name = urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1] or "document.pdf"
+            if content := await asyncio.to_thread(to_content, document, name, "application/pdf", url):
+                logger.info(f"📄 Decodo delivered {url} as a PDF; read it.")
+                return content
+            raise UnsupportedDomainError(f"Decodo delivered {url} as a PDF, which could not be read.")
 
         return await to_scraped_content(html, session=session, output_format=output_format,
                                         url=url, max_video_size=max_video_size)
@@ -292,3 +304,14 @@ async def backoff(n_past_attempts: int):
 
 # Create a singleton instance
 decodo = Decodo()
+
+
+def _base64_document(text: Optional[str]) -> Optional[bytes]:
+    """The PDF Decodo delivered base64-encoded in place of a page ("JVBERi0" is "%PDF-"),
+    decoded; None for anything else."""
+    if not text or not text.lstrip().startswith("JVBERi0"):
+        return None
+    try:
+        return base64.b64decode("".join(text.split()), validate=True)
+    except ValueError:
+        return None

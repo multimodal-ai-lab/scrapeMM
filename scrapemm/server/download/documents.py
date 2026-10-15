@@ -3,14 +3,14 @@
 A browser that opens such a URL shows no page: it downloads the file (often only after a
 bot check, e.g. a "Verifying your browser..." page, has passed), or shows a PDF in its
 viewer. What is cheap to read is turned into text -- spreadsheets into tables, one per
-sheet; PDFs into their text, page by page. The rest is reported as a document type
-scrapeMM does not extract, never as the bot check that preceded it.
+sheet; PDFs into their text, page by page, with the PDF itself as a file item (and, for a
+scan without a text layer, its page scans as images). The rest is reported as a document
+type scrapeMM does not extract, never as the bot check that preceded it.
 
 `to_content()` is the one place that turns a downloaded document into content.
 """
 
 import csv
-import hashlib
 import html
 import logging
 from io import BytesIO
@@ -82,24 +82,89 @@ def describe(data: Optional[bytes], content_type: Optional[str] = None) -> str:
     return f"{len(data)} bytes{f' of {content_type}' if content_type else ''} starting {head!r}"
 
 
-def to_content(data: bytes, name: str, content_type: Optional[str] = None):
+def to_content(data: bytes, name: str, content_type: Optional[str] = None,
+               url: Optional[str] = None):
     """The `ScrapedContent` of a downloaded document (`name` gives its type, as does
-    `content_type`), or None if scrapeMM does not read documents of its type. Blocking:
-    call it in a thread."""
+    `content_type`; `url` is where it came from), or None if scrapeMM does not read
+    documents of its type. Blocking: call it in a thread."""
     from ezmm import MultimodalSequence
     from scrapemm.common.scraping_response import ScrapedContent
+    if _kind(name, content_type) == ".pdf":
+        return _pdf_content(data, name, url)
     text = to_text(data, name, content_type)
     if text is None:
         return None
     html_text, markdown = text
-    content = ScrapedContent(html=html_text, markdown=markdown,
-                             multimodal=MultimodalSequence(markdown))
-    if _kind(name, content_type) == ".pdf":
-        # TODO: Once ezMM has a PDF item, make the kept file one and put its reference
-        #  into the multimodal sequence (beside the text), so that results carry the PDF
-        #  like they carry images. `keep_pdf()` already stores it for good.
-        content.pdf_path = keep_pdf(data)
-    return content
+    return ScrapedContent(html=html_text, markdown=markdown, multimodal=MultimodalSequence(markdown))
+
+
+# Pages of a scan (a PDF without a text layer) shown as images, at most
+MAX_SCANNED_PAGES = 10
+
+
+def _pdf_content(data: bytes, name: str, url: Optional[str]):
+    """A PDF's text, page by page, followed by the PDF itself (an ezMM file item); for a
+    scan without a text layer, its page scans instead of the text. None if it cannot be
+    read at all."""
+    from ezmm import MultimodalSequence
+    from scrapemm.common.scraping_response import ScrapedContent
+    read = _pdf_pages(data, name)
+    if read is None:
+        return None
+    reader, pages, total = read
+    file = _file_item(data, name, url)
+    if any(pages):
+        html_text, markdown = _pdf_text(name, pages, total)
+        return ScrapedContent(html=html_text, markdown=markdown,
+                              multimodal=MultimodalSequence([markdown, *([file] if file else [])]))
+
+    # A scan: its pages are images, with no text to read (and no OCR here)
+    scans = _page_scans(reader, name, url)
+    if not scans and file is None:
+        from scrapemm.common.exceptions import UnsupportedDomainError
+        raise UnsupportedDomainError(f"{name} is a scanned PDF without a text layer; "
+                                     f"scrapeMM does not run OCR.")
+    shown = f"the first {len(scans)} of its {total} pages" if total > len(scans) else f"its {total} pages"
+    markdown = (f"# {name}\n\nA scanned PDF without a text layer (scrapeMM does not run OCR): "
+                f"{shown} as images.")
+    parts: list = [markdown]
+    for number, scan in enumerate(scans, start=1):
+        parts += [f"\n\nPage {number}:", scan]
+    if file is not None:
+        parts += ["\n\nThe PDF:", file]
+    html_text = f"<h1>{html.escape(name)}</h1><p>{html.escape(markdown.split(chr(10))[-1])}</p>"
+    return ScrapedContent(html=html_text, markdown=markdown, multimodal=MultimodalSequence(parts))
+
+
+def _file_item(data: bytes, name: str, url: Optional[str]):
+    """The document as an ezMM file item, or None if it cannot be one (too large)."""
+    try:
+        from ezmm import File
+        return File(binary_data=data, source_url=url, suffix=document_extension(name) or ".pdf")
+    except Exception as e:
+        logger.info(f"The PDF {name} is no file item: {type(e).__name__}: {e}")
+        return None
+
+
+def _page_scans(reader, name: str, url: Optional[str]) -> list:
+    """The page scans of a scanned PDF, as ezMM images: the largest image of each page."""
+    from ezmm import Image
+    scans = []
+    for page in reader.pages[:MAX_SCANNED_PAGES]:
+        try:
+            images = list(page.images)
+            if not images:
+                continue
+            biggest = max(images, key=lambda i: i.image.width * i.image.height)
+            buffer = BytesIO()
+            picture = biggest.image
+            if picture.mode not in ("1", "L", "RGB"):
+                picture = picture.convert("RGB")
+            picture.save(buffer, format="PNG", optimize=True)
+            scans.append(Image(binary_data=buffer.getvalue(), source_url=url))
+        except Exception as e:
+            logger.info(f"Could not take a page scan of {name}: {type(e).__name__}: {e}")
+    return scans
 
 
 def to_text(data: bytes, name: str, content_type: Optional[str] = None) -> Optional[tuple[str, str]]:
@@ -111,7 +176,8 @@ def to_text(data: bytes, name: str, content_type: Optional[str] = None) -> Optio
     elif extension in TEXT_TABLE_EXTENSIONS:
         tables = _csv_tables(data, name)
     elif extension == ".pdf":
-        return _pdf_text(data, name)
+        read = _pdf_pages(data, name)
+        return _pdf_text(name, read[1], read[2]) if read and any(read[1]) else None
     else:
         return None
     if tables is None:
@@ -129,25 +195,6 @@ def _kind(name: str, content_type: Optional[str]) -> Optional[str]:
             }.get(content_type)
 
 
-def keep_pdf(data: bytes) -> Optional[Path]:
-    """Stores a PDF for good, named by its content, beside the media in the media
-    registry's directory (`pdf/<sha256>.pdf`), and returns where. Kept so it can become
-    an ezMM item once ezMM supports PDFs, without downloading it again."""
-    try:
-        from ezmm.common.registry import item_registry
-        directory = Path(item_registry.path) / "pdf"
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{hashlib.sha256(data).hexdigest()}.pdf"
-        if not path.exists():
-            partial = path.with_suffix(".pdf.part")
-            partial.write_bytes(data)
-            partial.replace(path)
-        return path
-    except OSError:
-        logger.info("Could not keep a downloaded PDF.", exc_info=True)
-        return None
-
-
 # A PDF's text beyond this many pages is left out: a report runs to dozens, a scanned
 # archive to thousands
 MAX_PDF_PAGES = 500
@@ -161,7 +208,9 @@ def _max_sheet_rows() -> int:
     return max(1, int(get_setting("max_sheet_rows", MAX_ROWS_PER_SHEET)))
 
 
-def _pdf_text(data: bytes, name: str) -> Optional[tuple[str, str]]:
+def _pdf_pages(data: bytes, name: str):
+    """(reader, the text of each page up to `max_pdf_pages`, the number of pages), or
+    None if the PDF cannot be read."""
     try:
         from pypdf import PdfReader
     except ImportError:
@@ -169,20 +218,17 @@ def _pdf_text(data: bytes, name: str) -> Optional[tuple[str, str]]:
         return None
     try:
         reader = PdfReader(BytesIO(data))
-        max_pages = _max_pdf_pages()
-        pages = [(page.extract_text() or "").strip() for page in reader.pages[:max_pages]]
-        total = len(reader.pages)
+        pages = [(page.extract_text() or "").strip() for page in reader.pages[:_max_pdf_pages()]]
+        return reader, pages, len(reader.pages)
     except Exception as e:
         logger.info(f"Could not read the PDF {name}: {type(e).__name__}: {e}")
         return None
-    if not any(pages):
-        # A scan: its pages are images, with no text to read (and no OCR here). Said as
-        # such, not as a type scrapeMM does not read
-        from scrapemm.common.exceptions import UnsupportedDomainError
-        raise UnsupportedDomainError(f"{name} is a scanned PDF without a text layer; "
-                                     f"scrapeMM does not run OCR.")
-    note = (f"(Only the first {max_pages} of {total} pages.)"
-            if total > max_pages else "")
+
+
+def _pdf_text(name: str, pages: list[str], total: int) -> tuple[str, str]:
+    """(HTML, Markdown) of a PDF's pages of text."""
+    note = (f"(Only the first {len(pages)} of {total} pages.)"
+            if total > len(pages) else "")
     paragraph, line = "\n\n", "\n"
     markdown = paragraph.join([f"# {name}"] + [p for p in pages if p] + ([note] if note else []))
     html_text = (f"<h1>{html.escape(name)}</h1>"

@@ -1873,7 +1873,7 @@ class HeadedBrowser(RetrievalIntegration):
         content_type = (served[0] if served else None) or content_type
         if not documents.document_extension(name):
             name = url  # E.g. eur-lex.europa.eu's ".../TXT/PDF/?uri=...": the URL says more
-        content = await asyncio.to_thread(documents.to_content, data, name, content_type)
+        content = await asyncio.to_thread(documents.to_content, data, name, content_type, url)
         if content is None:
             kind = documents.document_extension(name) or content_type or "binary"
             raise UnsupportedDomainError(

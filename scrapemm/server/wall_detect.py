@@ -100,4 +100,5 @@ def raw_document(content: ScrapedContent) -> bool:
     """Whether the "text" is a PDF's raw bytes, as a method that does not read documents
     passes them on."""
     text = (content.markdown or content.html or "").lstrip("`\r\n \t")
-    return text.startswith("%PDF-") or ("%PDF-1." in text[:1024] and "endobj" in text[:65536])
+    return (text.startswith(("%PDF-", "JVBERi0"))  # Also base64-encoded, as Decodo hands it on
+            or ("%PDF-1." in text[:1024] and "endobj" in text[:65536]))

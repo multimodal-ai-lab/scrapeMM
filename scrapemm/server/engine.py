@@ -1529,7 +1529,7 @@ async def _plain_http(url: str, session: aiohttp.ClientSession, output_format: O
     if is_document_content_type(content_type):
         # A PDF, a spreadsheet: read into text (see `download.documents`)
         name = urlsplit(final_url).path.rstrip("/").rsplit("/", 1)[-1]
-        if content := await asyncio.to_thread(documents_to_content, data, name, content_type):
+        if content := await asyncio.to_thread(documents_to_content, data, name, content_type, url):
             logger.info(f"📄 {url} is a {content_type.split(';')[0]} document; read it into text.")
             return content
         raise UnsupportedDomainError(f"{url} is a {content_type.split(';')[0]} document, "
