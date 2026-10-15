@@ -225,9 +225,10 @@ def waiting_count() -> int:
 
 def _archive_today_challenge() -> Optional[dict]:
     try:
-        from .integrations.archive_today import (get_archive_today_buffer,
+        from .integrations.archive_today import (archive_today_status, get_archive_today_buffer,
                                                  get_archive_today_latest)
         buffered = get_archive_today_buffer()
+        status = archive_today_status()
     except Exception:
         logger.debug("Could not read the Archive.today buffer.", exc_info=True)
         return None
@@ -235,7 +236,12 @@ def _archive_today_challenge() -> Optional[dict]:
         return None
     return {
         "domain": ARCHIVE_TODAY,
-        "captcha": "Archive.today security check",
+        "captcha": ("Archive.today refuses snapshot pages (Too Many Requests)" if status["refusing"]
+                    else "Archive.today security check"),
+        # Nothing to solve while it refuses everybody: asked again then by itself
+        "refusing": status["refusing"],
+        "asked_again_at": status["asked_again_at"],
+        "route": status["route"],
         "solve_url": f"https://{ARCHIVE_TODAY}/",
         "first_seen": None,
         "last_seen": None,

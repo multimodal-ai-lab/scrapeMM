@@ -225,7 +225,7 @@ onBeforeUnmount(() => {
           <div class="min-w-0 space-y-1">
             <div class="flex items-center gap-2 flex-wrap">
               <span class="font-medium">{{ c.domain }}</span>
-              <UBadge color="warning" variant="subtle" size="sm" :label="c.captcha" />
+              <UBadge :color="c.refusing ? 'error' : 'warning'" variant="subtle" size="sm" :label="c.captcha" />
               <UBadge
                 v-if="retrieving.includes(c.domain)" color="info" variant="subtle" size="sm"
                 icon="i-fa7-solid-spinner" label="retrieving the queue"
@@ -246,6 +246,10 @@ onBeforeUnmount(() => {
               <span v-if="c.last_seen && c.last_seen !== c.first_seen" :title="absoluteTime(c.last_seen)">
                 last {{ timeAgo(c.last_seen) }}
               </span>
+              <span v-if="c.refusing && c.asked_again_at" :title="absoluteTime(c.asked_again_at)">
+                nothing to solve: asked again {{ timeAgo(c.asked_again_at) }}
+              </span>
+              <span v-if="c.kind === 'archive_today' && c.route">via {{ c.route }}</span>
               <span v-if="c.kind === 'archive_today' && state.archive_today_cached_pages">
                 {{ state.archive_today_cached_pages }} pages cached for good
               </span>
@@ -256,7 +260,8 @@ onBeforeUnmount(() => {
             <UButton
               icon="i-fa7-solid-shield-halved" label="Solve"
               :loading="busy === c.domain && !solving"
-              :disabled="solving || !state.solvable || retrieving.includes(c.domain)"
+              :disabled="solving || !state.solvable || retrieving.includes(c.domain) || c.refusing"
+              :title="c.refusing ? 'Archive.today refuses every route right now: there is no check to solve' : undefined"
               @click="solve(c.domain)"
             />
             <UButton

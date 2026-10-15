@@ -16,7 +16,8 @@ from playwright.async_api import Page, Playwright
 
 from scrapemm.common.paths import APP_NAME
 from scrapemm.server import proxy
-from scrapemm.server.integrations.headed_browser import (Browser, _own, _run_soon,
+from scrapemm.server.integrations.headed_browser import (Browser, HeadedBrowser, _become_human_tab,
+                                                         _opening_human_tab, _own, _run_soon,
                                                          _shared_context, _shared_playwright)
 
 logger = logging.getLogger(APP_NAME)
@@ -29,25 +30,36 @@ class ProxiedBrowser(Browser):
         via = proxy.route()
         if via is None:
             return await super()._new_page(p, attempts)
-        browser, generation = await self._ensure_browser(
-            playwright=p or await _shared_playwright())
-        if browser is None:
-            raise RuntimeError("The shared browser is not connected.")
-        connection = (await _shared_context(browser, generation)).browser
-        context = await asyncio.wait_for(
-            connection.new_context(proxy=via.for_playwright(), ignore_https_errors=True),
-            timeout=30)
-        try:
-            page = await asyncio.wait_for(context.new_page(), timeout=30)
-            await _own(page)  # For its target id, should closing it need the endpoint
-        except BaseException:
-            with suppress(Exception):
-                await asyncio.wait_for(context.close(), timeout=10)
-            raise
-        # The context goes with its page (closed by `release_page()`)
-        page.once("close", lambda _: _run_soon(_close(context)))
-        logger.debug(f"Opened a browser page through the proxy {via.safe}.")
-        return page, generation
+        return await open_page_through(self, via, p)
+
+
+async def open_page_through(owner: HeadedBrowser, via: proxy.Proxy, p: Optional[Playwright] = None,
+                            cookies: Optional[list[dict]] = None) -> tuple[Page, int]:
+    """A page of the shared browser in a context of its own that goes through `via`,
+    with `cookies` (as Playwright lists them) set; closed with its page. The tab a human
+    is to look at, if opened inside `human_tab()`."""
+    browser, generation = await owner._ensure_browser(playwright=p or await _shared_playwright())
+    if browser is None:
+        raise RuntimeError("The shared browser is not connected.")
+    connection = (await _shared_context(browser, generation)).browser
+    context = await asyncio.wait_for(
+        connection.new_context(proxy=via.for_playwright(), ignore_https_errors=True),
+        timeout=30)
+    try:
+        if cookies:
+            await context.add_cookies(cookies)
+        page = await asyncio.wait_for(context.new_page(), timeout=30)
+        await _own(page)  # For its target id, should closing it need the endpoint
+    except BaseException:
+        with suppress(Exception):
+            await asyncio.wait_for(context.close(), timeout=10)
+        raise
+    # The context goes with its page (closed by `release_page()`)
+    page.once("close", lambda _: _run_soon(_close(context)))
+    if _opening_human_tab.get():
+        _become_human_tab(page)
+    logger.debug(f"Opened a browser page through the proxy {via.safe}.")
+    return page, generation
 
 
 async def _close(context) -> None:

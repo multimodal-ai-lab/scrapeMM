@@ -34,6 +34,7 @@ SETTINGS: dict[str, type] = {
     "blacklist_ttl": float,
     "archive_today_interactive_solve": bool,
     "archive_today_screenshot_fallback": bool,
+    "archive_today_proxy": str,  # The proxy Archive.today's requests go through (see its integration)
     "archive_today_solve_timeout": float,
     "devtools_local_port": int,
     "browser_user_agent": str,

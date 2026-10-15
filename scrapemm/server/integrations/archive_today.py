@@ -29,6 +29,14 @@ the moment of the request (sensible only for one-off, attended retrievals), and
 `archive_today_screenshot_fallback` serves what Archive.today offers without the check --
 the snapshot's full-page screenshot plus its original URL, capture time and title
 (resolved through the ungated `cse.js` and capture-listing endpoints).
+
+Archive.today also **refuses** snapshot pages outright at times: a bare "Too Many Requests"
+(HTTP 429), no check to pass. Then its other routes are tried -- this server's address and
+the proxies (see `scrapemm.server.proxy`) -- and the first it answers becomes the route all
+of its requests take from then on (`_route()`): plain HTTP, the browser, and the tab a human
+solves the check in, since the clearance is bound to the address it was earned from. Where
+it refuses every route, the URLs stay queued, and it is asked again every few minutes
+(`_watch_refusal()`); once it answers, the queue is retrieved.
 """
 
 import asyncio
@@ -51,7 +59,7 @@ from playwright.async_api import async_playwright, Page, TimeoutError as Playwri
 
 from scrapemm.server.workers import run_light
 from scrapemm.common import CaptchaEncounteredError
-from scrapemm.common.exceptions import RetrievalFailed, TargetUnavailableError
+from scrapemm.common.exceptions import RateLimitError, RetrievalFailed, TargetUnavailableError
 from scrapemm.server.config import get_config_var, update_config
 from scrapemm.server.paths import (SNAPSHOT_CACHE_PATH, PAGE_CACHE_DIR,
                                    BUFFER_PATH)
@@ -92,6 +100,51 @@ GATE_MARKERS = ("security check", "captcha", "just a moment",
 # e.g. two snapshot URLs run together (https://archive.ph/iUOsyhttps://archive.ph/eNsx3)
 _NOT_FOUND_PAGE = re.compile(r"^\s*not found\b", re.IGNORECASE)
 _TAGS = re.compile(r"<[^>]+>")
+
+
+def _is_refusal(body: str, status: Optional[int] = 429) -> bool:
+    """Whether the page is Archive.today refusing to serve snapshot pages at all: a bare
+    "Too Many Requests" (HTTP 429), no access check to pass. Seen 2026-10-15 for every
+    address alike: this server's, ten proxies', a residential one's, in a real browser too."""
+    text = " ".join(_TAGS.sub(" ", body or "").split()).lower()
+    return status in (429, None) and text == "too many requests"
+
+
+REFUSAL_HINT = (
+    "Archive.today refuses to serve snapshot pages right now (\"Too Many Requests\", to every "
+    "route scrapeMM has: this server and its proxies), so there is no CAPTCHA to solve. The "
+    "URL is queued: scrapeMM asks again every few minutes and retrieves the queue as soon as "
+    "Archive.today answers."
+)
+
+# The route Archive.today's requests take (see `_route()`): a proxy's address, in the config
+ROUTE_KEY = "archive_today_proxy"
+# While Archive.today refuses every route, it is asked again after this many seconds
+REFUSAL_PAUSE = 600
+_refused_until = 0.0  # Until when it refuses every route, as last found out
+_last_reroute: tuple[float, bool] = (0.0, False)  # When routes were last tried, and whether one answered
+REROUTE_MEMORY = 60  # seconds a found route is trusted without trying the routes again
+_reroute_lock = asyncio.Lock()
+_watcher: Optional[asyncio.Task] = None
+_ROUTE = object()  # `_http_get()`'s default: the current route
+
+
+def _route():
+    """The proxy Archive.today's requests go through, or None for this server's own address."""
+    url = get_config_var(ROUTE_KEY)
+    if not url:
+        return None
+    from scrapemm.server import proxy
+    return next((p for p in proxy.configured() if p.url == url and p.enabled), None)
+
+
+def _route_name(via) -> str:
+    return f"the proxy {via.safe}" if via is not None else "this server's address"
+
+
+def _refusing() -> bool:
+    """Whether Archive.today refuses every route, as last found out."""
+    return time.time() < _refused_until
 
 
 def _is_not_found(body: str, status: Optional[int] = None) -> bool:
@@ -172,7 +225,7 @@ def _is_decoy(body: str) -> bool:
 
 
 async def _get_via_curl_cffi(url: str, cookies: Optional[dict], user_agent: Optional[str],
-                             impersonate: str, timeout: float) -> tuple[Optional[int], str]:
+                             impersonate: str, timeout: float, via=None) -> tuple[Optional[int], str]:
     """GET with a real browser's TLS fingerprint. This is what gets past the nginx decoy
     that Archive.today serves to non-browser clients like aiohttp on some IPs. A short
     timeout matters: Archive.today tarpits some requests (accepts the connection, sends
@@ -185,9 +238,10 @@ async def _get_via_curl_cffi(url: str, cookies: Optional[dict], user_agent: Opti
     headers = {**ACCEPT_LANGUAGE, **({"User-Agent": user_agent} if user_agent else {})}
     try:
         # Not curl_cffi's AsyncSession, which breaks the event loop's sockets
+        proxies = {"http": via.with_auth, "https": via.with_auth} if via is not None else None
         response = await curl_get(url, impersonate=impersonate, headers=headers,
                                   cookies=cookies, allow_redirects=True, verify=False,
-                                  timeout=timeout)
+                                  timeout=timeout, proxies=proxies)
         return response.status_code, response.text
     except Exception as e:
         logger.debug(f"curl_cffi ({impersonate}) GET failed for {url}: {type(e).__name__}.")
@@ -195,16 +249,18 @@ async def _get_via_curl_cffi(url: str, cookies: Optional[dict], user_agent: Opti
 
 
 async def _get_via_aiohttp(url: str, cookies: Optional[dict], user_agent: Optional[str],
-                           timeout: float = 15) -> tuple[Optional[int], str]:
+                           timeout: float = 15, via=None) -> tuple[Optional[int], str]:
     """Plain-HTTP GET. Archive.today decoys this on some IPs but, oddly, serves it the
     capture listing that it 429s for curl_cffi -- hence both clients are tried. Bounded
     like the curl_cffi GET: without a timeout of its own, a tarpitted request waited out
     aiohttp's default of five minutes."""
     headers = {"User-Agent": user_agent or DEFAULT_USER_AGENT, **ACCEPT_LANGUAGE}
+    if via is not None and via.is_socks:
+        return None, ""  # aiohttp cannot go through a SOCKS proxy
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
-            async with session.get(url, headers=headers, cookies=cookies,
-                                   allow_redirects=True, ssl=False) as response:
+            async with session.get(url, headers=headers, cookies=cookies, allow_redirects=True,
+                                   ssl=False, proxy=via.with_auth if via is not None else None) as response:
                 return response.status, await response.text()
     except Exception:
         logger.debug(f"aiohttp GET failed for {url}.", exc_info=True)
@@ -222,7 +278,7 @@ def _log_fetch(url: str, transport: str, status: Optional[int], body: str,
 
 async def _http_get(url: str, cookies: Optional[dict] = None, user_agent: Optional[str] = None,
                     impersonations: tuple[str, ...] = _IMPERSONATIONS,
-                    timeout: float = 15) -> tuple[Optional[int], str]:
+                    timeout: float = 15, via=_ROUTE) -> tuple[Optional[int], str]:
     """GETs an Archive.today URL resiliently. Archive.today's anti-bot is inconsistent
     across endpoints, clients and IPs: aiohttp is served an nginx decoy on some IPs, while
     curl_cffi's impersonation is 429'd on some endpoints for some builds. So the given
@@ -230,17 +286,19 @@ async def _http_get(url: str, cookies: Optional[dict] = None, user_agent: Option
     is not the decoy) wins, failing which a real gate (429) is preferred over a decoy.
     Callers that hit a tarpit-prone endpoint (the replay page) pass a single impersonation
     so a stall costs one timeout, not one per build. Returns (status, body); (None, "") if
-    nothing got through."""
+    nothing got through. Through `via` (a proxy, or None for this server's address), by
+    default Archive.today's route (see `_route()`)."""
+    via = _route() if via is _ROUTE else via
     attempts: list[tuple[Optional[int], str]] = []
     for impersonate in impersonations:
         started = time.monotonic()
-        status, body = await _get_via_curl_cffi(url, cookies, user_agent, impersonate, timeout)
+        status, body = await _get_via_curl_cffi(url, cookies, user_agent, impersonate, timeout, via)
         _log_fetch(url, f"curl {impersonate}", status, body, started)
         if status == 200 and not _is_decoy(body):
             return status, body
         attempts.append((status, body))
     started = time.monotonic()
-    status, body = await _get_via_aiohttp(url, cookies, user_agent, timeout)
+    status, body = await _get_via_aiohttp(url, cookies, user_agent, timeout, via)
     _log_fetch(url, "aiohttp", status, body, started)
     if status == 200 and not _is_decoy(body):
         return status, body
@@ -684,12 +742,16 @@ def _extract_content_html(page_html: str) -> Optional[str]:
 
 # Outcome of fetching a snapshot page: real content, the access check, a genuine missing
 # capture, or an unrecognized response that means the network cannot reach archive.today.
-CONTENT, GATE, NOT_FOUND, BLOCKED = "content", "gate", "notfound", "blocked"
+CONTENT, GATE, NOT_FOUND, BLOCKED, REFUSED = "content", "gate", "notfound", "blocked", "refused"
 
 # How this machine reaches Archive.today, decided once by probing (see `_ensure_fetch_mode`):
 # FETCH_HTTP uses the fast curl_cffi/aiohttp path; FETCH_BROWSER routes retrieval through
 # the shared headed browser because plain HTTP is served the decoy here.
 FETCH_HTTP, FETCH_BROWSER = "http", "browser"
+
+
+class _Refused(RateLimitError):
+    """The browser found Archive.today refusing the snapshot page (see `_is_refusal()`)."""
 
 
 class _HttpUnusable(RetrievalFailed):
@@ -841,6 +903,11 @@ class ArchiveToday(HeadedBrowser):
                         f"{time.monotonic() - started:.1f} s.")
             return content
 
+        # Refusing every route: queued, and answered at once (see `_watch_refusal()`)
+        if _refusing():
+            _buffer.add(url)
+            raise RateLimitError(REFUSAL_HINT)
+
         # Known to be gated: answer at once instead of fetching into the same gate.
         # (Attended mode asks a human at the gate, so it still goes and looks.)
         leading = False
@@ -932,7 +999,15 @@ class ArchiveToday(HeadedBrowser):
         interactively, once, and shared across concurrent retrievals. Not page-cached:
         re-serving would re-resolve media over HTTP, so each URL is fetched afresh here."""
         try:
-            return await super()._get(url, **kwargs)
+            try:
+                return await super()._get(url, **kwargs)
+            except _Refused:
+                if not await _reroute():
+                    raise
+                return await super()._get(url, **kwargs)  # Through the route that answers
+        except _Refused:
+            _buffer.add(url)
+            raise RateLimitError(REFUSAL_HINT)
         except PlaywrightTimeoutError as e:
             # The page did not even start to load: Archive.today does not answer this
             # server right now (it stalls some requests for minutes), which is no fault
@@ -961,6 +1036,8 @@ class ArchiveToday(HeadedBrowser):
             body_text = ""
         if _is_not_found(body_text):
             raise TargetUnavailableError("Archive.today has no capture at this URL.")
+        if _is_refusal(body_text, None):
+            raise _Refused(REFUSAL_HINT)
         if _looks_like_gate(body_text):
             raise CaptchaEncounteredError(GATE_HINT)
         try:
@@ -975,8 +1052,13 @@ class ArchiveToday(HeadedBrowser):
         """The snapshot's content markup, or None if it stays behind the access check.
         Raises TargetUnavailableError if there is no such capture."""
         content, state = await self._try_fetch_content(session, url)
+        if state == REFUSED and await _reroute():
+            content, state = await self._try_fetch_content(session, url)
         if content is not None:
             return content
+        if state == REFUSED:
+            _buffer.add(url)
+            raise RateLimitError(REFUSAL_HINT)
         _raise_for_state(state)  # raises for NOT_FOUND / BLOCKED; returns for GATE
 
         if not _interactive_solve_enabled():
@@ -1035,7 +1117,7 @@ class ArchiveToday(HeadedBrowser):
                 if content is not None:
                     _pages.put(url, content)
                     done.add(url)
-                elif state == GATE:
+                elif state in (GATE, REFUSED):
                     gated_again = True
                 elif state == NOT_FOUND:
                     # No such capture -- retrying it in every future round is pointless
@@ -1113,6 +1195,8 @@ class ArchiveToday(HeadedBrowser):
             return content, CONTENT
         if _is_not_found(body, status):
             return None, NOT_FOUND
+        if _is_refusal(body, status):
+            return None, REFUSED
         if status == 429 or _looks_like_gate(body):
             return None, GATE
         logger.warning("Archive.today served an unrecognized response for %s (status %s, "
@@ -1140,13 +1224,25 @@ class ArchiveToday(HeadedBrowser):
             logger.warning("⚠️ The browser is running without its persistent profile, so the "
                            "session you establish now will go stale much sooner. Close any "
                            "other running scrapeMM process to avoid that.")
+        if _refusing() and not await _reroute():
+            logger.warning(f"⛔ {REFUSAL_HINT}")
+            return False
         logger.info(f"🔒 Archive.today asks for a captcha. Opening {snapshot_url} in scrapeMM's "
-                    f"browser — please pass the check (waiting up to {timeout:.0f}s).")
+                    f"browser through {_route_name(_route())} — please pass the check (waiting "
+                    f"up to {timeout:.0f}s).")
 
         async with async_playwright() as p:
             page, _ = await self._new_page(p)
             try:
                 await page.goto(snapshot_url, timeout=60_000, wait_until="domcontentloaded")
+                if _is_refusal(await page.locator("body").inner_text(), None):
+                    # Refused on this route: on another, if one answers, the check can be passed
+                    await release_page(page)
+                    if not await _reroute():
+                        logger.warning(f"⛔ {REFUSAL_HINT}")
+                        return False
+                    page, _ = await self._new_page(p)
+                    await page.goto(snapshot_url, timeout=60_000, wait_until="domcontentloaded")
                 if not await self._await_gate_passed(page, timeout):
                     return False
                 cookies = await page.context.cookies(f"https://{CANONICAL_DOMAIN}/")
@@ -1209,6 +1305,17 @@ class ArchiveToday(HeadedBrowser):
 
         logger.warning("⌛ Gave up waiting, the access check is still shown.")
         return False
+
+    async def _new_page(self, p=None, attempts: int = 3):
+        """A tab on Archive.today's route (see `_route()`): through its proxy, with the
+        stored session's cookies, if it goes through one; the shared browser's otherwise."""
+        via = _route()
+        if via is None:
+            return await super()._new_page(p, attempts)
+        from scrapemm.server.integrations.proxy_browser import open_page_through
+        cookies = [c for c in parse_cookies(get_secret("archive_today_cookie") or "")
+                   if c.get("name") and c.get("domain")]
+        return await open_page_through(self, via, p, cookies=cookies)
 
     async def _pin_user_agent(self, page: Page) -> None:
         """Records the user agent the session was established with, so every later request
@@ -1276,3 +1383,93 @@ async def retrieve_buffered_archive_today() -> int:
 def count_cached_archive_today_pages() -> int:
     """How many Archive.today pages are held in the permanent cache."""
     return len(_pages)
+
+
+async def _route_state(via) -> str:
+    """What Archive.today answers a snapshot page with through `via` (a proxy, or None for
+    this server's address): CONTENT, GATE, REFUSED, NOT_FOUND or BLOCKED."""
+    clearance = ArchiveToday._clearance()
+    status, body = await _http_get(f"https://{CANONICAL_DOMAIN}/{VERIFICATION_SNAPSHOT}",
+                                   cookies={CLEARANCE_COOKIE: clearance} if clearance else None,
+                                   user_agent=get_config_var("browser_user_agent") or None,
+                                   impersonations=("chrome124",), via=via)
+    if _extract_content_html(body):
+        return CONTENT
+    if _is_refusal(body, status):
+        return REFUSED
+    if _is_not_found(body, status):
+        return NOT_FOUND
+    if status == 429 or _looks_like_gate(body):
+        return GATE
+    return BLOCKED
+
+
+async def _reroute() -> bool:
+    """After a refusal: tries Archive.today's routes -- this server's address, then each
+    proxy in use -- for one it answers (with the page or with its check), and makes that its
+    route (see `_route()`). Returns whether one answers. If none does, it refuses everybody:
+    then it is asked again after `REFUSAL_PAUSE` (see `_watch_refusal()`), and meanwhile
+    every URL is queued at once."""
+    global _refused_until, _last_reroute
+    async with _reroute_lock:
+        if _refusing():
+            return False
+        if time.time() - _last_reroute[0] < REROUTE_MEMORY:
+            return _last_reroute[1]  # Another request just found out
+        from scrapemm.server import proxy
+        current = _route()
+        candidates = [None, *(p for p in proxy.configured() if proxy.usable(p))]
+        for via in candidates:
+            state = await _route_state(via)
+            logger.info(f"Archive.today through {_route_name(via)}: {state}.")
+            if state in (CONTENT, GATE):
+                if (via and via.url) != (current and current.url):
+                    update_config(**{ROUTE_KEY: via.url if via is not None else None})
+                    logger.warning(f"🔀 Archive.today refused {_route_name(current)}; its requests "
+                                   f"go through {_route_name(via)} from now on.")
+                _last_reroute = (time.time(), True)
+                return True
+        _refused_until = time.time() + REFUSAL_PAUSE
+        _last_reroute = (time.time(), False)
+        logger.warning(f"⛔ Archive.today refuses snapshot pages to all {len(candidates)} routes "
+                       f"(this server and its proxies); asking again in {REFUSAL_PAUSE / 60:.0f} "
+                       f"min, and retrieving the queue once it answers.")
+        _ensure_watcher()
+        return False
+
+
+def _ensure_watcher() -> None:
+    global _watcher
+    if _watcher is None or _watcher.done():
+        _watcher = asyncio.ensure_future(_watch_refusal())
+
+
+async def _watch_refusal() -> None:
+    """While Archive.today refuses every route and URLs wait: asks again every
+    `REFUSAL_PAUSE`; once it answers, retrieves the queue -- right away if the stored
+    clearance lets the pages through, else it waits for a human on the CAPTCHA page."""
+    global _refused_until, _last_reroute
+    while _buffer.urls():
+        await asyncio.sleep(max(5.0, _refused_until - time.time()))
+        _refused_until, _last_reroute = 0.0, (0.0, False)
+        try:
+            if not await _reroute():
+                continue
+            if await _route_state(_route()) == CONTENT:
+                logger.info("Archive.today answers again; retrieving its queue.")
+                await retrieve_buffered_archive_today()
+            else:
+                logger.info("Archive.today answers again, with its check: the queue waits for "
+                            "a human on the CAPTCHA page.")
+        except Exception:
+            logger.warning("Asking Archive.today again failed.", exc_info=True)
+            _refused_until = time.time() + REFUSAL_PAUSE
+            continue
+        return
+
+
+def archive_today_status() -> dict:
+    """Whether Archive.today refuses every route, and the route its requests take, for the
+    CAPTCHA page."""
+    return {"refusing": _refusing(), "asked_again_at": _refused_until if _refusing() else None,
+            "route": _route_name(_route())}
