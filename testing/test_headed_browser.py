@@ -247,6 +247,26 @@ async def test_transient_connect_failure_does_not_permanently_block_future_calls
 
 
 @pytest.mark.asyncio
+async def test_dead_playwright_driver_is_replaced():
+    """A Playwright driver process that died is replaced. Playwright itself does not
+    notice the death, so the dead one was otherwise used for good, failing every call
+    with "the handler is closed"."""
+    from scrapemm.server.integrations import headed_browser as hb
+    first = await hb._shared_playwright()
+    transport = first._impl_obj._connection._transport
+    transport._proc.kill()
+    await asyncio.wait_for(asyncio.shield(transport._stopped_future), timeout=10)
+    assert not hb._driver_alive(first)
+
+    second = await hb._shared_playwright()
+    try:
+        assert second is not first
+        assert hb._driver_alive(second)
+    finally:
+        await second.stop()
+
+
+@pytest.mark.asyncio
 async def test_get_survives_client_side_redirect_abort():
     """A page.goto() failing with net::ERR_ABORTED (the page redirected itself before our
     wait_until condition fired, e.g. Wayback SPA snapshots) must not be treated as a crash

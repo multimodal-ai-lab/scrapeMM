@@ -28,7 +28,9 @@ firecrawl-py~=4.32.0
 markdownify~=1.2.3
 openpyxl~=3.1.5  # Reads spreadsheets that URLs serve as files (see download/documents.py)
 pypdf~=6.19.0  # Reads the text of PDFs (pure Python; see download/documents.py)
-pip-system-certs  # For better SSL certificate handling
+# No pip-system-certs: its truststore re-reads the CA bundle (100+ ms) for every TLS
+# connection, on the event loop -- stalls of seconds under load. Linux trusts the same
+# system bundle without it.
 platformdirs~=4.11.8
 playwright~=1.62.0
 playwright-stealth

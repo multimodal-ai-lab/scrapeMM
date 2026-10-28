@@ -792,9 +792,32 @@ def _shared_state() -> dict:
     return _shared
 
 
+def _driver_alive(playwright: Optional[Playwright]) -> bool:
+    """Whether the driver process behind `playwright` still runs. When it dies (killed,
+    out of memory), Playwright notices nothing: the connection still says it is
+    connected, and every call fails on the closed pipe ("unable to perform operation on
+    <WriteUnixTransport closed=True ...>; the handler is closed") -- for good."""
+    if playwright is None:
+        return False
+    try:
+        stopped = playwright._impl_obj._connection._transport._stopped_future
+    except AttributeError:
+        return True  # Another Playwright version; assumed alive
+    return not stopped.done()
+
+
+def _forget_dead_driver(state: dict) -> None:
+    """Drops the shared driver and its connection if the driver died, so the next use
+    starts a new one. Caller must hold `state["lock"]`."""
+    if state["playwright"] is not None and not _driver_alive(state["playwright"]):
+        logger.warning("Playwright's driver process died; starting a new one.")
+        state.update(playwright=None, connection=None, generation=None, default_context=None)
+
+
 async def _shared_playwright() -> Playwright:
     state = _shared_state()
     async with state["lock"]:
+        _forget_dead_driver(state)
         if state["playwright"] is None:
             state["playwright"] = await async_playwright().start()
         return state["playwright"]
@@ -812,6 +835,7 @@ async def _shared_context(browser: Browser, generation: int) -> BrowserContext:
     without anybody asking for it."""
     state = _shared_state()
     async with state["lock"]:
+        _forget_dead_driver(state)
         connection = state["connection"]
         if connection is not None and (state["generation"] != generation
                                        or not connection.is_connected()):
@@ -1515,6 +1539,8 @@ class HeadedBrowser(RetrievalIntegration):
                 raise RuntimeError(f"Failed to initiate a new browser page.") from e
 
             except Exception as e:
+                if attempt < attempts - 1 and not _driver_alive(_shared_state()["playwright"]):
+                    continue  # The driver died under it; the next attempt starts a new one
                 raise RuntimeError(f"Failed to initiate a new browser page.") from e
 
         raise RuntimeError(f"Failed to initiate a new browser page after {attempts} attempts.")
