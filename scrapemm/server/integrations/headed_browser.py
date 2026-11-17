@@ -846,6 +846,7 @@ async def _shared_context(browser: Browser, generation: int) -> BrowserContext:
         if connection is None:
             if state["playwright"] is None:
                 state["playwright"] = await async_playwright().start()
+            await _close_contextless_targets(browser)
             try:
                 connection = await state["playwright"].chromium.connect_over_cdp(
                     browser.get_endpoint_url(), timeout=30_000)
@@ -859,6 +860,49 @@ async def _shared_context(browser: Browser, generation: int) -> BrowserContext:
             state["connection"], state["generation"] = connection, generation
             state["default_context"] = connection.contexts[0]  # Before any other exists
         return state["default_context"]
+
+
+async def _close_contextless_targets(browser: Browser) -> int:
+    """Closes the targets that belong to no browser context. Playwright asserts that
+    every target it attaches to has one, and that assertion kills its driver process:
+    a service worker left without its context (lancasteronline.com's, after the driver
+    had died of running out of memory) made every new driver die while connecting --
+    the browser method failed for every URL, for a day, while the browser itself lived
+    on. Such a target serves no page, so nothing is lost by closing it."""
+    try:
+        port = urlparse(browser.get_endpoint_url()).port
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"http://127.0.0.1:{port}/json/version",
+                                   timeout=aiohttp.ClientTimeout(total=5)) as response:
+                ws_url = (await response.json(content_type=None))["webSocketDebuggerUrl"]
+            async with session.ws_connect(ws_url, timeout=5, max_msg_size=0) as ws:
+                async def call(call_id: int, method: str, params: dict) -> dict:
+                    await ws.send_json({"id": call_id, "method": method, "params": params})
+                    async with asyncio.timeout(5):
+                        async for message in ws:
+                            data = message.json()
+                            if data.get("id") == call_id:
+                                return data
+                    return {}
+
+                targets = (await call(1, "Target.getTargets", {})).get("result", {}).get("targetInfos", [])
+                stray = [t for t in targets
+                         if t.get("type") != "browser" and not t.get("browserContextId")]
+                closed = 0
+                for i, target in enumerate(stray, start=2):
+                    answer = await call(i, "Target.closeTarget", {"targetId": target["targetId"]})
+                    if answer.get("result", {}).get("success"):
+                        closed += 1
+                    else:
+                        logger.warning(f"Could not close the {target.get('type')} {target.get('url')} "
+                                       f"that belongs to no browser context: {answer.get('error')}")
+        if closed:
+            logger.info(f"Closed {closed} browser target(s) that belonged to no browser "
+                        f"context (Playwright cannot connect while they are there).")
+        return closed
+    except Exception:
+        logger.debug("Could not look for targets without a browser context.", exc_info=True)
+        return 0
 
 
 async def _tab_answers(session: aiohttp.ClientSession, ws_url: Optional[str]) -> bool:
@@ -976,7 +1020,7 @@ async def _fetch_in_browser(page: Page, url: str) -> tuple[Optional[bytes], Opti
                 await asyncio.sleep(1)  # Its check passes by the same JavaScript
         session = await page.context.new_cdp_session(page)
     except Exception as e:
-        return None, None, f"{type(e).__name__}: {str(e).splitlines()[0][:100]}"
+        return None, None, f"{type(e).__name__}: {(str(e).splitlines() or [''])[0][:100]}"
     stream = None
     try:
         frame_id = (await session.send("Page.getFrameTree"))["frameTree"]["frame"]["id"]
@@ -1000,7 +1044,7 @@ async def _fetch_in_browser(page: Page, url: str) -> tuple[Optional[bytes], Opti
                 break
         return b"".join(chunks), headers.get("content-type"), "read"
     except Exception as e:
-        return None, None, f"{type(e).__name__}: {str(e).splitlines()[0][:100]}"
+        return None, None, f"{type(e).__name__}: {(str(e).splitlines() or [''])[0][:100]}"
     finally:
         if stream:
             with suppress(Exception):
@@ -1485,6 +1529,7 @@ class HeadedBrowser(RetrievalIntegration):
         page along with the browser generation it was opened on, so callers can report a
         crash precisely. Close the page with `release_page()`."""
         bad_generation = None
+        driver_deaths = 0
         for attempt in range(attempts):
             browser, generation = await self._ensure_browser(
                 bad_generation, playwright=p or await _shared_playwright())
@@ -1540,7 +1585,16 @@ class HeadedBrowser(RetrievalIntegration):
 
             except Exception as e:
                 if attempt < attempts - 1 and not _driver_alive(_shared_state()["playwright"]):
-                    continue  # The driver died under it; the next attempt starts a new one
+                    # The driver died under it; the next attempt starts a new one. If
+                    # that one died too, something in the browser kills every driver
+                    # that connects (see `_close_contextless_targets()`), and the next
+                    # attempt restarts the browser rather than fail like this for good.
+                    driver_deaths += 1
+                    bad_generation = generation if driver_deaths >= 2 else None
+                    if bad_generation is not None:
+                        logger.warning("Every new Playwright driver dies while connecting "
+                                       "to the browser; restarting the browser.")
+                    continue
                 raise RuntimeError(f"Failed to initiate a new browser page.") from e
 
         raise RuntimeError(f"Failed to initiate a new browser page after {attempts} attempts.")
@@ -1699,7 +1753,7 @@ class HeadedBrowser(RetrievalIntegration):
                         # The host cannot be reached from here: no second page will
                         # change that, but other methods (remote services) still may
                         raise RetrievalFailed(f"{self.name} could not reach {url}: "
-                                              f"{str(e).splitlines()[0]}") from e
+                                              f"{(str(e).splitlines() or [''])[0]}") from e
                     if (self.fails_on_not_found and (served or downloads)
                             and isinstance(e, PlaywrightTimeoutError)):
                         # A document, which the viewer shows without ever finishing a DOM
@@ -1824,7 +1878,7 @@ class HeadedBrowser(RetrievalIntegration):
                     raise  # The engine reports timeouts as such
                 # Not a crash: as a failure of this method, not as a raw Playwright error
                 raise RetrievalFailed(f"{self.name} failed in the browser at {url}: "
-                                      f"{str(e).splitlines()[0][:300]}") from e
+                                      f"{(str(e).splitlines() or [''])[0][:300]}") from e
             finally:
                 await close_page()
 
@@ -1962,7 +2016,7 @@ class HeadedBrowser(RetrievalIntegration):
                                                                       "the viewer"):
                     return data, content_type
             except Exception as e:
-                failures.append(f"the viewer: {type(e).__name__}: {str(e).splitlines()[0][:100]}")
+                failures.append(f"the viewer: {type(e).__name__}: {(str(e).splitlines() or [''])[0][:100]}")
         data, content_type, outcome = await _fetch_in_browser(page, url)
         if data is not None and usable(data, content_type, "the browser's network"):
             return data, content_type

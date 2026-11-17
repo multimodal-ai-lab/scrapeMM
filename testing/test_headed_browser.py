@@ -380,3 +380,74 @@ def test_phases_count_each_step_until_the_next_one(monkeypatch):
     phases.enter("media")
     now[0] += 110.5
     assert phases.summary() == "load 4.0 s, media 110.5 s"
+
+
+@pytest.mark.asyncio
+async def test_targets_without_a_browser_context_are_closed():
+    """A target without a browser context (a stray service worker) kills every
+    Playwright driver that connects. It is closed before connecting; the others stay."""
+    from aiohttp import web
+    from scrapemm.server.integrations import headed_browser as hb
+
+    targets = [
+        {"targetId": "SW", "type": "service_worker", "url": "https://a.example/sw.js"},
+        {"targetId": "P", "type": "page", "url": "https://b.example", "browserContextId": "C"},
+        {"targetId": "W", "type": "worker", "url": "blob:x", "browserContextId": "C"},
+    ]
+    closed = []
+
+    async def version(request):
+        return web.json_response({"webSocketDebuggerUrl": f"ws://127.0.0.1:{port}/devtools/browser"})
+
+    async def devtools(request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        async for message in ws:
+            call = message.json()
+            if call["method"] == "Target.getTargets":
+                await ws.send_json({"id": call["id"], "result": {"targetInfos": targets}})
+            elif call["method"] == "Target.closeTarget":
+                closed.append(call["params"]["targetId"])
+                await ws.send_json({"id": call["id"], "result": {"success": True}})
+        return ws
+
+    app = web.Application()
+    app.router.add_get("/json/version", version)
+    app.router.add_get("/devtools/browser", devtools)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    try:
+        browser = make_mock_browser()
+        browser.get_endpoint_url.return_value = f"ws://127.0.0.1:{port}/devtools/browser"
+        assert await hb._close_contextless_targets(browser) == 1
+        assert closed == ["SW"]
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_browser_is_restarted_when_every_new_driver_dies():
+    """When the driver dies while connecting twice in a row, the browser holds something
+    that kills every driver: the third attempt restarts the browser rather than fail."""
+    from scrapemm.server.integrations import headed_browser as hb
+    integration = PermaCC()
+    reported = []
+
+    async def fake_ensure_browser(bad_generation=None, playwright=None):
+        reported.append(bad_generation)
+        return make_mock_browser(), 7
+
+    async def dying_connect(_browser, _generation):
+        raise Exception("BrowserType.connect_over_cdp: Connection closed while reading from the driver")
+
+    with patch.object(HeadedBrowser, "_ensure_browser", side_effect=fake_ensure_browser), \
+         patch.object(hb, "_shared_playwright", side_effect=lambda: asyncio.sleep(0)), \
+         patch.object(hb, "_shared_context", side_effect=dying_connect), \
+         patch.object(hb, "_driver_alive", return_value=False):
+        with pytest.raises(RuntimeError):
+            await integration._new_page(MagicMock())
+
+    assert reported == [None, None, 7]

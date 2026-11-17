@@ -486,7 +486,7 @@ def learn(proxy: Proxy, method: str, error: Optional[BaseException],
         _health.save()
         return
     if proxy_failed(error):
-        health.down_until, health.down_reason = now + DOWN_FOR, str(error).splitlines()[0][:200]
+        health.down_until, health.down_reason = now + DOWN_FOR, (str(error).splitlines() or [''])[0][:200]
         logger.warning(f"🔌 The proxy {proxy.url} failed ({health.down_reason}); leaving it "
                        f"out for {DOWN_FOR / 60:.0f} min.")
         _health.save(force=True)
@@ -503,7 +503,7 @@ def learn(proxy: Proxy, method: str, error: Optional[BaseException],
     record = health.record(method)
     record.decay(now)
     record.refused += 1
-    record.last_refusal = str(error).splitlines()[0][:200]
+    record.last_refusal = (str(error).splitlines() or [''])[0][:200]
     if not challenged:  # A CAPTCHA mars the reputation, but a human may still solve it
         rest = _rest_for(method)
         if method in WEB_METHODS and site:  # One website's refusal: rest from it only

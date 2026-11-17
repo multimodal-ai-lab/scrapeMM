@@ -620,7 +620,7 @@ async def _retrieve(
                and (via := proxy.pick(method_name, exclude=tried, site=domain,
                                       avoid_regions=avoid))):
             logger.info(f"🔀 Retrying {method_name} for {url} through the proxy {via.url}: "
-                        f"{str(outcome[1]).splitlines()[0][:200]}")
+                        f"{(str(outcome[1]).splitlines() or [''])[0][:200]}")
             if not current.used:
                 direct_errors[method_name] = outcome[1]
             outcome, current = await run_attempt(method_name, via)

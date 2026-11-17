@@ -85,9 +85,12 @@ class Telegram(RetrievalIntegration):
         # Parse the URL to get channel/group name and post ID
         parsed = urlparse(url)
         path_parts = parsed.path.strip("/").split("/")
+        if path_parts[0] == "s":  # The web preview: t.me/s/channel_name[/post_id]
+            path_parts = path_parts[1:]
 
-        if len(path_parts) < 2:
-            raise ValueError("Invalid Telegram post URL. Expected format: https://t.me/channel_name/post_id")
+        if len(path_parts) < 2 or not path_parts[1].isdigit():
+            # A channel page, not a post: the other methods render it
+            raise NotImplementedError(f"Only Telegram posts are supported, got: {url}")
 
         channel_name = path_parts[0]
         post_id = int(path_parts[1])
