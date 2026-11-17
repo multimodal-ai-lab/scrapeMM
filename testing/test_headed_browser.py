@@ -382,19 +382,12 @@ def test_phases_count_each_step_until_the_next_one(monkeypatch):
     assert phases.summary() == "load 4.0 s, media 110.5 s"
 
 
-@pytest.mark.asyncio
-async def test_targets_without_a_browser_context_are_closed():
-    """A target without a browser context (a stray service worker) kills every
-    Playwright driver that connects. It is closed before connecting; the others stay."""
+@pytest.fixture
+async def fake_devtools():
+    """A browser's DevTools endpoint serving the targets the test puts into `targets`;
+    the ids of those it was asked to close end up in `closed`."""
     from aiohttp import web
-    from scrapemm.server.integrations import headed_browser as hb
-
-    targets = [
-        {"targetId": "SW", "type": "service_worker", "url": "https://a.example/sw.js"},
-        {"targetId": "P", "type": "page", "url": "https://b.example", "browserContextId": "C"},
-        {"targetId": "W", "type": "worker", "url": "blob:x", "browserContextId": "C"},
-    ]
-    closed = []
+    state = {"targets": [], "closed": []}
 
     async def version(request):
         return web.json_response({"webSocketDebuggerUrl": f"ws://127.0.0.1:{port}/devtools/browser"})
@@ -405,9 +398,9 @@ async def test_targets_without_a_browser_context_are_closed():
         async for message in ws:
             call = message.json()
             if call["method"] == "Target.getTargets":
-                await ws.send_json({"id": call["id"], "result": {"targetInfos": targets}})
+                await ws.send_json({"id": call["id"], "result": {"targetInfos": state["targets"]}})
             elif call["method"] == "Target.closeTarget":
-                closed.append(call["params"]["targetId"])
+                state["closed"].append(call["params"]["targetId"])
                 await ws.send_json({"id": call["id"], "result": {"success": True}})
         return ws
 
@@ -419,11 +412,91 @@ async def test_targets_without_a_browser_context_are_closed():
     site = web.TCPSite(runner, "127.0.0.1", 0)
     await site.start()
     port = site._server.sockets[0].getsockname()[1]
+    browser = make_mock_browser()
+    browser.get_endpoint_url.return_value = f"ws://127.0.0.1:{port}/devtools/browser"
+    state["browser"] = browser
+    yield state
+    await runner.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_targets_without_a_browser_context_are_closed(fake_devtools):
+    """A target without a browser context (a stray service worker) kills every
+    Playwright driver that connects. It is closed before connecting; the others stay."""
+    from scrapemm.server.integrations import headed_browser as hb
+    fake_devtools["targets"] = [
+        {"targetId": "SW", "type": "service_worker", "url": "https://a.example/sw.js"},
+        {"targetId": "P", "type": "page", "url": "https://b.example", "browserContextId": "C"},
+        {"targetId": "W", "type": "worker", "url": "blob:x", "browserContextId": "C"},
+    ]
+    assert await hb._close_contextless_targets(fake_devtools["browser"]) == 1
+    assert fake_devtools["closed"] == ["SW"]
+
+
+@pytest.mark.asyncio
+async def test_stray_tabs_are_closed(fake_devtools, monkeypatch):
+    """Popups no retrieval owns are closed at once, other unowned tabs once they are
+    older than any retrieval; owned, blank and browser tabs stay."""
+    from scrapemm.server.integrations import headed_browser as hb
+    monkeypatch.setattr(hb, "_owned_tabs", {"OWNED", "OWNED_POPUP"})
+    monkeypatch.setattr(hb, "_unowned_since", {})
+    page = {"type": "page", "browserContextId": "C"}
+    fake_devtools["targets"] = [
+        {**page, "targetId": "OWNED", "url": "https://a.example"},
+        {**page, "targetId": "OWNED_POPUP", "url": "https://a.example", "openerFrameId": "F"},
+        {**page, "targetId": "POPUP", "url": "https://ad.example", "openerFrameId": "F"},
+        {**page, "targetId": "LEFT", "url": "https://b.example"},
+        {**page, "targetId": "BLANK", "url": "about:blank"},
+        {**page, "targetId": "NEWTAB", "url": "chrome://newtab/"},
+        {**page, "targetId": "BG", "url": hb._BACKGROUND_TAB_PREFIX + "x"},
+        {"type": "iframe", "targetId": "FRAME", "url": "https://c.example", "browserContextId": "C"},
+    ]
+    assert await hb._close_stray_tabs(fake_devtools["browser"]) == 1
+    assert fake_devtools["closed"] == ["POPUP"]
+
+    # Five minutes on, the left-over page is closed too
+    hb._unowned_since["LEFT"] -= hb.STRAY_TAB_AGE
+    fake_devtools["targets"] = [t for t in fake_devtools["targets"] if t["targetId"] != "POPUP"]
+    assert await hb._close_stray_tabs(fake_devtools["browser"]) == 1
+    assert fake_devtools["closed"] == ["POPUP", "LEFT"]
+
+
+@pytest.mark.asyncio
+async def test_popups_of_a_real_page_are_closed():
+    """In a real Chromium: the popup a page opens is closed, the page itself is not."""
+    from aiohttp import web
+    from playwright.async_api import async_playwright
+    from scrapemm.server.integrations import headed_browser as hb
+
+    app = web.Application()
+    app.router.add_get("/", lambda r: web.Response(
+        text="<script>window.open('/ad', '_blank', 'noopener')</script>", content_type="text/html"))
+    app.router.add_get("/ad", lambda r: web.Response(text="ad", content_type="text/html"))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    debugging_port = 9400 + port % 500
     try:
-        browser = make_mock_browser()
-        browser.get_endpoint_url.return_value = f"ws://127.0.0.1:{port}/devtools/browser"
-        assert await hb._close_contextless_targets(browser) == 1
-        assert closed == ["SW"]
+        async with async_playwright() as p:
+            chromium = await p.chromium.launch(args=[f"--remote-debugging-port={debugging_port}"])
+            try:
+                context = await chromium.new_context()
+                page = await context.new_page()
+                async with context.expect_page() as popup_info:
+                    await page.goto(f"http://127.0.0.1:{port}/")
+                popup = await popup_info.value
+                await popup.wait_for_load_state()
+                await hb._own(page)
+                browser = make_mock_browser()
+                browser.get_endpoint_url.return_value = f"ws://127.0.0.1:{debugging_port}/devtools/browser/x"
+                assert await hb._close_stray_tabs(browser) == 1
+                await popup.wait_for_event("close", timeout=5000)
+                assert not page.is_closed()
+            finally:
+                hb._owned_tabs.discard(getattr(page, "_scrapemm_target_id", None))
+                await chromium.close()
     finally:
         await runner.cleanup()
 

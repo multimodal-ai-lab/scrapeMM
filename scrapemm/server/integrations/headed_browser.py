@@ -380,14 +380,17 @@ async def _watch_orphaned_browsers() -> None:
 
 _storage_watch: Optional[asyncio.Task] = None
 _orphan_watch: Optional[asyncio.Task] = None
+_stray_tab_watch: Optional[asyncio.Task] = None
 
 
 def _start_storage_watch() -> None:
-    global _storage_watch, _orphan_watch
+    global _storage_watch, _orphan_watch, _stray_tab_watch
     if _storage_watch is None or _storage_watch.done():
         _storage_watch = asyncio.ensure_future(_watch_replay_storage())
     if _orphan_watch is None or _orphan_watch.done():
         _orphan_watch = asyncio.ensure_future(_watch_orphaned_browsers())
+    if _stray_tab_watch is None or _stray_tab_watch.done():
+        _stray_tab_watch = asyncio.ensure_future(_watch_stray_tabs())
 
 
 def _kill_process_tree(pid: int) -> None:
@@ -725,7 +728,9 @@ async def release_page(page: Page) -> None:
     except Exception:
         pass
     try:
-        closed = page.is_closed()
+        # A page whose driver died counts itself closed, but its tab is still open: it
+        # was never told otherwise (terra.com.br, looky.com, ... stayed open for good)
+        closed = page.is_closed() and _page_driver_alive(page)
     except Exception:
         closed = False
     if not closed and target_id:
@@ -806,6 +811,14 @@ def _driver_alive(playwright: Optional[Playwright]) -> bool:
     return not stopped.done()
 
 
+def _page_driver_alive(page: Page) -> bool:
+    """Whether the driver process that `page` was opened through still runs."""
+    try:
+        return not page._impl_obj._connection._transport._stopped_future.done()
+    except AttributeError:
+        return True  # Another Playwright version; assumed alive
+
+
 def _forget_dead_driver(state: dict) -> None:
     """Drops the shared driver and its connection if the driver died, so the next use
     starts a new one. Caller must hold `state["lock"]`."""
@@ -862,6 +875,36 @@ async def _shared_context(browser: Browser, generation: int) -> BrowserContext:
         return state["default_context"]
 
 
+async def _close_targets(browser: Browser, select, what: str) -> int:
+    """Closes the targets that `select(target_info)` picks, over the browser's own
+    DevTools connection (no Playwright involved). Returns how many were closed."""
+    port = urlparse(browser.get_endpoint_url()).port
+    async with aiohttp.ClientSession() as session:
+        async with session.get(f"http://127.0.0.1:{port}/json/version",
+                               timeout=aiohttp.ClientTimeout(total=5)) as response:
+            ws_url = (await response.json(content_type=None))["webSocketDebuggerUrl"]
+        async with session.ws_connect(ws_url, timeout=5, max_msg_size=0) as ws:
+            async def call(call_id: int, method: str, params: dict) -> dict:
+                await ws.send_json({"id": call_id, "method": method, "params": params})
+                async with asyncio.timeout(5):
+                    async for message in ws:
+                        data = message.json()
+                        if data.get("id") == call_id:
+                            return data
+                return {}
+
+            targets = (await call(1, "Target.getTargets", {})).get("result", {}).get("targetInfos", [])
+            closed = 0
+            for i, target in enumerate([t for t in targets if select(t)], start=2):
+                answer = await call(i, "Target.closeTarget", {"targetId": target["targetId"]})
+                if answer.get("result", {}).get("success"):
+                    closed += 1
+                else:
+                    logger.warning(f"Could not close the {target.get('type')} {target.get('url')} "
+                                   f"({what}): {answer.get('error')}")
+    return closed
+
+
 async def _close_contextless_targets(browser: Browser) -> int:
     """Closes the targets that belong to no browser context. Playwright asserts that
     every target it attaches to has one, and that assertion kills its driver process:
@@ -870,32 +913,9 @@ async def _close_contextless_targets(browser: Browser) -> int:
     the browser method failed for every URL, for a day, while the browser itself lived
     on. Such a target serves no page, so nothing is lost by closing it."""
     try:
-        port = urlparse(browser.get_endpoint_url()).port
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"http://127.0.0.1:{port}/json/version",
-                                   timeout=aiohttp.ClientTimeout(total=5)) as response:
-                ws_url = (await response.json(content_type=None))["webSocketDebuggerUrl"]
-            async with session.ws_connect(ws_url, timeout=5, max_msg_size=0) as ws:
-                async def call(call_id: int, method: str, params: dict) -> dict:
-                    await ws.send_json({"id": call_id, "method": method, "params": params})
-                    async with asyncio.timeout(5):
-                        async for message in ws:
-                            data = message.json()
-                            if data.get("id") == call_id:
-                                return data
-                    return {}
-
-                targets = (await call(1, "Target.getTargets", {})).get("result", {}).get("targetInfos", [])
-                stray = [t for t in targets
-                         if t.get("type") != "browser" and not t.get("browserContextId")]
-                closed = 0
-                for i, target in enumerate(stray, start=2):
-                    answer = await call(i, "Target.closeTarget", {"targetId": target["targetId"]})
-                    if answer.get("result", {}).get("success"):
-                        closed += 1
-                    else:
-                        logger.warning(f"Could not close the {target.get('type')} {target.get('url')} "
-                                       f"that belongs to no browser context: {answer.get('error')}")
+        closed = await _close_targets(
+            browser, lambda t: t.get("type") != "browser" and not t.get("browserContextId"),
+            "it belongs to no browser context")
         if closed:
             logger.info(f"Closed {closed} browser target(s) that belonged to no browser "
                         f"context (Playwright cannot connect while they are there).")
@@ -903,6 +923,66 @@ async def _close_contextless_targets(browser: Browser) -> int:
     except Exception:
         logger.debug("Could not look for targets without a browser context.", exc_info=True)
         return 0
+
+
+# How often tabs that no retrieval owns are looked for, see `_close_stray_tabs()`
+STRAY_TAB_CHECK_INTERVAL = 60
+# Seconds after which a tab that no retrieval owns is left over: longer than any
+# retrieval may take (`ARCHIVE_RETRIEVAL_TIMEOUT`), so that a retrieval whose tab could
+# not be registered is not cut off
+STRAY_TAB_AGE = 300
+# When each tab was first seen without an owner (target id -> monotonic time)
+_unowned_since: dict[str, float] = {}
+
+
+async def _close_stray_tabs(browser: Browser) -> int:
+    """Closes the tabs that no retrieval owns and that nobody needs: the popups that
+    pages open (ads, mostly), at once, and every other tab that has been without an
+    owner for `STRAY_TAB_AGE`. A tab left open keeps running its scripts and loading
+    its ads, and Playwright's driver (and this process, which mirrors it) keeps every
+    request and frame of it: one ad popup grew both by 3-4 MB a second in a test, and
+    the driver died of running out of its 4 GB after a week, with five adobe.com ad
+    popups and three left-over pages open. Blank tabs are spared (a tab just opened;
+    SeleniumBase's own first tab), and so is everything while a human solves a CAPTCHA
+    or the Cloudflare solver is at work: their tabs, popups included, are theirs."""
+    if HeadedBrowser._cloudflare_lock.locked() or _shown_human_tab() is not None:
+        return 0
+    now = time.monotonic()
+    seen = set()
+
+    def stray(target: dict) -> bool:
+        target_id, url = target.get("targetId"), target.get("url", "")
+        if (target.get("type") != "page" or target_id in _owned_tabs
+                or url in ("", "about:blank")
+                or url.startswith(("chrome://", _BACKGROUND_TAB_PREFIX))):
+            return False
+        seen.add(target_id)
+        if target.get("openerId") or target.get("openerFrameId"):
+            return True  # A popup
+        return now - _unowned_since.setdefault(target_id, now) >= STRAY_TAB_AGE
+
+    try:
+        closed = await _close_targets(browser, stray, "no retrieval owns it")
+    except Exception:
+        logger.debug("Could not look for stray browser tabs.", exc_info=True)
+        return 0
+    for target_id in set(_unowned_since) - seen:
+        del _unowned_since[target_id]
+    if closed:
+        logger.info(f"Closed {closed} browser tab(s) that no retrieval owned (popups, "
+                    f"or left over).")
+    return closed
+
+
+async def _watch_stray_tabs() -> None:
+    """While the server runs: every `STRAY_TAB_CHECK_INTERVAL`, closes the tabs that no
+    retrieval owns (see `_close_stray_tabs()`)."""
+    while True:
+        await asyncio.sleep(STRAY_TAB_CHECK_INTERVAL)
+        browser = HeadedBrowser._browser
+        if browser is not None and not browser.stopped:
+            with suppress(Exception):
+                await _close_stray_tabs(browser)
 
 
 async def _tab_answers(session: aiohttp.ClientSession, ws_url: Optional[str]) -> bool:
